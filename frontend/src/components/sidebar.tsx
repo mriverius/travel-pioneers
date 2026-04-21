@@ -1,20 +1,25 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   FileSearch,
   BookOpen,
   Settings,
+  Users as UsersIcon,
   Menu,
   X,
+  LogOut,
 } from "lucide-react";
 import { useState, type ComponentType, type SVGProps } from "react";
+import { useAuth } from "@/lib/useAuth";
 
 type NavItem = {
   label: string;
   href: string;
   icon: ComponentType<SVGProps<SVGSVGElement>>;
+  /** Only render for users matching this role. Omit = visible to everyone. */
+  adminOnly?: boolean;
 };
 
 const agentItems: NavItem[] = [
@@ -27,7 +32,18 @@ const agentItems: NavItem[] = [
 
 const configItems: NavItem[] = [
   { label: "Cómo usar el sistema", href: "/resources", icon: BookOpen },
-  { label: "Configuración del Portal", href: "/settings", icon: Settings },
+  {
+    label: "Gestión de usuarios",
+    href: "/users",
+    icon: UsersIcon,
+    adminOnly: true,
+  },
+  {
+    label: "Configuración del Portal",
+    href: "/settings",
+    icon: Settings,
+    adminOnly: true,
+  },
 ];
 
 function NavLink({
@@ -60,10 +76,37 @@ function NavLink({
   );
 }
 
+function initials(name: string | undefined, fallback: string) {
+  if (!name) return fallback;
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return fallback;
+  return parts
+    .slice(0, 2)
+    .map((p) => p[0]?.toUpperCase() ?? "")
+    .join("");
+}
+
 export default function Sidebar() {
   const pathname = usePathname();
+  const router = useRouter();
+  const { session, signOut } = useAuth();
   const [mobileOpen, setMobileOpen] = useState(false);
   const close = () => setMobileOpen(false);
+
+  const handleSignOut = () => {
+    signOut();
+    router.replace("/login");
+  };
+
+  const user = session?.user;
+  const displayName = user?.name ?? "—";
+  const displayEmail = user?.email ?? "";
+  const avatar = initials(user?.name, "TP");
+  const isAdmin = user?.role === "admin";
+
+  const visibleConfigItems = configItems.filter(
+    (item) => !item.adminOnly || isAdmin,
+  );
 
   return (
     <>
@@ -136,37 +179,56 @@ export default function Sidebar() {
             ))}
           </div>
 
-          <p className="px-3 pb-2 text-[10px] uppercase tracking-[0.15em] text-muted-foreground/80 font-semibold">
-            Configuración
-          </p>
-          <div className="space-y-1">
-            {configItems.map((item) => (
-              <NavLink
-                key={item.href}
-                item={item}
-                active={pathname === item.href}
-                onNavigate={close}
-              />
-            ))}
-          </div>
+          {visibleConfigItems.length > 0 && (
+            <>
+              <p className="px-3 pb-2 text-[10px] uppercase tracking-[0.15em] text-muted-foreground/80 font-semibold">
+                Configuración
+              </p>
+              <div className="space-y-1">
+                {visibleConfigItems.map((item) => (
+                  <NavLink
+                    key={item.href}
+                    item={item}
+                    active={pathname === item.href}
+                    onNavigate={close}
+                  />
+                ))}
+              </div>
+            </>
+          )}
         </nav>
 
         {/* Account footer */}
         <div className="border-t border-sidebar-border p-4">
-          <div className="flex items-center gap-3 mb-2">
-            <div className="w-9 h-9 rounded-full bg-primary/20 border border-primary/40 flex items-center justify-center text-primary text-xs font-semibold">
-              TP
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-full bg-primary/20 border border-primary/40 flex items-center justify-center text-primary text-xs font-semibold shrink-0">
+              {avatar}
             </div>
             <div className="flex-1 min-w-0 leading-tight">
-              <p className="text-[13px] font-semibold text-foreground truncate">
-                Travel Pioneers
+              <p
+                className="text-[13px] font-semibold text-foreground truncate"
+                title={displayName}
+              >
+                {displayName}
               </p>
-              <p className="text-[11px] text-muted-foreground truncate">
-                demo@travelpioners.com
+              <p
+                className="text-[11px] text-muted-foreground truncate"
+                title={displayEmail}
+              >
+                {displayEmail}
               </p>
             </div>
+            <button
+              type="button"
+              onClick={handleSignOut}
+              aria-label="Cerrar sesión"
+              title="Cerrar sesión"
+              className="shrink-0 w-8 h-8 rounded-md border border-border text-muted-foreground hover:text-destructive hover:border-destructive/50 hover:bg-destructive/5 transition-colors flex items-center justify-center"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+            </button>
           </div>
-          <p className="text-[10px] text-muted-foreground/70 text-center mt-2">
+          <p className="text-[10px] text-muted-foreground/70 text-center mt-3">
             Powered by Destiny Media
           </p>
         </div>

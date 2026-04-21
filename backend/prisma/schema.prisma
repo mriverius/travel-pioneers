@@ -1,0 +1,34 @@
+// Prisma schema for Travel Pioneers (Prisma 7).
+//
+// In Prisma 7 the generator must specify an `output` path (Prisma Client is
+// no longer emitted into `node_modules`), and the datasource no longer
+// holds connection strings — those are configured in `prisma.config.ts`.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  admin
+  member
+}
+
+model User {
+  id           String    @id @default(uuid()) @db.Uuid
+  name         String
+  email        String    @unique
+  passwordHash String    @map("password_hash")
+  role         Role      @default(member)
+  views        String[]  @default(["supplier-intelligence"])
+  lastLoginAt  DateTime? @map("last_login_at") @db.Timestamptz(6)
+  createdAt    DateTime  @default(now())      @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime  @updatedAt           @map("updated_at") @db.Timestamptz(6)
+
+  @@index([email])
+  @@map("users")
+}

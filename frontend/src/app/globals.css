@@ -166,6 +166,133 @@ body {
   background: linear-gradient(hsl(213 30% 5%), hsl(213 30% 3%));
 }
 
+/* --------------------------------------------------------------------------
+   Emerald / primary gradients + premium CTA
+   -------------------------------------------------------------------------- */
+
+/* Legacy alias used by a few screens that pre-date the premium button.
+   Kept as a solid emerald gradient so the fallback still looks intentional. */
+.gradient-primary {
+  background: linear-gradient(135deg, hsl(157 95% 42%), hsl(157 95% 32%));
+}
+
+/* Premium CTA used on the auth screens and primary actions.
+   Layered gradient + inset highlight + soft outer glow, lifts on hover. */
+.btn-premium {
+  position: relative;
+  isolation: isolate;
+  background: linear-gradient(
+    180deg,
+    hsl(157 100% 48%) 0%,
+    hsl(157 95% 38%) 50%,
+    hsl(157 95% 30%) 100%
+  );
+  color: #041a12;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  box-shadow:
+    inset 0 1px 0 hsl(157 100% 80% / 0.45),
+    inset 0 -1px 0 hsl(157 100% 20% / 0.35),
+    0 10px 26px -10px hsl(157 100% 40% / 0.55),
+    0 2px 6px -2px hsl(157 100% 30% / 0.35);
+  transition:
+    transform 160ms ease,
+    box-shadow 220ms ease,
+    filter 160ms ease;
+}
+.btn-premium::after {
+  /* Glossy highlight sweep */
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(
+    180deg,
+    hsl(0 0% 100% / 0.18) 0%,
+    hsl(0 0% 100% / 0) 45%
+  );
+  pointer-events: none;
+  z-index: -1;
+}
+.btn-premium:hover:not(:disabled) {
+  filter: brightness(1.06);
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 0 hsl(157 100% 85% / 0.55),
+    inset 0 -1px 0 hsl(157 100% 20% / 0.4),
+    0 16px 36px -12px hsl(157 100% 45% / 0.65),
+    0 4px 10px -2px hsl(157 100% 30% / 0.45);
+}
+.btn-premium:active:not(:disabled) {
+  transform: translateY(0);
+  filter: brightness(0.98);
+  box-shadow:
+    inset 0 2px 4px hsl(157 100% 18% / 0.4),
+    0 4px 10px -4px hsl(157 100% 30% / 0.3);
+}
+.btn-premium:disabled {
+  cursor: not-allowed;
+  filter: grayscale(0.2) brightness(0.85);
+  opacity: 0.65;
+  box-shadow: none;
+}
+
+/* Auth card — frosted surface, subtle emerald edge glow. */
+.auth-surface {
+  position: relative;
+  background:
+    radial-gradient(
+      1200px 600px at 50% -10%,
+      hsl(157 100% 45% / 0.08) 0%,
+      transparent 60%
+    ),
+    linear-gradient(180deg, hsl(213 30% 8% / 0.7), hsl(213 30% 5% / 0.9));
+  border: 1px solid hsl(157 100% 50% / 0.14);
+  box-shadow:
+    0 30px 60px -30px rgba(0, 0, 0, 0.6),
+    0 0 0 1px hsl(0 0% 100% / 0.02) inset;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+/* Polished input used on the auth screens. */
+.field-premium {
+  background: hsl(213 25% 10% / 0.75);
+  border: 1px solid hsl(213 20% 22%);
+  transition:
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    background 150ms ease;
+}
+.field-premium:hover:not(:disabled) {
+  border-color: hsl(213 20% 30%);
+}
+.field-premium:focus,
+.field-premium:focus-visible {
+  outline: none;
+  border-color: hsl(157 100% 45%);
+  box-shadow:
+    0 0 0 4px hsl(157 100% 45% / 0.16),
+    0 2px 8px -2px hsl(157 100% 30% / 0.35);
+  background: hsl(213 25% 10% / 0.9);
+}
+
+/* Decorative blobs for the auth-screen branding column. */
+.auth-brand-panel {
+  background:
+    radial-gradient(
+      900px 500px at 20% 10%,
+      hsl(157 95% 50% / 0.35) 0%,
+      transparent 60%
+    ),
+    radial-gradient(
+      700px 400px at 80% 80%,
+      hsl(165 85% 40% / 0.28) 0%,
+      transparent 60%
+    ),
+    linear-gradient(160deg, hsl(157 70% 14%) 0%, hsl(213 35% 6%) 100%);
+}
+
 /* Active sidebar link — green glow + left indicator */
 .active-glow {
   position: relative;

@@ -1,6 +1,7 @@
 import { Building, Bell, Globe, Shield, Upload } from "lucide-react";
 import { Select } from "@/components/ui/select";
 import { Toggle } from "@/components/ui/toggle";
+import AdminGuard from "@/components/admin-guard";
 
 const timezones = [
   { value: "America/Mexico_City", label: "America/Mexico_City (GMT-6)" },
@@ -23,6 +24,14 @@ const dateFormats = [
 ];
 
 export default function SettingsPage() {
+  return (
+    <AdminGuard>
+      <SettingsPageContent />
+    </AdminGuard>
+  );
+}
+
+function SettingsPageContent() {
   return (
     <div className="space-y-6">
       <header>
