@@ -1,14 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   AlertCircle,
-  Check,
-  Clipboard,
+  ArrowDownAZ,
+  ArrowUpAZ,
+  ChevronLeft,
+  ChevronRight,
   Eye,
-  KeyRound,
   Pencil,
-  Plus,
   RefreshCcw,
   Search,
   Shield,
@@ -27,11 +28,7 @@ import {
 } from "@/lib/api";
 import { useAuth } from "@/lib/useAuth";
 
-type ViewId =
-  | "supplier-intelligence"
-  | "resources"
-  | "settings"
-  | "users";
+type ViewId = "supplier-intelligence" | "resources" | "users";
 
 const ROLE_OPTIONS: { value: Role; label: string }[] = [
   { value: "admin", label: "Administrador" },
@@ -60,11 +57,6 @@ const AVAILABLE_VIEWS: { id: ViewId; label: string; description: string }[] = [
     description: "Guías, documentación y preguntas frecuentes",
   },
   {
-    id: "settings",
-    label: "Configuración del Portal",
-    description: "Preferencias, empresa y seguridad",
-  },
-  {
     id: "users",
     label: "Gestión de usuarios",
     description: "Administrar usuarios, roles y permisos",
@@ -78,23 +70,10 @@ type DraftUser = {
   views: ViewId[];
 };
 
-const emptyDraft: DraftUser = {
-  name: "",
-  email: "",
-  role: "member",
-  views: ["supplier-intelligence"],
-};
-
 /** Narrow a raw backend view string onto our known view ids. */
 function toViewIds(views: string[]): ViewId[] {
   const allowed = new Set<string>(AVAILABLE_VIEWS.map((v) => v.id));
   return views.filter((v): v is ViewId => allowed.has(v));
-}
-
-interface CreatedPasswordBanner {
-  email: string;
-  name: string;
-  password: string;
 }
 
 export default function UsersPage() {
@@ -108,19 +87,18 @@ export default function UsersPage() {
 function UsersPageContent() {
   const { session } = useAuth();
   const currentUserId = session?.user.id ?? null;
-  const currentUserRole = session?.user.role ?? null;
 
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [createdPassword, setCreatedPassword] =
-    useState<CreatedPasswordBanner | null>(null);
 
   const [search, setSearch] = useState("");
   const [roleFilter, setRoleFilter] = useState<Role | "all">("all");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
   const [editing, setEditing] = useState<ManagedUser | null>(null);
-  const [creating, setCreating] = useState(false);
 
   // Initial load. State starts as { loading: true, loadError: null, users: [] },
   // so the effect doesn't need to touch state synchronously — it only writes
@@ -174,6 +152,53 @@ function UsersPageContent() {
       return matchesQuery && matchesRole;
     });
   }, [users, search, roleFilter]);
+
+  // Alphabetic sort by name. `localeCompare` with the "es" locale + `base`
+  // sensitivity gives natural ordering for Spanish names (accents and case
+  // collapse instead of sorting separately).
+  const sorted = useMemo(() => {
+    const copy = [...filtered];
+    copy.sort((a, b) =>
+      a.name.localeCompare(b.name, "es", { sensitivity: "base" }),
+    );
+    return sortDir === "asc" ? copy : copy.reverse();
+  }, [filtered, sortDir]);
+
+  const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize));
+  // Clamp the visible page so we never render an empty trailing page after
+  // a filter change shrinks the result set. We use `safePage` everywhere in
+  // render; the raw `page` state is only updated through handlers, so drift
+  // is purely transient and corrects itself on the next interaction.
+  const safePage = Math.min(page, totalPages);
+
+  const paginated = useMemo(() => {
+    const start = (safePage - 1) * pageSize;
+    return sorted.slice(start, start + pageSize);
+  }, [sorted, safePage, pageSize]);
+
+  const rangeStart = sorted.length === 0 ? 0 : (safePage - 1) * pageSize + 1;
+  const rangeEnd = Math.min(safePage * pageSize, sorted.length);
+
+  // Any filter/sort/page-size change should jump back to page 1 so users
+  // always land on the first batch of the new result set. We do this inline
+  // from each handler rather than in a useEffect to avoid the cascading
+  // render pattern the React 19 lint rule warns about.
+  const handleSearchChange = (value: string) => {
+    setSearch(value);
+    setPage(1);
+  };
+  const handleRoleFilterChange = (value: Role | "all") => {
+    setRoleFilter(value);
+    setPage(1);
+  };
+  const handleSortDirChange = (value: "asc" | "desc") => {
+    setSortDir(value);
+    setPage(1);
+  };
+  const handlePageSizeChange = (value: number) => {
+    setPageSize(value);
+    setPage(1);
+  };
 
   const stats = useMemo(() => {
     const byRole = users.reduce<Record<Role, number>>(
@@ -245,8 +270,8 @@ function UsersPageContent() {
   return (
     <div className="space-y-6">
       <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h1 className="text-[28px] font-bold tracking-tight text-foreground">
+        <div className="min-w-0 pl-12 lg:pl-0">
+          <h1 className="text-2xl sm:text-[28px] font-bold tracking-tight text-foreground">
             Gestión de usuarios
           </h1>
           <p className="text-sm text-muted-foreground mt-1.5">
@@ -254,7 +279,7 @@ function UsersPageContent() {
             el portal.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 self-stretch sm:self-auto">
           <button
             type="button"
             onClick={() => void reloadUsers()}
@@ -267,15 +292,6 @@ function UsersPageContent() {
               className={`w-4 h-4 ${loading ? "animate-spin" : ""}`}
             />
           </button>
-          <button
-            type="button"
-            onClick={() => setCreating(true)}
-            disabled={currentUserRole !== "admin"}
-            className="inline-flex items-center gap-2 h-10 px-4 rounded-md gradient-primary text-white text-[13px] font-medium hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <Plus className="w-4 h-4" />
-            Nuevo usuario
-          </button>
         </div>
       </header>
 
@@ -286,12 +302,6 @@ function UsersPageContent() {
         <BannerError
           message={actionError}
           onDismiss={() => setActionError(null)}
-        />
-      )}
-      {createdPassword && (
-        <TempPasswordBanner
-          data={createdPassword}
-          onDismiss={() => setCreatedPassword(null)}
         />
       )}
 
@@ -309,22 +319,41 @@ function UsersPageContent() {
           <input
             type="search"
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => handleSearchChange(e.target.value)}
             placeholder="Buscar por nombre o email"
             className="w-full h-10 pl-9 pr-3 rounded-md bg-input/70 border border-border text-sm outline-none focus:border-primary/60 focus:ring-2 focus:ring-ring/30 transition-colors"
           />
         </div>
-        <div className="flex items-center gap-2">
-          <span className="text-[12.5px] text-muted-foreground">Rol:</span>
-          <div className="w-44">
-            <Select
-              options={[
-                { value: "all", label: "Todos los roles" },
-                ...ROLE_OPTIONS,
-              ]}
-              value={roleFilter}
-              onChange={(e) => setRoleFilter(e.target.value as Role | "all")}
-            />
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+          <div className="flex items-center gap-2">
+            <span className="text-[12.5px] text-muted-foreground">Orden:</span>
+            <div className="w-44">
+              <Select
+                options={[
+                  { value: "asc", label: "Nombre (A → Z)" },
+                  { value: "desc", label: "Nombre (Z → A)" },
+                ]}
+                value={sortDir}
+                onChange={(e) =>
+                  handleSortDirChange(e.target.value as "asc" | "desc")
+                }
+              />
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[12.5px] text-muted-foreground">Rol:</span>
+            <div className="w-44">
+              <Select
+                options={[
+                  { value: "all", label: "Todos los roles" },
+                  ...ROLE_OPTIONS,
+                ]}
+                value={roleFilter}
+                onChange={(e) =>
+                  handleRoleFilterChange(e.target.value as Role | "all")
+                }
+              />
+            </div>
           </div>
         </div>
       </section>
@@ -336,7 +365,7 @@ function UsersPageContent() {
           <h2 className="text-[15px] font-semibold">
             Usuarios{" "}
             <span className="text-muted-foreground font-normal">
-              ({loading ? "…" : filtered.length})
+              ({loading ? "…" : sorted.length})
             </span>
           </h2>
         </header>
@@ -345,7 +374,32 @@ function UsersPageContent() {
           <table className="w-full text-sm">
             <thead className="bg-secondary/40 text-[12px] uppercase tracking-wider text-muted-foreground">
               <tr>
-                <Th>Usuario</Th>
+                <Th>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleSortDirChange(sortDir === "asc" ? "desc" : "asc")
+                    }
+                    className="inline-flex items-center gap-1.5 uppercase tracking-wider text-[12px] font-semibold hover:text-foreground transition-colors"
+                    title={
+                      sortDir === "asc"
+                        ? "Ordenar Z → A"
+                        : "Ordenar A → Z"
+                    }
+                    aria-label={
+                      sortDir === "asc"
+                        ? "Ordenar descendente"
+                        : "Ordenar ascendente"
+                    }
+                  >
+                    Usuario
+                    {sortDir === "asc" ? (
+                      <ArrowDownAZ className="w-3.5 h-3.5 text-primary" />
+                    ) : (
+                      <ArrowUpAZ className="w-3.5 h-3.5 text-primary" />
+                    )}
+                  </button>
+                </Th>
                 <Th>Rol</Th>
                 <Th>Vistas con acceso</Th>
                 <Th className="text-right pr-6">Acciones</Th>
@@ -365,7 +419,7 @@ function UsersPageContent() {
                   </td>
                 </tr>
               )}
-              {!loading && filtered.length === 0 && (
+              {!loading && sorted.length === 0 && (
                 <tr>
                   <td
                     colSpan={4}
@@ -377,7 +431,7 @@ function UsersPageContent() {
                   </td>
                 </tr>
               )}
-              {filtered.map((u) => {
+              {paginated.map((u) => {
                 const isSelf = u.id === currentUserId;
                 return (
                   <tr
@@ -468,7 +522,11 @@ function UsersPageContent() {
                           disabled={isSelf}
                           className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-destructive/40 text-destructive text-[12px] hover:bg-destructive/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                           aria-label={`Eliminar a ${u.name}`}
-                          title={isSelf ? "No puedes eliminarte a ti mismo" : undefined}
+                          title={
+                            isSelf
+                              ? "No puedes eliminarte a ti mismo"
+                              : undefined
+                          }
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -480,25 +538,26 @@ function UsersPageContent() {
             </tbody>
           </table>
         </div>
+
+        {sorted.length > 0 && (
+          <Pagination
+            rangeStart={rangeStart}
+            rangeEnd={rangeEnd}
+            total={sorted.length}
+            page={safePage}
+            totalPages={totalPages}
+            pageSize={pageSize}
+            onPageChange={setPage}
+            onPageSizeChange={handlePageSizeChange}
+          />
+        )}
       </section>
 
-      {(creating || editing) && (
+      {editing && (
         <UserDialog
           user={editing}
-          isSelf={editing?.id === currentUserId}
-          onClose={() => {
-            setCreating(false);
-            setEditing(null);
-          }}
-          onCreate={async (draft) => {
-            const result = await api.users.create(draft);
-            setUsers((prev) => [result.user, ...prev]);
-            setCreatedPassword({
-              email: result.user.email,
-              name: result.user.name,
-              password: result.tempPassword,
-            });
-          }}
+          isSelf={editing.id === currentUserId}
+          onClose={() => setEditing(null)}
           onUpdate={async (id, payload) => {
             const { user } = await api.users.update(id, payload);
             setUsers((prev) => prev.map((x) => (x.id === id ? user : x)));
@@ -566,6 +625,130 @@ function StatCard({
   );
 }
 
+function Pagination({
+  rangeStart,
+  rangeEnd,
+  total,
+  page,
+  totalPages,
+  pageSize,
+  onPageChange,
+  onPageSizeChange,
+}: {
+  rangeStart: number;
+  rangeEnd: number;
+  total: number;
+  page: number;
+  totalPages: number;
+  pageSize: number;
+  onPageChange: (page: number) => void;
+  onPageSizeChange: (size: number) => void;
+}) {
+  // Build the page-number pill list. For long result sets, collapse the
+  // middle with "…" so we never render an unbounded strip of buttons.
+  const pages = buildPageList(page, totalPages);
+
+  return (
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between px-4 sm:px-6 py-3 border-t border-border bg-secondary/20">
+      <div className="flex items-center gap-3 text-[12.5px] text-muted-foreground">
+        <span>
+          Mostrando{" "}
+          <span className="font-semibold text-foreground">
+            {rangeStart}–{rangeEnd}
+          </span>{" "}
+          de <span className="font-semibold text-foreground">{total}</span>
+        </span>
+        <span className="hidden sm:inline-block h-4 w-px bg-border" />
+        <div className="hidden sm:flex items-center gap-2">
+          <span>Por página:</span>
+          <div className="w-20">
+            <Select
+              options={[
+                { value: "10", label: "10" },
+                { value: "25", label: "25" },
+                { value: "50", label: "50" },
+              ]}
+              value={String(pageSize)}
+              onChange={(e) => onPageSizeChange(Number(e.target.value))}
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={() => onPageChange(Math.max(1, page - 1))}
+          disabled={page <= 1}
+          className="inline-flex items-center justify-center w-8 h-8 rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/60 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          aria-label="Página anterior"
+        >
+          <ChevronLeft className="w-4 h-4" />
+        </button>
+
+        {pages.map((p, i) =>
+          p === "…" ? (
+            <span
+              key={`gap-${i}`}
+              className="px-1.5 text-[12.5px] text-muted-foreground select-none"
+            >
+              …
+            </span>
+          ) : (
+            <button
+              key={p}
+              type="button"
+              onClick={() => onPageChange(p)}
+              aria-current={p === page ? "page" : undefined}
+              className={`min-w-[32px] h-8 px-2 rounded-md text-[12.5px] font-medium border transition-colors ${
+                p === page
+                  ? "bg-primary/15 border-primary/40 text-primary"
+                  : "border-border text-muted-foreground hover:text-foreground hover:bg-secondary/60"
+              }`}
+            >
+              {p}
+            </button>
+          ),
+        )}
+
+        <button
+          type="button"
+          onClick={() => onPageChange(Math.min(totalPages, page + 1))}
+          disabled={page >= totalPages}
+          className="inline-flex items-center justify-center w-8 h-8 rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/60 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          aria-label="Página siguiente"
+        >
+          <ChevronRight className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Compact page number strip. Always shows first / last page, the current
+ * page, and its immediate neighbours. Gaps are filled with "…" sentinels.
+ *
+ * Examples (current page in parens):
+ *   totalPages=5, page=(3) → [1, 2, (3), 4, 5]
+ *   totalPages=10, page=(1) → [(1), 2, 3, "…", 10]
+ *   totalPages=10, page=(5) → [1, "…", 4, (5), 6, "…", 10]
+ *   totalPages=10, page=(10) → [1, "…", 8, 9, (10)]
+ */
+function buildPageList(page: number, totalPages: number): (number | "…")[] {
+  if (totalPages <= 7) {
+    return Array.from({ length: totalPages }, (_, i) => i + 1);
+  }
+  const out: (number | "…")[] = [1];
+  const start = Math.max(2, page - 1);
+  const end = Math.min(totalPages - 1, page + 1);
+  if (start > 2) out.push("…");
+  for (let i = start; i <= end; i++) out.push(i);
+  if (end < totalPages - 1) out.push("…");
+  out.push(totalPages);
+  return out;
+}
+
 function BannerError({
   message,
   onRetry,
@@ -605,104 +788,28 @@ function BannerError({
   );
 }
 
-function TempPasswordBanner({
-  data,
-  onDismiss,
-}: {
-  data: CreatedPasswordBanner;
-  onDismiss: () => void;
-}) {
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(data.password);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // Clipboard API can fail (permissions, insecure origin). Leave UI as-is.
-    }
-  };
-  return (
-    <div className="rounded-xl border border-primary/40 bg-primary/[0.08] px-4 py-4">
-      <div className="flex items-start gap-3">
-        <div className="w-9 h-9 rounded-full bg-primary/15 border border-primary/30 flex items-center justify-center shrink-0">
-          <KeyRound className="w-4 h-4 text-primary" />
-        </div>
-        <div className="flex-1 min-w-0">
-          <p className="text-[13.5px] font-semibold text-foreground">
-            Usuario creado: {data.name}
-          </p>
-          <p className="text-[12.5px] text-muted-foreground mt-0.5">
-            Comparte esta contraseña temporal con <strong>{data.email}</strong>{" "}
-            — no la volveremos a mostrar. Se recomienda cambiarla tras el
-            primer ingreso.
-          </p>
-          <div className="mt-3 flex items-center gap-2">
-            <code className="flex-1 font-mono text-[13px] bg-background/60 border border-border rounded-md px-3 py-2 select-all">
-              {data.password}
-            </code>
-            <button
-              type="button"
-              onClick={() => void copy()}
-              className="inline-flex items-center gap-1.5 px-3 h-9 rounded-md border border-primary/40 text-primary text-[12px] font-medium hover:bg-primary/10 transition-colors"
-            >
-              {copied ? (
-                <>
-                  <Check className="w-3.5 h-3.5" />
-                  Copiado
-                </>
-              ) : (
-                <>
-                  <Clipboard className="w-3.5 h-3.5" />
-                  Copiar
-                </>
-              )}
-            </button>
-          </div>
-        </div>
-        <button
-          type="button"
-          onClick={onDismiss}
-          aria-label="Descartar"
-          className="text-muted-foreground hover:text-foreground"
-        >
-          <X className="w-4 h-4" />
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function UserDialog({
   user,
   isSelf,
   onClose,
-  onCreate,
   onUpdate,
 }: {
-  user: ManagedUser | null;
+  user: ManagedUser;
   isSelf: boolean;
   onClose: () => void;
-  onCreate: (draft: DraftUser) => Promise<void>;
   onUpdate: (id: string, payload: Partial<DraftUser>) => Promise<void>;
 }) {
-  const [draft, setDraft] = useState<DraftUser>(
-    user
-      ? {
-          name: user.name,
-          email: user.email,
-          role: user.role,
-          views: toViewIds(user.views),
-        }
-      : emptyDraft,
-  );
+  const [draft, setDraft] = useState<DraftUser>({
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    views: toViewIds(user.views),
+  });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<
     Partial<Record<"name" | "email", string>>
   >({});
-
-  const isEdit = Boolean(user);
 
   const update = <K extends keyof DraftUser>(key: K, value: DraftUser[K]) =>
     setDraft((prev) => ({ ...prev, [key]: value }));
@@ -725,24 +832,20 @@ function UserDialog({
     }
     setSubmitting(true);
     try {
-      if (user) {
-        // Only send changed fields to avoid unnecessary writes — backend
-        // accepts partial PATCH anyway.
-        const payload: Partial<DraftUser> = {};
-        if (draft.name !== user.name) payload.name = draft.name;
-        if (!isSelf && draft.role !== user.role) payload.role = draft.role;
-        const sameViews =
-          draft.views.length === user.views.length &&
-          draft.views.every((v) => user.views.includes(v));
-        if (!sameViews) payload.views = draft.views;
-        if (Object.keys(payload).length === 0) {
-          onClose();
-          return;
-        }
-        await onUpdate(user.id, payload);
-      } else {
-        await onCreate(draft);
+      // Only send changed fields to avoid unnecessary writes — backend
+      // accepts partial PATCH anyway.
+      const payload: Partial<DraftUser> = {};
+      if (draft.name !== user.name) payload.name = draft.name;
+      if (!isSelf && draft.role !== user.role) payload.role = draft.role;
+      const sameViews =
+        draft.views.length === user.views.length &&
+        draft.views.every((v) => user.views.includes(v));
+      if (!sameViews) payload.views = draft.views;
+      if (Object.keys(payload).length === 0) {
+        onClose();
+        return;
       }
+      await onUpdate(user.id, payload);
       onClose();
     } catch (err) {
       if (err instanceof ApiError) {
@@ -760,149 +863,168 @@ function UserDialog({
     }
   };
 
-  return (
+  // Lock body scroll while the modal is open, and close on Escape. The
+  // modal itself is rendered through a portal attached to <body> so it
+  // escapes any transformed ancestor (e.g. the `animate-fade-up` wrapper in
+  // the portal layout) — without that, `fixed inset-0` is positioned
+  // relative to the transformed ancestor instead of the viewport, which
+  // causes the modal to appear off-center.
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = prev;
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+
+  // `createPortal` must not run during SSR — guard against a missing window.
+  if (typeof window === "undefined") return null;
+
+  const modal = (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      className="fixed inset-0 z-[100] overflow-y-auto overscroll-contain bg-black/60 p-4 sm:p-6"
       onClick={onClose}
+      role="dialog"
+      aria-modal="true"
     >
-      <form
-        onSubmit={handleSubmit}
-        onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-lg bg-card border border-border rounded-xl shadow-2xl animate-fade-in"
-      >
-        <header className="flex items-center justify-between px-6 py-4 border-b border-border">
-          <h3 className="text-[15px] font-semibold">
-            {isEdit ? "Editar usuario" : "Nuevo usuario"}
-          </h3>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-muted-foreground hover:text-foreground transition-colors"
-            aria-label="Cerrar"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </header>
-
-        <div className="p-6 space-y-4">
-          {error && (
-            <div
-              role="alert"
-              className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2.5 text-[12.5px] text-destructive"
+      {/* Flex wrapper handles centering; min-h-full + my-auto keeps the modal
+          centered when it fits, and lets it scroll when it doesn't. */}
+      <div className="flex min-h-full items-center justify-center">
+        <form
+          onSubmit={handleSubmit}
+          onClick={(e) => e.stopPropagation()}
+          className="w-full max-w-lg bg-card border border-border rounded-xl shadow-2xl animate-fade-in my-auto"
+        >
+          <header className="flex items-center justify-between px-4 sm:px-6 py-4 border-b border-border">
+            <h3 className="text-[15px] font-semibold">Editar usuario</h3>
+            <button
+              type="button"
+              onClick={onClose}
+              className="text-muted-foreground hover:text-foreground transition-colors"
+              aria-label="Cerrar"
             >
-              <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
-              <span>{error}</span>
-            </div>
-          )}
+              <X className="w-4 h-4" />
+            </button>
+          </header>
 
-          <Field label="Nombre completo" error={fieldErrors.name}>
-            <input
-              type="text"
-              value={draft.name}
-              onChange={(e) => update("name", e.target.value)}
-              required
-              minLength={2}
-              maxLength={120}
-              className="w-full h-10 px-3 rounded-md bg-input/70 border border-border text-sm outline-none focus:border-primary/60 focus:ring-2 focus:ring-ring/30 transition-colors"
-            />
-          </Field>
-          <Field label="Correo electrónico" error={fieldErrors.email}>
-            <input
-              type="email"
-              value={draft.email}
-              onChange={(e) => update("email", e.target.value)}
-              required
-              disabled={isEdit}
-              className="w-full h-10 px-3 rounded-md bg-input/70 border border-border text-sm outline-none focus:border-primary/60 focus:ring-2 focus:ring-ring/30 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
-            />
-            {isEdit && (
+          <div className="p-4 sm:p-6 space-y-4">
+            {error && (
+              <div
+                role="alert"
+                className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2.5 text-[12.5px] text-destructive"
+              >
+                <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+                <span>{error}</span>
+              </div>
+            )}
+
+            <Field label="Nombre completo" error={fieldErrors.name}>
+              <input
+                type="text"
+                value={draft.name}
+                onChange={(e) => update("name", e.target.value)}
+                required
+                minLength={2}
+                maxLength={120}
+                className="w-full h-10 px-3 rounded-md bg-input/70 border border-border text-sm outline-none focus:border-primary/60 focus:ring-2 focus:ring-ring/30 transition-colors"
+              />
+            </Field>
+            <Field label="Correo electrónico" error={fieldErrors.email}>
+              <input
+                type="email"
+                value={draft.email}
+                onChange={(e) => update("email", e.target.value)}
+                required
+                disabled
+                className="w-full h-10 px-3 rounded-md bg-input/70 border border-border text-sm outline-none focus:border-primary/60 focus:ring-2 focus:ring-ring/30 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+              />
               <p className="mt-1 text-[11px] text-muted-foreground">
                 El correo no puede modificarse después de creado el usuario.
               </p>
-            )}
-          </Field>
+            </Field>
 
-          <Field label="Rol">
-            <Select
-              options={ROLE_OPTIONS}
-              value={draft.role}
-              disabled={isSelf}
-              onChange={(e) => update("role", e.target.value as Role)}
-            />
-            {isSelf && (
-              <p className="mt-1 text-[11px] text-muted-foreground">
-                No puedes cambiar tu propio rol desde esta pantalla.
+            <Field label="Rol">
+              <Select
+                options={ROLE_OPTIONS}
+                value={draft.role}
+                disabled={isSelf}
+                onChange={(e) => update("role", e.target.value as Role)}
+              />
+              {isSelf && (
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  No puedes cambiar tu propio rol desde esta pantalla.
+                </p>
+              )}
+            </Field>
+
+            <div>
+              <p className="text-[12.5px] font-medium text-muted-foreground mb-2">
+                Vistas con acceso
               </p>
-            )}
-          </Field>
-
-          <div>
-            <p className="text-[12.5px] font-medium text-muted-foreground mb-2">
-              Vistas con acceso
-            </p>
-            <div className="space-y-2">
-              {AVAILABLE_VIEWS.map((v) => {
-                const checked = draft.views.includes(v.id);
-                return (
-                  <label
-                    key={v.id}
-                    className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
-                      checked
-                        ? "bg-primary/10 border-primary/40"
-                        : "bg-secondary/40 border-border hover:bg-secondary/60"
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => toggleView(v.id)}
-                      className="mt-0.5 w-4 h-4 rounded border-border bg-secondary accent-primary"
-                    />
-                    <div className="min-w-0">
-                      <p className="text-[13px] font-semibold text-foreground">
-                        {v.label}
-                      </p>
-                      <p className="text-[12px] text-muted-foreground mt-0.5">
-                        {v.description}
-                      </p>
-                    </div>
-                  </label>
-                );
-              })}
+              <div className="space-y-2">
+                {AVAILABLE_VIEWS.map((v) => {
+                  const checked = draft.views.includes(v.id);
+                  return (
+                    <label
+                      key={v.id}
+                      className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+                        checked
+                          ? "bg-primary/10 border-primary/40"
+                          : "bg-secondary/40 border-border hover:bg-secondary/60"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleView(v.id)}
+                        className="mt-0.5 w-4 h-4 rounded border-border bg-secondary accent-primary"
+                      />
+                      <div className="min-w-0">
+                        <p className="text-[13px] font-semibold text-foreground">
+                          {v.label}
+                        </p>
+                        <p className="text-[12px] text-muted-foreground mt-0.5">
+                          {v.description}
+                        </p>
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
             </div>
           </div>
 
-          {!isEdit && (
-            <p className="text-[12px] text-muted-foreground bg-secondary/40 border border-border rounded-md px-3 py-2">
-              Se generará una contraseña temporal que se mostrará una sola vez
-              después de crear el usuario.
-            </p>
-          )}
-        </div>
-
-        <footer className="flex items-center justify-end gap-2 px-6 py-4 border-t border-border">
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={submitting}
-            className="px-3.5 py-2 rounded-md border border-border text-[13px] hover:bg-secondary/60 transition-colors disabled:opacity-50"
-          >
-            Cancelar
-          </button>
-          <button
-            type="submit"
-            disabled={submitting}
-            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-md gradient-primary text-white text-[13px] font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
-          >
-            {submitting && (
-              <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-            )}
-            {isEdit ? "Guardar cambios" : "Crear usuario"}
-          </button>
-        </footer>
-      </form>
+          <footer className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center sm:justify-end gap-2 px-4 sm:px-6 py-4 border-t border-border">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={submitting}
+              className="px-3.5 py-2 rounded-md border border-border text-[13px] hover:bg-secondary/60 transition-colors disabled:opacity-50"
+            >
+              Cancelar
+            </button>
+            <button
+              type="submit"
+              disabled={submitting}
+              className="inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-md gradient-primary text-white text-[13px] font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
+            >
+              {submitting && (
+                <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+              )}
+              Guardar cambios
+            </button>
+          </footer>
+        </form>
+      </div>
     </div>
   );
+
+  return createPortal(modal, document.body);
 }
 
 function applyFieldErrors(

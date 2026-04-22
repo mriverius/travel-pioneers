@@ -17,7 +17,6 @@ import {
 export const ALLOWED_VIEWS = [
   "supplier-intelligence",
   "resources",
-  "settings",
   "users",
 ] as const;
 export type ViewId = (typeof ALLOWED_VIEWS)[number];

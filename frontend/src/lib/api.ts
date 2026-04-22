@@ -12,7 +12,8 @@
  */
 
 const API_URL =
-  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ?? "http://localhost:4000";
+  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ??
+  "http://localhost:4000";
 
 export interface ValidationDetail {
   field: string;
@@ -23,7 +24,11 @@ export class ApiError extends Error {
   readonly status: number;
   readonly details: ValidationDetail[];
 
-  constructor(status: number, message: string, details: ValidationDetail[] = []) {
+  constructor(
+    status: number,
+    message: string,
+    details: ValidationDetail[] = [],
+  ) {
     super(message);
     this.name = "ApiError";
     this.status = status;
@@ -197,6 +202,17 @@ export const api = {
       method: "POST",
       body: payload,
     });
+  },
+  /**
+   * Availability pre-check used by the register form to flag taken emails
+   * on blur — doesn't replace the server-side 409 handling at submit time.
+   */
+  checkEmailAvailability(email: string) {
+    const qs = new URLSearchParams({ email });
+    return request<{ email: string; available: boolean }>(
+      `/auth/check-email?${qs.toString()}`,
+      { method: "GET" },
+    );
   },
   users: {
     list() {

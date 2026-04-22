@@ -1,9 +1,9 @@
 import { Router } from "express";
-import { body } from "express-validator";
+import { body, query } from "express-validator";
 import rateLimit from "express-rate-limit";
 import validate from "../middleware/validate.js";
 import asyncHandler from "../utils/asyncHandler.js";
-import { login, register } from "../controllers/authController.js";
+import { checkEmail, login, register } from "../controllers/authController.js";
 
 const router = Router();
 
@@ -58,6 +58,31 @@ const loginValidators = [
   body("password").isString().notEmpty().withMessage("Password is required"),
 ];
 
+const checkEmailValidators = [
+  query("email")
+    .trim()
+    .isEmail()
+    .withMessage("A valid email is required")
+    .normalizeEmail(),
+];
+
+/**
+ * Separate, tighter limiter for the availability check — this endpoint is
+ * called on every blur of the register form's email field, so we want to
+ * allow bursts while still blunting enumeration attempts.
+ */
+const checkEmailLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: {
+      message: "Too many requests. Please slow down.",
+    },
+  },
+});
+
 router.post(
   "/register",
   authLimiter,
@@ -70,6 +95,13 @@ router.post(
   authLimiter,
   validate(loginValidators),
   asyncHandler(login),
+);
+
+router.get(
+  "/check-email",
+  checkEmailLimiter,
+  validate(checkEmailValidators),
+  asyncHandler(checkEmail),
 );
 
 export default router;

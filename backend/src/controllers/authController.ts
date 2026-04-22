@@ -61,6 +61,36 @@ function toPublicUser(row: UserRow): PublicUser {
 }
 
 /**
+ * GET /auth/check-email?email=<address>
+ * Lightweight availability check used by the registration form so users get
+ * immediate feedback instead of waiting for submit-time 409. Returns the
+ * normalized email alongside an `available` flag; never reveals anything
+ * beyond that.
+ *
+ * NOTE: This endpoint leaks whether a given address is registered, which is
+ * the same signal the `register` endpoint already leaks via 409. It is
+ * rate-limited at the router level for the same reason.
+ */
+export async function checkEmail(
+  req: Request<unknown, unknown, unknown, { email?: string }>,
+  res: Response,
+): Promise<void> {
+  const raw = (req.query.email ?? "").toString();
+  const normalizedEmail = raw.trim().toLowerCase();
+
+  if (!normalizedEmail) {
+    throw ApiError.badRequest("Email is required");
+  }
+
+  const existing = await prisma.user.findUnique({
+    where: { email: normalizedEmail },
+    select: { id: true },
+  });
+
+  res.json({ email: normalizedEmail, available: existing === null });
+}
+
+/**
  * POST /auth/register
  * Creates a new user with a bcrypt-hashed password.
  */

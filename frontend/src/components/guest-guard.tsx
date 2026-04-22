@@ -18,7 +18,7 @@ export default function GuestGuard({
 
   useEffect(() => {
     if (ready && session) {
-      router.replace("/module/supplier-intelligence");
+      router.replace("/agent/supplier-intelligence");
     }
   }, [ready, session, router]);
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -13,12 +13,7 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
-import {
-  ApiError,
-  api,
-  saveSession,
-  type ValidationDetail,
-} from "@/lib/api";
+import { ApiError, api, saveSession, type ValidationDetail } from "@/lib/api";
 import {
   PASSWORD_RULES,
   evaluatePassword,
@@ -28,10 +23,15 @@ import GuestGuard from "@/components/guest-guard";
 
 type FieldErrors = Partial<Record<"name" | "email" | "password", string>>;
 
+/** Lightweight email shape check — the backend does the authoritative validation. */
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 export default function RegisterPage() {
   const router = useRouter();
   const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [leaving, setLeaving] = useState(false);
   const [form, setForm] = useState({
     name: "",
     email: "",
@@ -40,6 +40,13 @@ export default function RegisterPage() {
   });
   const [formError, setFormError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
+  const [checkingEmail, setCheckingEmail] = useState(false);
+
+  // Remember which emails we've already flagged as taken — lets us keep the
+  // error visible after the user edits away and back without re-hitting the
+  // backend. The ref avoids triggering renders when it grows.
+  const takenEmailsRef = useRef<Set<string>>(new Set());
+  const pendingCheckRef = useRef<AbortController | null>(null);
 
   const update = (field: keyof typeof form, value: string) => {
     setForm((prev) => ({ ...prev, [field]: value }));
@@ -53,20 +60,81 @@ export default function RegisterPage() {
     if (formError) setFormError(null);
   };
 
+  // Re-surface the "email taken" error automatically if the user types back
+  // an address we already know is taken, even if they didn't blur first.
+  useEffect(() => {
+    const normalized = form.email.trim().toLowerCase();
+    if (!normalized) return;
+    if (
+      takenEmailsRef.current.has(normalized) &&
+      fieldErrors.email !== "Ya existe una cuenta con ese correo"
+    ) {
+      setFieldErrors((prev) => ({
+        ...prev,
+        email: "Ya existe una cuenta con ese correo",
+      }));
+    }
+  }, [form.email, fieldErrors.email]);
+
+  // Cancel any in-flight availability check when the component unmounts so
+  // we don't try to setState after teardown.
+  useEffect(() => {
+    return () => {
+      pendingCheckRef.current?.abort();
+    };
+  }, []);
+
+  const handleEmailBlur = async () => {
+    const normalized = form.email.trim().toLowerCase();
+    if (!normalized || !EMAIL_RE.test(normalized)) return;
+    if (fieldErrors.email) return; // don't override other errors
+    if (takenEmailsRef.current.has(normalized)) {
+      setFieldErrors((prev) => ({
+        ...prev,
+        email: "Ya existe una cuenta con ese correo",
+      }));
+      return;
+    }
+
+    // Cancel the previous check if the user blurs twice in a row.
+    pendingCheckRef.current?.abort();
+    const controller = new AbortController();
+    pendingCheckRef.current = controller;
+
+    setCheckingEmail(true);
+    try {
+      const { available } = await api.checkEmailAvailability(normalized);
+      if (controller.signal.aborted) return;
+      if (!available) {
+        takenEmailsRef.current.add(normalized);
+        setFieldErrors((prev) => ({
+          ...prev,
+          email: "Ya existe una cuenta con ese correo",
+        }));
+      }
+    } catch {
+      // Network/rate-limit failures shouldn't block the user — the submit
+      // handler still enforces the unique check on the server.
+    } finally {
+      if (!controller.signal.aborted) setCheckingEmail(false);
+    }
+  };
+
   const passwordChecks = useMemo(
     () => evaluatePassword(form.password),
     [form.password],
   );
   const passwordsMatch =
-    form.confirmPassword.length === 0 ||
-    form.password === form.confirmPassword;
+    form.confirmPassword.length === 0 || form.password === form.confirmPassword;
   const passwordValid = isPasswordValid(form.password);
   const canSubmit =
     form.name.trim().length >= 2 &&
     form.email.trim().length > 0 &&
     passwordValid &&
     form.password === form.confirmPassword &&
-    !loading;
+    !loading &&
+    !checkingEmail &&
+    fieldErrors.email !== "Ya existe una cuenta con ese correo";
 
   const applyBackendDetails = (details: ValidationDetail[]) => {
     if (details.length === 0) return;
@@ -104,8 +172,14 @@ export default function RegisterPage() {
         email: form.email.trim().toLowerCase(),
         password: form.password,
       });
+      // Fade the auth card out BEFORE writing the session — otherwise
+      // `saveSession` fires SESSION_CHANGED_EVENT, GuestGuard re-renders,
+      // and the form is replaced by GuestGuard's spinner before our
+      // animation can even start.
+      setLeaving(true);
+      await new Promise((resolve) => setTimeout(resolve, 380));
       saveSession(result);
-      router.replace("/module/supplier-intelligence");
+      router.replace("/agent/supplier-intelligence");
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.status === 409) {
@@ -130,7 +204,17 @@ export default function RegisterPage() {
 
   return (
     <GuestGuard>
-      <div className="min-h-screen flex bg-background">
+      <div
+        className="min-h-screen flex bg-background"
+        style={{
+          transition:
+            "opacity 380ms cubic-bezier(0.4, 0, 0.2, 1), transform 380ms cubic-bezier(0.4, 0, 0.2, 1), filter 380ms cubic-bezier(0.4, 0, 0.2, 1)",
+          opacity: leaving ? 0 : 1,
+          transform: leaving ? "translateY(-6px)" : "translateY(0)",
+          filter: leaving ? "blur(4px)" : "blur(0)",
+          pointerEvents: leaving ? "none" : "auto",
+        }}
+      >
         {/* Left panel - branding */}
         <div className="hidden lg:flex lg:w-1/2 relative auth-brand-panel items-center justify-center p-12 overflow-hidden">
           <div className="absolute inset-0 bg-black/30" />
@@ -182,7 +266,7 @@ export default function RegisterPage() {
 
         {/* Right panel - form */}
         <div className="flex-1 flex items-center justify-center p-6 sm:p-10 bg-background">
-          <div className="w-full max-w-[440px] auth-surface rounded-2xl px-7 py-8 sm:px-9 sm:py-9 animate-fade-up">
+          <div className="w-full max-w-[440px] auth-surface rounded-2xl px-7 py-8 sm:px-9 sm:py-9 animate-auth-enter">
             <div className="lg:hidden flex items-center gap-3 mb-7">
               <div className="w-10 h-10 rounded-xl gradient-primary flex items-center justify-center shadow-[0_6px_20px_-6px_hsl(157_100%_45%/0.6)]">
                 <Sparkles className="w-5 h-5 text-[#04150f]" />
@@ -242,16 +326,25 @@ export default function RegisterPage() {
                 <label className="block text-[12.5px] font-medium text-foreground/90 mb-1.5">
                   Correo Electrónico
                 </label>
-                <input
-                  type="email"
-                  value={form.email}
-                  onChange={(e) => update("email", e.target.value)}
-                  placeholder="tu@empresa.com"
-                  required
-                  autoComplete="email"
-                  aria-invalid={Boolean(fieldErrors.email)}
-                  className="field-premium w-full h-11 px-4 rounded-lg text-[14px] text-foreground placeholder:text-muted-foreground"
-                />
+                <div className="relative">
+                  <input
+                    type="email"
+                    value={form.email}
+                    onChange={(e) => update("email", e.target.value)}
+                    onBlur={() => void handleEmailBlur()}
+                    placeholder="tu@empresa.com"
+                    required
+                    autoComplete="email"
+                    aria-invalid={Boolean(fieldErrors.email)}
+                    className="field-premium w-full h-11 px-4 pr-10 rounded-lg text-[14px] text-foreground placeholder:text-muted-foreground"
+                  />
+                  {checkingEmail && (
+                    <span
+                      aria-label="Verificando disponibilidad del correo"
+                      className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 border-2 border-muted-foreground/40 border-t-emerald-400 rounded-full animate-spin"
+                    />
+                  )}
+                </div>
                 {fieldErrors.email && (
                   <p className="mt-1.5 text-xs text-destructive">
                     {fieldErrors.email}
@@ -327,46 +420,45 @@ export default function RegisterPage() {
                 <label className="block text-[12.5px] font-medium text-foreground/90 mb-1.5">
                   Confirmar Contraseña
                 </label>
-                <input
-                  type="password"
-                  value={form.confirmPassword}
-                  onChange={(e) => update("confirmPassword", e.target.value)}
-                  placeholder="••••••••"
-                  required
-                  minLength={8}
-                  maxLength={128}
-                  autoComplete="new-password"
-                  className="field-premium w-full h-11 px-4 rounded-lg text-[14px] text-foreground placeholder:text-muted-foreground"
-                />
+                <div className="relative">
+                  <input
+                    type={showConfirmPassword ? "text" : "password"}
+                    value={form.confirmPassword}
+                    onChange={(e) => update("confirmPassword", e.target.value)}
+                    onCopy={(e) => e.preventDefault()}
+                    onCut={(e) => e.preventDefault()}
+                    onPaste={(e) => e.preventDefault()}
+                    onContextMenu={(e) => e.preventDefault()}
+                    onDrop={(e) => e.preventDefault()}
+                    placeholder="••••••••"
+                    required
+                    minLength={8}
+                    maxLength={128}
+                    autoComplete="new-password"
+                    className="field-premium w-full h-11 px-4 pr-11 rounded-lg text-[14px] text-foreground placeholder:text-muted-foreground"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                    aria-label={
+                      showConfirmPassword
+                        ? "Ocultar contraseña"
+                        : "Mostrar contraseña"
+                    }
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    {showConfirmPassword ? (
+                      <EyeOff className="w-4 h-4" />
+                    ) : (
+                      <Eye className="w-4 h-4" />
+                    )}
+                  </button>
+                </div>
                 {!passwordsMatch && (
                   <p className="mt-1.5 text-xs text-destructive">
                     Las contraseñas no coinciden
                   </p>
                 )}
-              </div>
-
-              <div className="flex items-start gap-2 pt-1">
-                <input
-                  type="checkbox"
-                  required
-                  className="mt-1 w-4 h-4 rounded border-border bg-secondary accent-emerald-500"
-                />
-                <span className="text-[13px] text-muted-foreground">
-                  Acepto los{" "}
-                  <button
-                    type="button"
-                    className="text-emerald-400 hover:text-emerald-300 transition-colors font-medium"
-                  >
-                    Términos y Condiciones
-                  </button>{" "}
-                  y la{" "}
-                  <button
-                    type="button"
-                    className="text-emerald-400 hover:text-emerald-300 transition-colors font-medium"
-                  >
-                    Política de Privacidad
-                  </button>
-                </span>
               </div>
 
               <button

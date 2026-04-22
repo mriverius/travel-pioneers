@@ -374,3 +374,76 @@ body {
 .animate-fade-up {
   animation: fade-up 0.45s ease-out both;
 }
+
+/* --------------------------------------------------------------------------
+   Premium transitions — auth card enter/exit + portal page transitions.
+   We use a custom cubic-bezier (a gentle spring-ish ease-out) so the motion
+   feels intentional rather than linear. `animation-fill-mode: both` keeps
+   the final frame applied after the animation ends.
+   -------------------------------------------------------------------------- */
+
+@keyframes auth-enter {
+  0% {
+    opacity: 0;
+    transform: translateY(18px) scale(0.985);
+    filter: blur(6px);
+  }
+  60% {
+    filter: blur(0);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+.animate-auth-enter {
+  animation: auth-enter 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes auth-exit {
+  0% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.98);
+    filter: blur(6px);
+  }
+}
+.animate-auth-exit {
+  animation: auth-exit 0.38s cubic-bezier(0.4, 0, 0.2, 1) both;
+  pointer-events: none;
+}
+
+@keyframes page-enter {
+  0% {
+    opacity: 0;
+    transform: translateY(16px) scale(0.992);
+  }
+  60% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.animate-page-enter {
+  animation: page-enter 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform, opacity;
+}
+
+/* Honor reduced-motion preferences — kill transforms/blur so users with
+   vestibular sensitivities don't get animated. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-auth-enter,
+  .animate-auth-exit,
+  .animate-page-enter,
+  .animate-fade-up,
+  .animate-chat-in {
+    animation: none !important;
+  }
+}

@@ -34,7 +34,7 @@ export default function AdminGuard({
       return;
     }
     if (!isAdmin) {
-      router.replace("/module/supplier-intelligence");
+      router.replace("/agent/supplier-intelligence");
     }
   }, [ready, session, isAdmin, router]);
 

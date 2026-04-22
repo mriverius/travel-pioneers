@@ -81,11 +81,27 @@ function getServerSnapshot(): Session | null {
 }
 
 /**
+ * Dummy subscribe used by the `ready` store below. We never actually notify
+ * because the value `true` → `true` never changes once we're on the client.
+ */
+function noopSubscribe(): () => void {
+  return () => {};
+}
+
+/**
  * React-friendly view of the persisted auth session.
  *
  * Uses `useSyncExternalStore` so the render always reflects the current
  * localStorage value and updates across tabs without needing a ref or an
  * effect to "pull" state into React.
+ *
+ * `ready` must stay `false` not only on the server but also during the
+ * initial *client* hydration render — otherwise guards like AuthGuard will
+ * see `ready=true, session=null` for one tick (because useSyncExternalStore
+ * still returns the server snapshot during hydration to match SSR HTML),
+ * fire their redirect effect, and bounce a signed-in user off the page
+ * they just refreshed. Piggy-backing on `useSyncExternalStore` gives us the
+ * same "true only after hydration" semantic that React uses internally.
  */
 export function useAuth(): AuthState {
   const session = useSyncExternalStore(
@@ -94,9 +110,11 @@ export function useAuth(): AuthState {
     getServerSnapshot,
   );
 
-  // Until React has hydrated we can't trust `session` — return `ready: false`
-  // so callers render placeholder UI instead of the signed-out view.
-  const ready = typeof window !== "undefined";
+  const ready = useSyncExternalStore(
+    noopSubscribe,
+    () => true,
+    () => false,
+  );
 
   const signOut = useCallback(() => {
     clearSession();

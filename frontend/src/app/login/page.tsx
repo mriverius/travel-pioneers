@@ -20,6 +20,7 @@ export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  const [leaving, setLeaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -37,8 +38,14 @@ export default function LoginPage() {
         email: email.trim().toLowerCase(),
         password,
       });
+      // Play the fade-out BEFORE writing the session. Otherwise
+      // `saveSession` dispatches SESSION_CHANGED_EVENT, `useAuth` re-renders,
+      // and `GuestGuard` immediately swaps this form for its spinner —
+      // which would yank the login card out from under the animation.
+      setLeaving(true);
+      await new Promise((resolve) => setTimeout(resolve, 380));
       saveSession(result);
-      router.replace("/module/supplier-intelligence");
+      router.replace("/agent/supplier-intelligence");
     } catch (err) {
       if (err instanceof ApiError) {
         // Backend returns a generic "Invalid email or password" on 401 —
@@ -58,7 +65,17 @@ export default function LoginPage() {
 
   return (
     <GuestGuard>
-      <div className="min-h-screen flex bg-background">
+      <div
+        className="min-h-screen flex bg-background"
+        style={{
+          transition:
+            "opacity 380ms cubic-bezier(0.4, 0, 0.2, 1), transform 380ms cubic-bezier(0.4, 0, 0.2, 1), filter 380ms cubic-bezier(0.4, 0, 0.2, 1)",
+          opacity: leaving ? 0 : 1,
+          transform: leaving ? "translateY(-6px)" : "translateY(0)",
+          filter: leaving ? "blur(4px)" : "blur(0)",
+          pointerEvents: leaving ? "none" : "auto",
+        }}
+      >
         {/* Left panel - branding */}
         <div className="hidden lg:flex lg:w-1/2 relative auth-brand-panel items-center justify-center p-12 overflow-hidden">
           <div className="absolute inset-0 bg-black/30" />
@@ -111,7 +128,7 @@ export default function LoginPage() {
 
         {/* Right panel - form */}
         <div className="flex-1 flex items-center justify-center p-6 sm:p-10 bg-background">
-          <div className="w-full max-w-[420px] auth-surface rounded-2xl px-7 py-9 sm:px-9 sm:py-10 animate-fade-up">
+          <div className="w-full max-w-[420px] auth-surface rounded-2xl px-7 py-9 sm:px-9 sm:py-10 animate-auth-enter">
             <div className="lg:hidden flex items-center gap-3 mb-8">
               <div className="w-10 h-10 rounded-xl gradient-primary flex items-center justify-center shadow-[0_6px_20px_-6px_hsl(157_100%_45%/0.6)]">
                 <Sparkles className="w-5 h-5 text-[#04150f]" />
@@ -199,14 +216,7 @@ export default function LoginPage() {
                 </div>
               </div>
 
-              <div className="flex items-center justify-between text-[13px]">
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    className="w-4 h-4 rounded border-border bg-secondary accent-emerald-500"
-                  />
-                  <span className="text-muted-foreground">Recordarme</span>
-                </label>
+              <div className="flex items-center justify-end text-[13px]">
                 <button
                   type="button"
                   className="text-emerald-400 hover:text-emerald-300 transition-colors font-medium"

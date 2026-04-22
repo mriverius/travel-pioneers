@@ -5,7 +5,6 @@ import { usePathname, useRouter } from "next/navigation";
 import {
   FileSearch,
   BookOpen,
-  Settings,
   Users as UsersIcon,
   Menu,
   X,
@@ -25,7 +24,7 @@ type NavItem = {
 const agentItems: NavItem[] = [
   {
     label: "AI Supplier Intelligence Agent",
-    href: "/module/supplier-intelligence",
+    href: "/agent/supplier-intelligence",
     icon: FileSearch,
   },
 ];
@@ -36,12 +35,6 @@ const configItems: NavItem[] = [
     label: "Gestión de usuarios",
     href: "/users",
     icon: UsersIcon,
-    adminOnly: true,
-  },
-  {
-    label: "Configuración del Portal",
-    href: "/settings",
-    icon: Settings,
     adminOnly: true,
   },
 ];
@@ -137,7 +130,7 @@ export default function Sidebar() {
         <div className="px-4 pt-5 pb-4 border-b border-sidebar-border">
           <div className="flex items-center justify-between">
             <Link
-              href="/module/supplier-intelligence"
+              href="/agent/supplier-intelligence"
               className="flex items-center gap-3 group"
               onClick={close}
             >
