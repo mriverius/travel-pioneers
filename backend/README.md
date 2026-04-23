@@ -117,6 +117,130 @@ Request body:
 
 Liveness probe. Returns `{ status: "ok", timestamp }`.
 
+### `POST /api/supplier-intelligence/extract`
+
+Supplier Intelligence agent — steps 1 & 2 of the contract-onboarding flow.
+Accepts a single contract document (PDF, Word, Excel), sends it to Claude
+(`claude-sonnet-4-5`) with a forced `tool_use` schema, and returns the 9
+target fields plus confidence / traceability metadata.
+
+Request:
+
+- `Content-Type: multipart/form-data`
+- Single form field: `file`
+- Accepted types: `application/pdf`, `.docx`, `.doc`, `.xlsx`, `.xls`
+- Max size: **20 MB**
+
+PDFs are forwarded to Claude verbatim as a `document` block (no local
+parsing — Claude reads layout and page numbers natively). Word files are
+converted to plain text with `mammoth`, Excel files with SheetJS
+(CSV-per-sheet). The `ANTHROPIC_API_KEY` env var must be set.
+
+#### Example — curl
+
+```bash
+curl -X POST http://localhost:4000/api/supplier-intelligence/extract \
+  -F "file=@./contrato-parador.pdf;type=application/pdf"
+```
+
+#### Example — Postman
+
+1. Method: `POST`  →  URL: `http://localhost:4000/api/supplier-intelligence/extract`
+2. Body tab → `form-data`
+3. Add key `file`, set the type dropdown to **File**, pick the contract.
+4. `Send`.
+
+#### Example — successful response
+
+```json
+{
+  "success": true,
+  "data": {
+    "fecha": "2025-02-13",
+    "proveedor": "Hotel Parador Quepos S.A.",
+    "nombre_comercial": "Hotel Parador Resort & Spa",
+    "cedula": "3-101-118200",
+    "direccion": "Punta Quepos, Manuel Antonio, Costa Rica",
+    "telefono": "+506 2777-1414",
+    "tipo_moneda": "USD",
+    "numero_cuenta": "CR39 0151 0221 0026 0000 48",
+    "banco": "Banco Nacional de Costa Rica",
+    "confianza": "media",
+    "campos_faltantes": [],
+    "paginas_origen": {
+      "fecha": 8,
+      "proveedor": 1,
+      "nombre_comercial": 1,
+      "cedula": 1,
+      "direccion": "multiple",
+      "telefono": 1,
+      "tipo_moneda": "inferido",
+      "numero_cuenta": 6,
+      "banco": 6
+    }
+  },
+  "validation": {
+    "valid": true,
+    "warnings": []
+  },
+  "meta": {
+    "filename": "contrato-parador.pdf",
+    "size_bytes": 245678,
+    "model": "claude-sonnet-4-5",
+    "processed_at": "2026-04-23T15:30:00Z"
+  }
+}
+```
+
+#### Error responses
+
+All failures on this route follow a dedicated envelope:
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "file_too_large",
+    "message": "El archivo excede el límite de 20 MB.",
+    "requestId": "…"
+  }
+}
+```
+
+| Status | `code`                  | Trigger                                              |
+|--------|-------------------------|------------------------------------------------------|
+| 400    | `bad_request`           | Missing `file` field, malformed upload.              |
+| 413    | `file_too_large`        | Upload > 20 MB.                                      |
+| 415    | `unsupported_file_type` | Not a PDF / Word / Excel document.                   |
+| 422    | `validation_failed`     | Validation (e.g. IBAN checksum) rejected the data.   |
+| 429    | `rate_limited`          | 20 requests/minute cap hit.                          |
+| 502    | `upstream_unavailable`  | Anthropic timed out, rate-limited us, or returned no `tool_use`. |
+
+#### Agent layout
+
+The agent is isolated under `src/agents/supplier-intelligence/` so more
+agents can be added alongside without collisions:
+
+```
+src/agents/supplier-intelligence/
+├── prompts/
+│   ├── systemPrompt.ts     # the extraction rules, verbatim from spec
+│   ├── toolSchema.ts       # JSON Schema for `extraer_datos_contrato`
+│   └── index.ts
+├── extractors/
+│   ├── pdf.ts              # base64 passthrough for Claude
+│   ├── docx.ts             # mammoth → plain text
+│   ├── xlsx.ts             # SheetJS → CSV per sheet
+│   └── index.ts            # detect kind + dispatch
+├── anthropicClient.ts      # lazy singleton Anthropic client
+├── service.ts              # calls Claude with forced tool_use
+├── validators.ts           # IBAN mod-97, cédula, phone E.164 checks
+├── uploadMiddleware.ts     # multer memoryStorage, 20 MB, mime filter
+├── errorHandler.ts         # scoped {success:false, error:{code,message}}
+├── controller.ts           # POST handler
+└── types.ts
+```
+
 ## Roles
 
 Only two roles are supported: `admin` and `member`. Enforced in the Prisma

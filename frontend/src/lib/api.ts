@@ -23,22 +23,32 @@ export interface ValidationDetail {
 export class ApiError extends Error {
   readonly status: number;
   readonly details: ValidationDetail[];
+  /** Machine-readable code from the new envelope, when available. */
+  readonly code: string | null;
 
   constructor(
     status: number,
     message: string,
     details: ValidationDetail[] = [],
+    code: string | null = null,
   ) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.details = details;
+    this.code = code;
   }
 }
 
 interface BackendErrorShape {
+  // Auth / users routes: `{ error: { message, details? } }`
+  // Supplier Intelligence route: `{ success: false, error: { code, message, details? } }`
+  // The `error.message` field is shared across both, so one parser handles
+  // both envelopes — we just read `code` when it's present.
+  success?: boolean;
   error?: {
     message?: string;
+    code?: string;
     details?: unknown;
   };
 }
@@ -114,7 +124,74 @@ async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
       (res.status >= 500
         ? "Se produjo un error en el servidor. Intenta más tarde."
         : "La solicitud no pudo completarse.");
-    throw new ApiError(res.status, message, parseDetails(err.error?.details));
+    throw new ApiError(
+      res.status,
+      message,
+      parseDetails(err.error?.details),
+      err.error?.code ?? null,
+    );
+  }
+
+  return payload as T;
+}
+
+/**
+ * Multipart sibling of `request()` for uploads. Uses the same error-envelope
+ * parser so both `{ error: { message } }` (auth/users) and
+ * `{ success: false, error: { code, message } }` (supplier-intelligence)
+ * surface as a consistent `ApiError` to callers.
+ *
+ * Never sets `Content-Type` manually — fetch does it automatically with the
+ * right multipart boundary when given a `FormData` body.
+ */
+async function requestForm<T>(
+  path: string,
+  form: FormData,
+  init: Omit<RequestInit, "body" | "method"> & { auth?: boolean } = {},
+): Promise<T> {
+  const { headers, auth: authed = false, ...rest } = init;
+
+  const finalHeaders: Record<string, string> = {
+    Accept: "application/json",
+    ...(headers as Record<string, string> | undefined),
+  };
+  if (authed) {
+    const token = getSession()?.token;
+    if (token) {
+      finalHeaders.Authorization = `Bearer ${token}`;
+    }
+  }
+
+  const res = await fetch(`${API_URL}${path}`, {
+    ...rest,
+    method: "POST",
+    headers: finalHeaders,
+    body: form,
+  });
+
+  if (res.status === 204) {
+    return undefined as T;
+  }
+
+  const text = await res.text();
+  const payload: unknown = text ? safeJsonParse(text) : null;
+
+  if (!res.ok) {
+    if (res.status === 401 && authed) {
+      clearSession();
+    }
+    const err = (payload ?? {}) as BackendErrorShape;
+    const message =
+      err.error?.message ??
+      (res.status >= 500
+        ? "Se produjo un error en el servidor. Intenta más tarde."
+        : "La solicitud no pudo completarse.");
+    throw new ApiError(
+      res.status,
+      message,
+      parseDetails(err.error?.details),
+      err.error?.code ?? null,
+    );
   }
 
   return payload as T;
@@ -190,6 +267,45 @@ export interface CreateUserResponse {
   tempPassword: string;
 }
 
+/* --------------------- supplier-intelligence endpoints -------------------- */
+
+export type ExtractionConfianza = "alta" | "media" | "baja";
+
+/** Mirrors the backend `ExtractedContract` interface one-to-one. */
+export interface ExtractedContract {
+  fecha: string | null;
+  proveedor: string | null;
+  nombre_comercial: string | null;
+  cedula: string | null;
+  direccion: string | null;
+  telefono: string | null;
+  tipo_moneda: string | null;
+  numero_cuenta: string | null;
+  banco: string | null;
+  confianza: ExtractionConfianza;
+  campos_faltantes: string[];
+  paginas_origen: Record<string, string | number>;
+}
+
+export interface ExtractionValidation {
+  valid: boolean;
+  warnings: string[];
+}
+
+export interface ExtractionMeta {
+  filename: string;
+  size_bytes: number;
+  model: string;
+  processed_at: string;
+}
+
+export interface ExtractContractResponse {
+  success: true;
+  data: ExtractedContract;
+  validation: ExtractionValidation;
+  meta: ExtractionMeta;
+}
+
 export const api = {
   register(payload: RegisterPayload) {
     return request<AuthResponse>("/auth/register", {
@@ -243,6 +359,24 @@ export const api = {
         method: "DELETE",
         auth: true,
       });
+    },
+  },
+  supplierIntelligence: {
+    /**
+     * Upload a single contract (PDF / Word / Excel) and get the extracted
+     * fields back. Backend accepts a single `file` part, max 20 MB.
+     *
+     * Not authenticated in the backend yet — keeping `auth: false` here so
+     * the scoped error handler's 401 shape doesn't matter. Flip to
+     * `auth: true` when the backend adds a guard.
+     */
+    extract(file: File) {
+      const form = new FormData();
+      form.append("file", file);
+      return requestForm<ExtractContractResponse>(
+        "/api/supplier-intelligence/extract",
+        form,
+      );
     },
   },
 };

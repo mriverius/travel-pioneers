@@ -1,162 +1,104 @@
 "use client";
 
 import {
+  AlertTriangle,
+  Banknote,
+  BookMarked,
+  Building2,
+  Calendar,
   Check,
   CheckCircle2,
   CloudUpload,
-  FileArchive,
+  CreditCard,
   FileSpreadsheet,
   FileText,
+  Hash,
+  Landmark,
   Loader2,
+  MapPin,
+  Phone,
   RotateCcw,
   Sparkles,
   X,
+  type LucideIcon,
 } from "lucide-react";
 import {
-  useMemo,
+  useEffect,
   useRef,
   useState,
   type ChangeEvent,
   type DragEvent,
 } from "react";
+import {
+  api,
+  ApiError,
+  type ExtractContractResponse,
+  type ExtractedContract,
+  type ExtractionConfianza,
+} from "@/lib/api";
 
 /**
- * Three-step supplier-contract workflow.
+ * Two-step supplier-contract workflow wired to the backend agent at
+ * `POST /api/supplier-intelligence/extract`.
  *
- *   1. Upload   — drag & drop / pick .pdf / .docx / .xlsx files.
- *   2. Review   — show the fields the AI extracted; approve or reject.
- *   3. Confirm  — success screen with a "procesar otro" reset.
+ *   1. Upload   — drag & drop / pick a single .pdf / .docx / .doc / .xlsx /
+ *                 .xls (max 20 MB — matches backend limit).
+ *   2. Review   — show the 9 extracted fields, confidence, warnings, and the
+ *                 per-field source pages returned by Claude. A "Procesar
+ *                 otro contrato" button resets the flow.
  *
- * Everything here is mock: there's no network call. The "AI analysis" in
- * step 2 is a canned payload surfaced after a short fake delay so the UI
- * can demonstrate the loading state. Replace `runMockAnalysis` and the
- * approve handler with real API calls when the backend is ready.
+ * Step 3 (approve → push to Utopía) is intentionally out of scope right now;
+ * the stepper is 2 steps to match the current backend surface area.
  */
 
-type Step = 1 | 2 | 3;
-
-type UploadFile = {
-  id: string;
-  name: string;
-  size: number;
-  type: FileKind;
-};
+type Step = 1 | 2;
 
 type FileKind = "pdf" | "docx" | "xlsx";
 
-type ExtractedRate = {
-  category: string;
-  season: string;
-  regimen: string;
-  netPrice: string;
-  withTax: string;
-};
+const MAX_FILE_BYTES = 20 * 1024 * 1024; // 20 MB — must match backend cap.
 
-type ExtractedPayload = {
-  supplier: string;
-  country: string;
-  currency: string;
-  validity: string;
-  taxes: string;
-  cancellation: string;
-  rates: ExtractedRate[];
-  warnings: string[];
-};
-
-const ACCEPTED_EXTENSIONS = [".pdf", ".docx", ".xlsx"] as const;
-const MAX_FILE_BYTES = 25 * 1024 * 1024; // 25 MB per file — mock cap.
+/**
+ * Accept attribute for the native file picker. We list both MIME and
+ * extension so browsers that don't recognize one fall back to the other.
+ * Matches the backend's `detectDocKind()` whitelist exactly.
+ */
+const ACCEPT_ATTR = [
+  "application/pdf",
+  ".pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".docx",
+  "application/msword",
+  ".doc",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".xlsx",
+  "application/vnd.ms-excel",
+  ".xls",
+].join(",");
 
 const STEPS: { id: Step; label: string; hint: string }[] = [
-  { id: 1, label: "Cargar documentos", hint: "PDF, Word o Excel" },
-  { id: 2, label: "Revisar información", hint: "Aprueba o rechaza" },
-  { id: 3, label: "Confirmación", hint: "Carga a Utopía" },
+  { id: 1, label: "Cargar documento", hint: "PDF, Word o Excel · máx 20 MB" },
+  { id: 2, label: "Revisar información", hint: "Datos extraídos por IA" },
 ];
 
-/** Canned "AI output" — looks different enough per run that the demo feels alive. */
-function runMockAnalysis(files: UploadFile[]): ExtractedPayload {
-  const seed = files.reduce((acc, f) => acc + f.name.length, 0) % 2;
-  if (seed === 0) {
-    return {
-      supplier: "Hotel Pacífico Resort & Spa",
-      country: "Costa Rica",
-      currency: "USD",
-      validity: "01/04/2026 → 31/03/2027",
-      taxes: "13% IVA incluido · 3% cargo de servicio",
-      cancellation: "Gratis hasta 48 h antes del check-in · 1 noche después",
-      rates: [
-        {
-          category: "Standard Ocean View",
-          season: "Temporada Baja",
-          regimen: "Desayuno",
-          netPrice: "$168",
-          withTax: "$189.84",
-        },
-        {
-          category: "Standard Ocean View",
-          season: "Temporada Alta",
-          regimen: "Desayuno",
-          netPrice: "$212",
-          withTax: "$239.56",
-        },
-        {
-          category: "Suite Deluxe",
-          season: "Temporada Alta",
-          regimen: "Media Pensión",
-          netPrice: "$298",
-          withTax: "$336.74",
-        },
-        {
-          category: "Villa Privada",
-          season: "Todo el año",
-          regimen: "Plan Europeo",
-          netPrice: "$410",
-          withTax: "$463.30",
-        },
-      ],
-      warnings: [
-        "No se detectaron tarifas de niños — se asumirá política estándar.",
-      ],
-    };
-  }
-  return {
-    supplier: "DMC Aventura Guatemala",
-    country: "Guatemala",
-    currency: "USD",
-    validity: "15/05/2026 → 14/05/2027",
-    taxes: "12% IVA + 10% INGUAT",
-    cancellation: "Gratis hasta 72 h antes · 100% dentro de 24 h",
-    rates: [
-      {
-        category: "Tour Antigua Ciudad Colonial",
-        season: "Todo el año",
-        regimen: "Día completo",
-        netPrice: "$85",
-        withTax: "$103.70",
-      },
-      {
-        category: "Tour Lago Atitlán",
-        season: "Todo el año",
-        regimen: "Día completo",
-        netPrice: "$120",
-        withTax: "$146.40",
-      },
-      {
-        category: "Tour Tikal 2D/1N",
-        season: "Temporada Alta",
-        regimen: "Paquete completo",
-        netPrice: "$480",
-        withTax: "$585.60",
-      },
-    ],
-    warnings: [],
-  };
-}
-
-function inferKind(name: string): FileKind | null {
+function inferKind(mime: string, name: string): FileKind | null {
   const lower = name.toLowerCase();
-  if (lower.endsWith(".pdf")) return "pdf";
-  if (lower.endsWith(".docx")) return "docx";
-  if (lower.endsWith(".xlsx")) return "xlsx";
+  if (mime === "application/pdf" || lower.endsWith(".pdf")) return "pdf";
+  if (
+    mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+    mime === "application/msword" ||
+    lower.endsWith(".docx") ||
+    lower.endsWith(".doc")
+  ) {
+    return "docx";
+  }
+  if (
+    mime === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+    mime === "application/vnd.ms-excel" ||
+    lower.endsWith(".xlsx") ||
+    lower.endsWith(".xls")
+  ) {
+    return "xlsx";
+  }
   return null;
 }
 
@@ -170,98 +112,114 @@ function fileIcon(kind: FileKind) {
   if (kind === "xlsx")
     return <FileSpreadsheet className="w-4 h-4 text-emerald-300" />;
   if (kind === "docx") return <FileText className="w-4 h-4 text-sky-300" />;
-  return <FileArchive className="w-4 h-4 text-amber-300" />;
+  return <FileText className="w-4 h-4 text-amber-300" />;
 }
 
 export function SupplierWorkflow() {
   const [step, setStep] = useState<Step>(1);
-  const [files, setFiles] = useState<UploadFile[]>([]);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
-  const [extracted, setExtracted] = useState<ExtractedPayload | null>(null);
-  const [rejected, setRejected] = useState(false);
+  const [result, setResult] = useState<ExtractContractResponse | null>(null);
+  const [serverError, setServerError] = useState<string | null>(null);
+  // Simulated progress while the backend is thinking. We don't get streaming
+  // progress from the Anthropic call, so we ease toward 90% and snap to 100%
+  // when the response lands — a white lie that keeps the UI feeling alive.
+  const [progress, setProgress] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const totalSize = useMemo(
-    () => files.reduce((acc, f) => acc + f.size, 0),
-    [files],
-  );
-
-  const addFiles = (incoming: FileList | File[]) => {
-    setUploadError(null);
-    const next: UploadFile[] = [];
-    const errors: string[] = [];
-    for (const f of Array.from(incoming)) {
-      const kind = inferKind(f.name);
-      if (!kind) {
-        errors.push(`${f.name}: formato no admitido (usa PDF, DOCX o XLSX).`);
-        continue;
-      }
-      if (f.size > MAX_FILE_BYTES) {
-        errors.push(`${f.name}: excede el tamaño máximo de 25 MB.`);
-        continue;
-      }
-      next.push({
-        id: `${f.name}-${f.size}-${f.lastModified}`,
-        name: f.name,
-        size: f.size,
-        type: kind,
+  // Ease toward 90% while analyzing. Slower as we approach the ceiling so it
+  // feels like work is happening even on long extractions.
+  useEffect(() => {
+    if (!analyzing) return;
+    const id = window.setInterval(() => {
+      setProgress((p) => {
+        if (p >= 90) return p;
+        const step = Math.max(0.4, (90 - p) * 0.06);
+        return Math.min(90, p + step);
       });
-    }
-    if (errors.length > 0) setUploadError(errors.join(" "));
-    if (next.length === 0) return;
-    setFiles((prev) => {
-      // De-dupe by id so re-selecting the same file is a no-op.
-      const ids = new Set(prev.map((p) => p.id));
-      return [...prev, ...next.filter((n) => !ids.has(n.id))];
-    });
-  };
+    }, 180);
+    return () => window.clearInterval(id);
+  }, [analyzing]);
 
-  const removeFile = (id: string) => {
-    setFiles((prev) => prev.filter((f) => f.id !== id));
+  const acceptFile = (incoming: File) => {
+    setUploadError(null);
+    setServerError(null);
+
+    const kind = inferKind(incoming.type, incoming.name);
+    if (!kind) {
+      setUploadError(
+        `${incoming.name}: formato no admitido. Usa PDF, Word (.docx, .doc) o Excel (.xlsx, .xls).`,
+      );
+      return;
+    }
+    if (incoming.size > MAX_FILE_BYTES) {
+      setUploadError(
+        `${incoming.name}: excede el tamaño máximo de 20 MB (tamaño: ${humanSize(incoming.size)}).`,
+      );
+      return;
+    }
+
+    setSelectedFile(incoming);
   };
 
   const handleDrop = (e: DragEvent<HTMLDivElement>) => {
     e.preventDefault();
-    if (!e.dataTransfer.files) return;
-    addFiles(e.dataTransfer.files);
+    const f = e.dataTransfer.files?.[0];
+    if (!f) return;
+    acceptFile(f);
   };
 
   const handlePick = (e: ChangeEvent<HTMLInputElement>) => {
-    if (!e.target.files) return;
-    addFiles(e.target.files);
-    // Reset so selecting the same file again triggers change.
+    const f = e.target.files?.[0];
+    // Reset so picking the same file again fires change.
     e.target.value = "";
+    if (!f) return;
+    acceptFile(f);
   };
 
-  const startAnalysis = () => {
-    if (files.length === 0) return;
+  const clearFile = () => {
+    setSelectedFile(null);
+    setUploadError(null);
+    setServerError(null);
+  };
+
+  const startAnalysis = async () => {
+    if (!selectedFile || analyzing) return;
     setAnalyzing(true);
-    setRejected(false);
-    // Fake "AI processing" — enough to show the loading state.
-    window.setTimeout(() => {
-      setExtracted(runMockAnalysis(files));
-      setAnalyzing(false);
+    setServerError(null);
+    setProgress(4); // kick off visibly above zero
+    try {
+      const response = await api.supplierIntelligence.extract(selectedFile);
+      // Snap to 100% and let the filled bar linger briefly before we
+      // transition to the review step — feels more finished than a hard cut.
+      setProgress(100);
+      await new Promise((r) => setTimeout(r, 450));
+      setResult(response);
       setStep(2);
-    }, 1400);
-  };
-
-  const approve = () => {
-    setStep(3);
-  };
-
-  const reject = () => {
-    setRejected(true);
-    setExtracted(null);
-    setStep(1);
+    } catch (err) {
+      // Surface the server's message verbatim — the backend's error copy is
+      // already user-facing (Spanish, specific, e.g. "El archivo excede …").
+      if (err instanceof ApiError) {
+        setServerError(err.message);
+      } else {
+        setServerError(
+          "No pudimos conectar con el servidor. Revisa tu conexión e intenta de nuevo.",
+        );
+      }
+      setProgress(0);
+    } finally {
+      setAnalyzing(false);
+    }
   };
 
   const reset = () => {
     setStep(1);
-    setFiles([]);
-    setExtracted(null);
+    setSelectedFile(null);
+    setResult(null);
     setUploadError(null);
-    setRejected(false);
+    setServerError(null);
+    setProgress(0);
   };
 
   return (
@@ -332,34 +290,21 @@ export function SupplierWorkflow() {
       <div key={step} className="animate-page-enter">
         {step === 1 && (
           <UploadStep
-            files={files}
-            totalSize={totalSize}
+            file={selectedFile}
             uploadError={uploadError}
-            rejected={rejected}
+            serverError={serverError}
             analyzing={analyzing}
+            progress={progress}
             fileInputRef={fileInputRef}
             onDrop={handleDrop}
             onPick={handlePick}
-            onRemove={removeFile}
+            onClear={clearFile}
             onStart={startAnalysis}
           />
         )}
 
-        {step === 2 && extracted && (
-          <ReviewStep
-            data={extracted}
-            fileCount={files.length}
-            onApprove={approve}
-            onReject={reject}
-          />
-        )}
-
-        {step === 3 && (
-          <ConfirmStep
-            fileCount={files.length}
-            supplier={extracted?.supplier ?? "el proveedor"}
-            onReset={reset}
-          />
+        {step === 2 && result && (
+          <ReviewStep result={result} onReset={reset} />
         )}
       </div>
     </section>
@@ -369,45 +314,33 @@ export function SupplierWorkflow() {
 /* ---------------------------------- STEP 1 -------------------------------- */
 
 function UploadStep({
-  files,
-  totalSize,
+  file,
   uploadError,
-  rejected,
+  serverError,
   analyzing,
+  progress,
   fileInputRef,
   onDrop,
   onPick,
-  onRemove,
+  onClear,
   onStart,
 }: {
-  files: UploadFile[];
-  totalSize: number;
+  file: File | null;
   uploadError: string | null;
-  rejected: boolean;
+  serverError: string | null;
   analyzing: boolean;
+  progress: number;
   fileInputRef: React.RefObject<HTMLInputElement | null>;
   onDrop: (e: DragEvent<HTMLDivElement>) => void;
   onPick: (e: ChangeEvent<HTMLInputElement>) => void;
-  onRemove: (id: string) => void;
+  onClear: () => void;
   onStart: () => void;
 }) {
   const [dragActive, setDragActive] = useState(false);
+  const kind = file ? inferKind(file.type, file.name) : null;
 
   return (
     <div className="px-5 sm:px-8 py-7 space-y-5">
-      {rejected && (
-        <div
-          role="alert"
-          className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-[13px] text-amber-200"
-        >
-          <Sparkles className="w-4 h-4 mt-0.5 shrink-0" />
-          <span>
-            Descartamos el análisis anterior. Carga nuevos documentos o ajústalos
-            para volver a intentar.
-          </span>
-        </div>
-      )}
-
       <div
         onDragOver={(e) => {
           e.preventDefault();
@@ -436,8 +369,7 @@ function UploadStep({
         <input
           ref={fileInputRef}
           type="file"
-          multiple
-          accept={ACCEPTED_EXTENSIONS.join(",")}
+          accept={ACCEPT_ATTR}
           onChange={onPick}
           className="hidden"
         />
@@ -445,12 +377,12 @@ function UploadStep({
           <CloudUpload className="w-6 h-6 text-primary" />
         </div>
         <p className="mt-4 text-[15px] font-semibold text-foreground">
-          Arrastra tus contratos aquí
+          Arrastra tu contrato aquí
         </p>
         <p className="mt-1 text-[12.5px] text-muted-foreground">
           o{" "}
           <span className="text-primary font-medium">
-            haz click para buscarlos
+            haz click para buscarlo
           </span>{" "}
           en tu equipo
         </p>
@@ -458,7 +390,7 @@ function UploadStep({
           <Badge label="PDF" />
           <Badge label="DOCX" />
           <Badge label="XLSX" />
-          <span className="opacity-60">· hasta 25 MB c/u</span>
+          <span className="opacity-60">· hasta 20 MB</span>
         </div>
       </div>
 
@@ -472,59 +404,71 @@ function UploadStep({
         </div>
       )}
 
-      {files.length > 0 && (
+      {serverError && (
+        <div
+          role="alert"
+          className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2.5 text-[13px] text-destructive"
+        >
+          <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+          <span>{serverError}</span>
+        </div>
+      )}
+
+      {file && kind && !analyzing && (
         <div className="rounded-xl border border-border bg-card/60">
           <header className="flex items-center justify-between px-4 py-3 border-b border-border/60">
             <p className="text-[12.5px] font-semibold text-foreground">
-              {files.length} documento{files.length === 1 ? "" : "s"} listo
-              {files.length === 1 ? "" : "s"} para procesar
+              Documento listo para analizar
             </p>
             <p className="text-[11.5px] text-muted-foreground">
-              Total: {humanSize(totalSize)}
+              {humanSize(file.size)}
             </p>
           </header>
-          <ul className="divide-y divide-border/50">
-            {files.map((f) => (
-              <li
-                key={f.id}
-                className="flex items-center gap-3 px-4 py-2.5 hover:bg-secondary/30 transition-colors"
-              >
-                <div className="w-8 h-8 rounded-lg bg-secondary/70 border border-border/60 flex items-center justify-center shrink-0">
-                  {fileIcon(f.type)}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-[13px] text-foreground truncate">
-                    {f.name}
-                  </p>
-                  <p className="text-[11px] text-muted-foreground">
-                    {humanSize(f.size)} · {f.type.toUpperCase()}
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => onRemove(f.id)}
-                  aria-label={`Quitar ${f.name}`}
-                  className="text-muted-foreground hover:text-destructive transition-colors"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </li>
-            ))}
-          </ul>
+          <div className="flex items-center gap-3 px-4 py-3">
+            <div className="w-8 h-8 rounded-lg bg-secondary/70 border border-border/60 flex items-center justify-center shrink-0">
+              {fileIcon(kind)}
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-[13px] text-foreground truncate">
+                {file.name}
+              </p>
+              <p className="text-[11px] text-muted-foreground">
+                {humanSize(file.size)} · {kind.toUpperCase()}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={onClear}
+              disabled={analyzing}
+              aria-label={`Quitar ${file.name}`}
+              className="text-muted-foreground hover:text-destructive disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
+      )}
+
+      {file && kind && analyzing && (
+        <AnalysisProgressCard
+          fileName={file.name}
+          fileSize={file.size}
+          kind={kind}
+          progress={progress}
+        />
       )}
 
       <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-2">
         <button
           type="button"
           onClick={onStart}
-          disabled={files.length === 0 || analyzing}
+          disabled={!file || analyzing}
           className="btn-premium inline-flex items-center justify-center gap-2 h-11 px-5 rounded-lg text-[13.5px]"
         >
           {analyzing ? (
             <>
               <Loader2 className="w-4 h-4 animate-spin" />
-              Analizando documento{files.length === 1 ? "" : "s"}…
+              Analizando contrato…
             </>
           ) : (
             <>
@@ -546,215 +490,346 @@ function Badge({ label }: { label: string }) {
   );
 }
 
+/**
+ * Phase copy mapped to the simulated progress range. Claude's `messages.create`
+ * is a single round-trip so we can't surface real sub-step progress — the
+ * bands below just match what the backend is conceptually doing.
+ */
+function analysisPhase(progress: number): string {
+  if (progress < 25) return "Preparando el documento…";
+  if (progress < 75) return "Extrayendo campos con IA…";
+  if (progress < 100) return "Validando datos extraídos…";
+  return "Listo";
+}
+
+function AnalysisProgressCard({
+  fileName,
+  fileSize,
+  kind,
+  progress,
+}: {
+  fileName: string;
+  fileSize: number;
+  kind: FileKind;
+  progress: number;
+}) {
+  const pct = Math.max(0, Math.min(100, Math.round(progress)));
+  const phase = analysisPhase(progress);
+  return (
+    <div className="rounded-xl border border-primary/30 bg-primary/5">
+      <div className="flex items-center gap-3 px-4 py-3 border-b border-border/50">
+        <div className="w-8 h-8 rounded-lg bg-secondary/70 border border-border/60 flex items-center justify-center shrink-0">
+          {fileIcon(kind)}
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-[13px] text-foreground truncate">{fileName}</p>
+          <p className="text-[11px] text-muted-foreground">
+            {humanSize(fileSize)} · {kind.toUpperCase()}
+          </p>
+        </div>
+        <Loader2 className="w-4 h-4 text-primary animate-spin shrink-0" />
+      </div>
+      <div className="px-4 py-3.5 space-y-2">
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-[12.5px] text-foreground/90 truncate">{phase}</p>
+          <p
+            className="text-[12.5px] font-semibold text-primary tabular-nums"
+            aria-live="polite"
+          >
+            {pct}%
+          </p>
+        </div>
+        <div
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={pct}
+          aria-label="Progreso del análisis"
+          className="relative h-1.5 w-full overflow-hidden rounded-full bg-secondary/70 border border-border/50"
+        >
+          <div
+            className="h-full rounded-full bg-primary shadow-[0_0_12px_0_hsl(var(--primary)/0.5)] transition-[width] duration-200 ease-out"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          Esto suele tomar entre 5 y 20 segundos.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 /* ---------------------------------- STEP 2 -------------------------------- */
 
+/**
+ * Field-display rows grouped into three cards: Identity, Contact, Financial.
+ * Each field shows its source page (or "inferido" / "multiple") as a small
+ * trailing chip so users can audit where the value came from.
+ */
+const IDENTITY_FIELDS: {
+  key: keyof ExtractedContract;
+  label: string;
+  icon: LucideIcon;
+}[] = [
+  { key: "proveedor", label: "Proveedor (razón social)", icon: Building2 },
+  { key: "nombre_comercial", label: "Nombre comercial", icon: BookMarked },
+  { key: "cedula", label: "Cédula / RFC / NIT", icon: Hash },
+  { key: "fecha", label: "Fecha de firma", icon: Calendar },
+];
+
+const CONTACT_FIELDS: {
+  key: keyof ExtractedContract;
+  label: string;
+  icon: LucideIcon;
+}[] = [
+  { key: "direccion", label: "Dirección", icon: MapPin },
+  { key: "telefono", label: "Teléfono", icon: Phone },
+];
+
+const FINANCIAL_FIELDS: {
+  key: keyof ExtractedContract;
+  label: string;
+  icon: LucideIcon;
+}[] = [
+  { key: "banco", label: "Banco", icon: Landmark },
+  { key: "numero_cuenta", label: "Cuenta bancaria", icon: CreditCard },
+  { key: "tipo_moneda", label: "Moneda", icon: Banknote },
+];
+
+const CONFIANZA_STYLES: Record<
+  ExtractionConfianza,
+  { label: string; dot: string; bg: string; border: string; text: string }
+> = {
+  alta: {
+    label: "Confianza alta",
+    dot: "bg-emerald-400",
+    bg: "bg-emerald-500/10",
+    border: "border-emerald-500/30",
+    text: "text-emerald-300",
+  },
+  media: {
+    label: "Confianza media",
+    dot: "bg-amber-400",
+    bg: "bg-amber-500/10",
+    border: "border-amber-500/30",
+    text: "text-amber-300",
+  },
+  baja: {
+    label: "Confianza baja",
+    dot: "bg-rose-400",
+    bg: "bg-rose-500/10",
+    border: "border-rose-500/30",
+    text: "text-rose-300",
+  },
+};
+
 function ReviewStep({
-  data,
-  fileCount,
-  onApprove,
-  onReject,
+  result,
+  onReset,
 }: {
-  data: ExtractedPayload;
-  fileCount: number;
-  onApprove: () => void;
-  onReject: () => void;
+  result: ExtractContractResponse;
+  onReset: () => void;
 }) {
+  const { data, validation, meta } = result;
+  const conf = CONFIANZA_STYLES[data.confianza];
+
   return (
     <div className="px-5 sm:px-8 py-7 space-y-5">
-      <div className="flex items-start gap-3 rounded-lg border border-primary/30 bg-primary/8 px-3.5 py-2.5">
-        <div className="w-8 h-8 rounded-lg bg-primary/15 border border-primary/30 flex items-center justify-center shrink-0">
-          <Sparkles className="w-4 h-4 text-primary" />
+      {/* Summary banner */}
+      <div className="flex items-start gap-3 rounded-lg border border-primary/30 bg-primary/8 px-3.5 py-3">
+        <div className="w-9 h-9 rounded-lg bg-primary/15 border border-primary/30 flex items-center justify-center shrink-0">
+          <CheckCircle2 className="w-4.5 h-4.5 text-primary" />
         </div>
-        <div className="flex-1 text-[13px] text-foreground/90">
-          <p className="font-semibold text-foreground">Análisis completado</p>
-          <p className="text-muted-foreground mt-0.5">
-            Revisé {fileCount} documento{fileCount === 1 ? "" : "s"} y esto es
-            lo que subiré a <span className="text-primary">Utopía</span>.
-            Aprueba para cargarlo o rechaza para descartar.
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center flex-wrap gap-2">
+            <p className="text-[14px] font-semibold text-foreground">
+              Análisis completado
+            </p>
+            <span
+              className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[10.5px] font-semibold uppercase tracking-wider ${conf.bg} ${conf.border} ${conf.text}`}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${conf.dot}`} />
+              {conf.label}
+            </span>
+          </div>
+          <p className="text-[12.5px] text-muted-foreground mt-1 truncate">
+            {meta.filename} · {humanSize(meta.size_bytes)} · modelo {meta.model}
           </p>
         </div>
       </div>
 
-      {/* Supplier summary */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <FieldRow label="Proveedor" value={data.supplier} />
-        <FieldRow label="País" value={data.country} />
-        <FieldRow label="Moneda" value={data.currency} />
-        <FieldRow label="Vigencia" value={data.validity} />
-        <FieldRow label="Impuestos" value={data.taxes} />
-        <FieldRow
-          label="Política de cancelación"
-          value={data.cancellation}
-          className="sm:col-span-2"
-        />
-      </div>
-
-      {/* Rates table */}
-      <div className="rounded-xl border border-border bg-card/60 overflow-hidden">
-        <header className="flex items-center gap-2 px-4 py-3 border-b border-border/60">
-          <FileSpreadsheet className="w-4 h-4 text-primary" />
-          <h3 className="text-[13px] font-semibold text-foreground">
-            Tarifas detectadas{" "}
-            <span className="text-muted-foreground font-normal">
-              ({data.rates.length})
-            </span>
-          </h3>
-        </header>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="bg-secondary/40 text-[11.5px] uppercase tracking-wider text-muted-foreground">
-              <tr>
-                <th className="text-left font-semibold px-4 py-2.5">
-                  Categoría
-                </th>
-                <th className="text-left font-semibold px-4 py-2.5">
-                  Temporada
-                </th>
-                <th className="text-left font-semibold px-4 py-2.5">Régimen</th>
-                <th className="text-right font-semibold px-4 py-2.5">Neto</th>
-                <th className="text-right font-semibold px-4 py-2.5 pr-4">
-                  Neto + Imp.
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.rates.map((r, i) => (
-                <tr
-                  key={`${r.category}-${r.season}-${i}`}
-                  className="border-t border-border/50 hover:bg-secondary/20 transition-colors"
-                >
-                  <td className="px-4 py-2.5 text-[13px] text-foreground">
-                    {r.category}
-                  </td>
-                  <td className="px-4 py-2.5 text-[12.5px] text-muted-foreground">
-                    {r.season}
-                  </td>
-                  <td className="px-4 py-2.5 text-[12.5px] text-muted-foreground">
-                    {r.regimen}
-                  </td>
-                  <td className="px-4 py-2.5 text-right text-[13px] font-medium text-foreground/90">
-                    {r.netPrice}
-                  </td>
-                  <td className="px-4 py-2.5 pr-4 text-right text-[13px] font-semibold text-primary">
-                    {r.withTax}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {data.warnings.length > 0 && (
+      {validation.warnings.length > 0 && (
         <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-[12.5px] text-amber-200">
-          <Sparkles className="w-4 h-4 mt-0.5 shrink-0" />
-          <ul className="space-y-1">
-            {data.warnings.map((w) => (
-              <li key={w}>{w}</li>
-            ))}
-          </ul>
+          <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+          <div>
+            <p className="font-semibold text-amber-100 mb-0.5">
+              {validation.warnings.length === 1
+                ? "1 advertencia"
+                : `${validation.warnings.length} advertencias`}
+            </p>
+            <ul className="space-y-1">
+              {validation.warnings.map((w) => (
+                <li key={w}>{w}</li>
+              ))}
+            </ul>
+          </div>
         </div>
       )}
+
+      <FieldGroup
+        title="Identidad del proveedor"
+        fields={IDENTITY_FIELDS}
+        data={data}
+        filename={meta.filename}
+      />
+      <FieldGroup
+        title="Contacto"
+        fields={CONTACT_FIELDS}
+        data={data}
+        filename={meta.filename}
+      />
+      <FieldGroup
+        title="Información bancaria"
+        fields={FINANCIAL_FIELDS}
+        data={data}
+        filename={meta.filename}
+      />
 
       <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-2 pt-2">
         <button
           type="button"
-          onClick={onReject}
-          className="inline-flex items-center justify-center gap-2 h-11 px-4 rounded-lg border border-destructive/40 text-destructive text-[13.5px] font-medium hover:bg-destructive/10 transition-colors"
-        >
-          <X className="w-4 h-4" />
-          Rechazar
-        </button>
-        <button
-          type="button"
-          onClick={onApprove}
+          onClick={onReset}
           className="btn-premium inline-flex items-center justify-center gap-2 h-11 px-5 rounded-lg text-[13.5px]"
         >
-          <Check className="w-4 h-4" />
-          Aprobar y cargar a Utopía
+          <RotateCcw className="w-4 h-4" />
+          Procesar otro contrato
         </button>
+      </div>
+    </div>
+  );
+}
+
+function FieldGroup({
+  title,
+  fields,
+  data,
+  filename,
+}: {
+  title: string;
+  fields: { key: keyof ExtractedContract; label: string; icon: LucideIcon }[];
+  data: ExtractedContract;
+  filename: string;
+}) {
+  return (
+    <div className="rounded-xl border border-border bg-card/60 overflow-hidden">
+      <header className="flex items-center gap-2 px-4 py-3 border-b border-border/60">
+        <h3 className="text-[12.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+          {title}
+        </h3>
+      </header>
+      <div className="grid grid-cols-1 sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-border/50">
+        {fields.map((f) => (
+          <FieldRow
+            key={f.key as string}
+            icon={f.icon}
+            label={f.label}
+            fieldKey={f.key as string}
+            data={data}
+            filename={filename}
+          />
+        ))}
       </div>
     </div>
   );
 }
 
 function FieldRow({
+  icon: Icon,
   label,
-  value,
-  className = "",
+  fieldKey,
+  data,
+  filename,
 }: {
+  icon: LucideIcon;
   label: string;
-  value: string;
-  className?: string;
+  fieldKey: string;
+  data: ExtractedContract;
+  filename: string;
 }) {
+  const rawValue = data[fieldKey as keyof ExtractedContract];
+  // Only string | null reach this row (the other ExtractedContract props are
+  // excluded by the field-group definitions above), but TS can't prove it
+  // via the lookup, so narrow here.
+  const value =
+    typeof rawValue === "string" || rawValue === null ? rawValue : null;
+  const missing = value === null || value === "";
+  const isMarkedMissing = data.campos_faltantes.includes(fieldKey);
+  const source = data.paginas_origen[fieldKey];
+
   return (
-    <div
-      className={`rounded-lg border border-border bg-secondary/30 px-3.5 py-2.5 ${className}`}
-    >
-      <p className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold">
-        {label}
-      </p>
-      <p className="text-[13.5px] text-foreground mt-1">{value}</p>
-    </div>
-  );
-}
-
-/* ---------------------------------- STEP 3 -------------------------------- */
-
-function ConfirmStep({
-  fileCount,
-  supplier,
-  onReset,
-}: {
-  fileCount: number;
-  supplier: string;
-  onReset: () => void;
-}) {
-  return (
-    <div className="px-5 sm:px-8 py-12 text-center">
-      <div className="mx-auto w-16 h-16 rounded-2xl bg-primary/15 border border-primary/30 flex items-center justify-center animate-pulse-glow">
-        <CheckCircle2 className="w-8 h-8 text-primary" />
+    <div className="px-4 py-3 min-w-0">
+      <div className="flex items-center gap-2 text-muted-foreground">
+        <Icon className="w-3.5 h-3.5" />
+        <p className="text-[11px] uppercase tracking-wider font-semibold">
+          {label}
+        </p>
+        {source !== undefined && source !== null && (
+          <SourceChip source={source} filename={filename} />
+        )}
       </div>
-      <h2 className="text-[22px] font-semibold tracking-tight mt-5">
-        ¡Información cargada correctamente!
-      </h2>
-      <p className="text-[14px] text-muted-foreground mt-2 max-w-[480px] mx-auto">
-        Los datos extraídos de{" "}
-        <span className="text-foreground font-medium">{supplier}</span> se
-        subieron a <span className="text-primary font-medium">Utopía</span> y
-        están listos para usarse. Procesamos {fileCount} documento
-        {fileCount === 1 ? "" : "s"}.
-      </p>
-
-      <div className="mt-8 grid grid-cols-2 sm:grid-cols-3 gap-3 max-w-[520px] mx-auto">
-        <ConfirmCell label="Proveedor" value="Creado" />
-        <ConfirmCell label="Tarifas" value="Cargadas" />
-        <ConfirmCell label="Estado" value="Activo" />
-      </div>
-
-      <button
-        type="button"
-        onClick={onReset}
-        className="btn-premium mt-9 inline-flex items-center justify-center gap-2 h-11 px-5 rounded-lg text-[13.5px] mx-auto"
+      <p
+        className={`mt-1 text-[13.5px] break-words ${
+          missing ? "text-muted-foreground/70 italic" : "text-foreground"
+        }`}
       >
-        <RotateCcw className="w-4 h-4" />
-        Procesar otro contrato
-      </button>
+        {missing
+          ? isMarkedMissing
+            ? "No encontrado en el documento"
+            : "—"
+          : value}
+      </p>
     </div>
   );
 }
 
-function ConfirmCell({ label, value }: { label: string; value: string }) {
+/**
+ * Renders provenance for a single extracted field. The chip reads as:
+ *
+ *   Página 6 · contrato_acme.pdf    (numeric page in a PDF/Excel)
+ *   Inferido · contrato_acme.pdf    (Claude inferred — no single source page)
+ *   Múltiples páginas · foo.pdf     (value appears across several pages)
+ *
+ * The filename is truncated at a reasonable width; the full label is surfaced
+ * via the `title` attribute for hover tooltips.
+ */
+function SourceChip({
+  source,
+  filename,
+}: {
+  source: string | number;
+  filename: string;
+}) {
+  const base =
+    typeof source === "number"
+      ? `Página ${source}`
+      : source === "inferido"
+        ? "Inferido"
+        : source === "multiple"
+          ? "Múltiples páginas"
+          : `Página ${source}`;
+  const tooltip = `${base} · ${filename}`;
+
   return (
-    <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2.5">
-      <p className="text-[10.5px] uppercase tracking-wider text-muted-foreground font-semibold">
-        {label}
-      </p>
-      <p className="text-[13px] text-primary font-semibold mt-0.5 flex items-center justify-center gap-1">
-        <Check className="w-3.5 h-3.5" />
-        {value}
-      </p>
-    </div>
+    <span
+      title={tooltip}
+      className="ml-auto inline-flex max-w-[220px] items-center gap-1 px-1.5 py-0.5 rounded border border-border bg-secondary/40 text-[10px] font-medium text-muted-foreground whitespace-nowrap"
+    >
+      <span className="shrink-0">{base}</span>
+      <span aria-hidden className="text-muted-foreground/50">
+        ·
+      </span>
+      <span className="truncate text-muted-foreground/80">{filename}</span>
+    </span>
   );
 }
-

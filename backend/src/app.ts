@@ -5,6 +5,7 @@ import { errorHandler, notFoundHandler } from "./middleware/errorHandler.js";
 import { requestId, httpLogger } from "./middleware/requestLogger.js";
 import authRoutes from "./routes/auth.js";
 import userRoutes from "./routes/users.js";
+import supplierIntelligenceRoutes from "./routes/supplierIntelligence.js";
 
 const app: Express = express();
 
@@ -34,6 +35,9 @@ app.get("/health", (_req, res) => {
 
 app.use("/auth", authRoutes);
 app.use("/users", userRoutes);
+// Supplier Intelligence agent — isolated under its own prefix so other
+// agents can be added alongside without namespace collisions.
+app.use("/api/supplier-intelligence", supplierIntelligenceRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);
