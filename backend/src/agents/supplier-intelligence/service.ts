@@ -31,12 +31,65 @@ export const SUPPLIER_INTELLIGENCE_MODEL = "claude-sonnet-4-5";
 const MAX_TOKENS = 1500;
 
 /**
+ * Optional context the caller can attach to an extraction. The `comments`
+ * field is the user-typed email-body excerpt from the UI — it gets injected
+ * into the user message as supplementary context Claude can lean on when the
+ * document itself is missing details.
+ */
+export interface ExtractionContext {
+  comments?: string;
+  isExistingSupplier?: boolean;
+}
+
+/**
+ * Render the optional user-provided context as a text block that gets
+ * prepended to the document content. We wrap it in clear delimiters and a
+ * heads-up sentence so Claude treats it as supplementary, not authoritative.
+ */
+function buildContextBlock(ctx: ExtractionContext | undefined): string | null {
+  if (!ctx) return null;
+  const parts: string[] = [];
+
+  if (ctx.isExistingSupplier !== undefined) {
+    parts.push(
+      ctx.isExistingSupplier
+        ? "Este proveedor YA EXISTE en el sistema (es un proveedor recurrente)."
+        : "Este proveedor es NUEVO (primera vez que se registra).",
+    );
+  }
+
+  if (ctx.comments && ctx.comments.trim() !== "") {
+    parts.push(
+      "Comentarios adicionales del usuario (típicamente extraídos del cuerpo " +
+        "del correo). Úsalos SOLO como contexto complementario; el documento " +
+        "sigue siendo la fuente autoritativa. Si un dato aparece únicamente " +
+        "aquí y no en el documento, márcalo como \"inferido\" en " +
+        "paginas_origen.\n\n" +
+        `-----BEGIN USER NOTES-----\n${ctx.comments.trim()}\n-----END USER NOTES-----`,
+    );
+  }
+
+  if (parts.length === 0) return null;
+  return parts.join("\n\n");
+}
+
+/**
  * Build the user message that gets sent alongside the system prompt. PDFs go
  * as a native `document` block (Claude reads layout + page numbers); Word /
- * Excel arrive as plain text in a single text block.
+ * Excel arrive as plain text in a single text block. When the caller supplies
+ * additional context (comments / supplier flag), it's prepended as a separate
+ * text block so the document content remains untouched.
  */
-function buildUserMessage(doc: PreparedDocument): MessageParam {
+function buildUserMessage(
+  doc: PreparedDocument,
+  ctx?: ExtractionContext,
+): MessageParam {
   const content: ContentBlockParam[] = [];
+
+  const contextBlock = buildContextBlock(ctx);
+  if (contextBlock) {
+    content.push({ type: "text", text: contextBlock });
+  }
 
   if (doc.kind === "pdf") {
     content.push({
@@ -130,6 +183,7 @@ export interface ExtractionResult {
 export async function extractContract(
   doc: PreparedDocument,
   requestId?: string,
+  context?: ExtractionContext,
 ): Promise<ExtractionResult> {
   const client = getAnthropicClient();
 
@@ -144,7 +198,7 @@ export async function extractContract(
         type: "tool",
         name: EXTRAER_DATOS_CONTRATO_TOOL_NAME,
       },
-      messages: [buildUserMessage(doc)],
+      messages: [buildUserMessage(doc, context)],
     });
   } catch (err) {
     // Map all Anthropic-side failures (timeouts, 429, 5xx, auth) to 502.

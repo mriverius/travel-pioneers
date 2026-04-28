@@ -297,6 +297,12 @@ export interface ExtractionMeta {
   size_bytes: number;
   model: string;
   processed_at: string;
+  /**
+   * Whether the user marked this as an existing supplier in step 1. Echoed
+   * back from the request so the UI can keep the flag visible alongside the
+   * extracted data.
+   */
+  is_existing_supplier?: boolean;
 }
 
 export interface ExtractContractResponse {
@@ -304,6 +310,17 @@ export interface ExtractContractResponse {
   data: ExtractedContract;
   validation: ExtractionValidation;
   meta: ExtractionMeta;
+}
+
+export interface ExtractContractInput {
+  /**
+   * Optional free-form context the user pastes from the email body — extra
+   * info that may not be in the document itself. Forwarded to Claude as
+   * additional context.
+   */
+  comments?: string;
+  /** Required toggle from step 1 — `true` if the supplier already exists. */
+  isExistingSupplier: boolean;
 }
 
 export const api = {
@@ -370,9 +387,16 @@ export const api = {
      * the scoped error handler's 401 shape doesn't matter. Flip to
      * `auth: true` when the backend adds a guard.
      */
-    extract(file: File) {
+    extract(file: File, input: ExtractContractInput) {
       const form = new FormData();
       form.append("file", file);
+      // Backend expects snake_case form fields. Comments are optional; the
+      // existing-supplier flag is required and serialized as "true" / "false".
+      form.append("is_existing_supplier", input.isExistingSupplier ? "true" : "false");
+      const trimmed = input.comments?.trim();
+      if (trimmed) {
+        form.append("comments", trimmed);
+      }
       return requestForm<ExtractContractResponse>(
         "/api/supplier-intelligence/extract",
         form,
