@@ -271,17 +271,56 @@ export interface CreateUserResponse {
 
 export type ExtractionConfianza = "alta" | "media" | "baja";
 
-/** Mirrors the backend `ExtractedContract` interface one-to-one. */
+/**
+ * Mirrors the backend `ExtractedContract` interface one-to-one. Calibrated
+ * contra contrato real (Travel Pioneers / Parador 2026) y fila ground-truth
+ * Monteverde Lodge & Gardens.
+ */
 export interface ExtractedContract {
+  // Identidad / contacto / legal
   fecha: string | null;
   proveedor: string | null;
   nombre_comercial: string | null;
   cedula: string | null;
   direccion: string | null;
   telefono: string | null;
+  pais: string | null;
+  state_province: string | null;
+  type_of_business: string | null;
+  contract_starts: string | null;
+  contract_ends: string | null;
+  reservations_email: string | null;
+  // Servicio
+  product_name: string | null;
+  ocupacion: string | null;
+  // Clasificación catálogo Utopía
+  tipo_unidad: "N" | "S" | null;
+  tipo_servicio: string | null;
+  categoria: string | null;
+  // Temporada
+  season_name: string | null;
+  season_starts: string | null;
+  season_ends: string | null;
+  meals_included: string | null;
+  // Tarifas estándar
+  precios_neto_iva: string | null;
+  precio_rack_iva: string | null;
+  porcentaje_comision: string | null;
+  // Tarifas fin de semana
+  precios_neto_iva_fds: string | null;
+  precio_rack_iva_fds: string | null;
+  porcentaje_comision_fds: string | null;
+  // Políticas
+  cancellation_policy: string | null;
+  range_payment_policy: string | null;
+  kids_policy: string | null;
+  other_included: string | null;
+  feeds_adicionales: string | null;
+  // Bancarios (cuenta 1)
   tipo_moneda: string | null;
   numero_cuenta: string | null;
   banco: string | null;
+  // Metadatos
   confianza: ExtractionConfianza;
   campos_faltantes: string[];
   paginas_origen: Record<string, string | number>;
@@ -321,6 +360,34 @@ export interface ExtractContractInput {
   comments?: string;
   /** Required toggle from step 1 — `true` if the supplier already exists. */
   isExistingSupplier: boolean;
+}
+
+/* --- match-supplier (fallback IA del lookup contra el catálogo) --- */
+
+export type MatchSupplierConfidence = "alta" | "media" | "baja";
+
+export interface MatchSupplierCandidate {
+  codigo: string;
+  nombre: string;
+}
+
+export interface MatchSupplierInput {
+  /** Nombre extraído del contrato (ej: "HOTEL PARADOR RESORT & SPA"). */
+  query: string;
+  /** Lista de candidatos del catálogo. El backend tiene cap de ~600. */
+  candidates: MatchSupplierCandidate[];
+}
+
+export interface MatchSupplierData {
+  /** Código elegido por la IA, o null si ningún candidato es razonable. */
+  codigo: string | null;
+  confidence: MatchSupplierConfidence;
+  reasoning: string;
+}
+
+export interface MatchSupplierResponse {
+  success: true;
+  data: MatchSupplierData;
 }
 
 export const api = {
@@ -400,6 +467,20 @@ export const api = {
       return requestForm<ExtractContractResponse>(
         "/api/supplier-intelligence/extract",
         form,
+      );
+    },
+    /**
+     * Fallback IA para el lookup contra el catálogo CrtLisProv. Solo se usa
+     * cuando el matching local del frontend (exact / prefix / includes)
+     * falla — el backend cobra Anthropic en cada llamada, así que no abuses.
+     */
+    matchSupplier(input: MatchSupplierInput) {
+      return request<MatchSupplierResponse>(
+        "/api/supplier-intelligence/match-supplier",
+        {
+          method: "POST",
+          body: input,
+        },
       );
     },
   },

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   FileSearch,
+  History,
   BookOpen,
   Users as UsersIcon,
   Menu,
@@ -19,6 +20,12 @@ type NavItem = {
   icon: ComponentType<SVGProps<SVGSVGElement>>;
   /** Only render for users matching this role. Omit = visible to everyone. */
   adminOnly?: boolean;
+  /**
+   * Sub-items anidados visualmente debajo del padre. Útiles para vistas
+   * estrechamente relacionadas con el item padre (ej. "Historial de
+   * contratos" debajo de "Supplier Intelligence").
+   */
+  children?: NavItem[];
 };
 
 const agentItems: NavItem[] = [
@@ -26,6 +33,13 @@ const agentItems: NavItem[] = [
     label: "AI Supplier Intelligence Agent",
     href: "/agent/supplier-intelligence",
     icon: FileSearch,
+    children: [
+      {
+        label: "Historial de contratos",
+        href: "/agent/supplier-intelligence/history",
+        icon: History,
+      },
+    ],
   },
 ];
 
@@ -43,24 +57,33 @@ function NavLink({
   item,
   active,
   onNavigate,
+  nested = false,
 }: {
   item: NavItem;
   active: boolean;
   onNavigate: () => void;
+  /**
+   * Cuando es true, el link se renderiza con indent + tipografía algo más
+   * pequeña, y un guía vertical sutil a la izquierda — visualmente sub-item
+   * del padre que está justo arriba.
+   */
+  nested?: boolean;
 }) {
   const Icon = item.icon;
   return (
     <Link
       href={item.href}
       onClick={onNavigate}
-      className={`group relative flex items-center gap-2.5 pl-4 pr-3 py-2.5 rounded-md text-[13px] transition-all duration-200 ${
+      className={`group relative flex items-center gap-2.5 pr-3 py-2 rounded-md transition-all duration-200 ${
+        nested ? "ml-3 pl-5 text-[12.5px] border-l border-sidebar-border" : "pl-4 py-2.5 text-[13px]"
+      } ${
         active
           ? "bg-primary/10 text-foreground active-glow"
           : "text-sidebar-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground"
       }`}
     >
       <Icon
-        className={`w-4 h-4 flex-shrink-0 ${
+        className={`flex-shrink-0 ${nested ? "w-3.5 h-3.5" : "w-4 h-4"} ${
           active ? "text-primary" : "text-muted-foreground"
         }`}
       />
@@ -162,14 +185,30 @@ export default function Sidebar() {
             Agente de IA
           </p>
           <div className="space-y-1 mb-5">
-            {agentItems.map((item) => (
-              <NavLink
-                key={item.href}
-                item={item}
-                active={pathname.startsWith(item.href)}
-                onNavigate={close}
-              />
-            ))}
+            {agentItems.map((item) => {
+              // Padre: activo solo si la ruta es EXACTAMENTE el padre. De lo
+              // contrario, los sub-items (que son rutas que empiezan con el
+              // padre) marcarían los dos como activos a la vez.
+              const parentActive = pathname === item.href;
+              return (
+                <div key={item.href} className="space-y-1">
+                  <NavLink
+                    item={item}
+                    active={parentActive}
+                    onNavigate={close}
+                  />
+                  {item.children?.map((child) => (
+                    <NavLink
+                      key={child.href}
+                      item={child}
+                      active={pathname === child.href}
+                      onNavigate={close}
+                      nested
+                    />
+                  ))}
+                </div>
+              );
+            })}
           </div>
 
           {visibleConfigItems.length > 0 && (

@@ -68,6 +68,11 @@ import {
   type ExtractedContract,
   type ExtractionConfianza,
 } from "@/lib/api";
+import {
+  findSupplierByNameWithAI,
+  findServiceForSupplier,
+  type SupplierMatch,
+} from "@/lib/supplierLookup";
 
 /**
  * Full set of business fields surfaced in step 2. Most of these aren't
@@ -158,6 +163,41 @@ type Step = 1 | 2 | 3;
 
 export type FileKind = "pdf" | "docx" | "xlsx";
 
+/**
+ * Subconjunto de campos de step 2 que pueden ser pre-llenados desde el
+ * catálogo CrtLisProv cuando el usuario marca "Sí, existente" en step 1.
+ *
+ * Mantenemos esto explícito (no `Partial<Record<DisplayFieldKey, ...>>`) para
+ * que el contrato entre lookup → ReviewStep sea visible: si en el futuro
+ * agregamos otra columna del maestro, hay que añadirla aquí.
+ */
+export type CatalogPrefill = {
+  tipo_actividad: string | null;
+  zona_turismo: string | null;
+  proveedor: string | null;
+  codigo_servicio: string | null;
+};
+
+/**
+ * Resultado del lookup contra el catálogo. Lo guardamos junto al prefill para
+ * poder mostrar al usuario qué pasó (match exacto, no encontrado, etc.) en un
+ * banner de step 2 — ese feedback es importante porque los 4 campos vienen
+ * "mágicamente" llenos sin que el usuario los haya tocado.
+ */
+export type CatalogMatchInfo =
+  | {
+      status: "matched";
+      supplierName: string;
+      supplierCode: string;
+      matchedBy: SupplierMatch["matchedBy"];
+      serviceMatched: boolean;
+      /** Solo cuando matchedBy === "ai". */
+      aiConfidence?: SupplierMatch["aiConfidence"];
+      aiReasoning?: string;
+    }
+  | { status: "not_found"; query: string; aiAttempted: boolean }
+  | { status: "skipped"; reason: "new_supplier" | "no_query" };
+
 const MAX_FILE_BYTES = 20 * 1024 * 1024; // 20 MB — must match backend cap.
 
 /**
@@ -245,6 +285,32 @@ export function SupplierWorkflow() {
   const [isExistingSupplier, setIsExistingSupplier] = useState<boolean | null>(
     null,
   );
+  /**
+   * Pre-fill de los 4 campos del maestro (tipo_actividad, zona_turismo,
+   * proveedor, codigo_servicio) cuando el usuario marca "existente" y
+   * matcheamos al proveedor en CrtLisProv. `null` cuando no hubo match o el
+   * proveedor es nuevo.
+   */
+  const [catalogPrefill, setCatalogPrefill] = useState<CatalogPrefill | null>(
+    null,
+  );
+  /**
+   * Info del match (o no-match). Se calcula durante `startAnalysis` y se
+   * mantiene en estado para diagnóstico/log — el banner UI fue removido a
+   * pedido del usuario (la setter sigue siendo `setCatalogMatchInfo` para
+   * que el flujo no necesite cambios). Si en el futuro quieres re-mostrar el
+   * feedback en step 2, lee este estado en `ReviewStep`.
+   */
+  const [, setCatalogMatchInfo] = useState<CatalogMatchInfo | null>(null);
+  /**
+   * Sub-estado durante el lookup post-extracción. `null` cuando no estamos
+   * matchando. `"local"` cuando estamos corriendo el matcher local (rápido,
+   * casi instantáneo — apenas se ve). `"ai"` cuando local falló y estamos
+   * esperando al backend — esto sí es visible (~2-5s) y merece feedback UI.
+   */
+  const [matchingPhase, setMatchingPhase] = useState<"local" | "ai" | null>(
+    null,
+  );
 
   // Ease toward 90% while analyzing. Slower as we approach the ceiling so it
   // feels like work is happening even on long extractions.
@@ -316,6 +382,81 @@ export function SupplierWorkflow() {
       // Snap to 100% and let the filled bar linger briefly before we
       // transition to the review step — feels more finished than a hard cut.
       setProgress(100);
+
+      // Lookup contra el maestro CrtLisProv.
+      //   - Si el usuario marcó "nuevo": no buscamos, todo en blanco.
+      //   - Si marcó "existente":
+      //     1. Intentamos local (exact/prefix/includes) por nombre comercial,
+      //        luego por proveedor crudo. Esto es gratis y resuelve los casos
+      //        obvios.
+      //     2. Si nada matcheó, llamamos al fallback IA (POST /match-supplier)
+      //        con la primera query no vacía — Claude elige del catálogo
+      //        completo. Esto cubre casos como "HOTEL PARADOR RESORT & SPA"
+      //        → "PARADOR RESORT & SPA MANUEL ANTONIO" donde el prefijo
+      //        "HOTEL" rompe la heurística local.
+      //     3. Si nada matcheó (ni local ni IA), dejamos los 4 campos vacíos
+      //        y el banner del step 2 se lo dice al usuario.
+      let prefill: CatalogPrefill | null = null;
+      let matchInfo: CatalogMatchInfo | null = null;
+      if (isExistingSupplier) {
+        // Anuncia al usuario que estamos en la fase de matching (la barra ya
+        // llegó a 100% de la extracción IA, esto es el siguiente sub-paso).
+        setMatchingPhase("local");
+        const candidates = [response.data.nombre_comercial, response.data.proveedor]
+          .map((s) => s?.trim())
+          .filter((s): s is string => !!s);
+        if (candidates.length === 0) {
+          matchInfo = { status: "skipped", reason: "no_query" };
+        } else {
+          let match: SupplierMatch | null = null;
+          let aiAttempted = false;
+          for (const c of candidates) {
+            // Primero solo local — barato y rápido.
+            match = await findSupplierByNameWithAI(c, { enableAIFallback: false });
+            if (match) break;
+          }
+          if (!match) {
+            // Local falló para todos los candidatos → fallback IA con la primera query.
+            setMatchingPhase("ai");
+            aiAttempted = true;
+            match = await findSupplierByNameWithAI(candidates[0], {
+              enableAIFallback: true,
+            });
+          }
+          if (match) {
+            // Hint para resolver el código de servicio: descripción libre que
+            // pudo dar el usuario en `comments` o el nombre del archivo. La
+            // extracción actual no devuelve nombre/descripción del servicio,
+            // así que con frecuencia no habrá match a nivel servicio.
+            const serviceHint =
+              comments?.trim() || selectedFile.name || "";
+            const service = findServiceForSupplier(match.supplier, serviceHint);
+            prefill = {
+              tipo_actividad: match.supplier.actividad,
+              zona_turismo: match.supplier.zona,
+              proveedor: match.supplier.codigo,
+              codigo_servicio: service?.codigo ?? null,
+            };
+            matchInfo = {
+              status: "matched",
+              supplierName: match.supplier.nombre ?? match.supplier.codigo,
+              supplierCode: match.supplier.codigo,
+              matchedBy: match.matchedBy,
+              serviceMatched: service !== null,
+              aiConfidence: match.aiConfidence,
+              aiReasoning: match.aiReasoning,
+            };
+          } else {
+            matchInfo = { status: "not_found", query: candidates[0], aiAttempted };
+          }
+        }
+        setMatchingPhase(null);
+      } else {
+        matchInfo = { status: "skipped", reason: "new_supplier" };
+      }
+      setCatalogPrefill(prefill);
+      setCatalogMatchInfo(matchInfo);
+
       await new Promise((r) => setTimeout(r, 450));
       setResult(response);
       setStep(2);
@@ -332,6 +473,7 @@ export function SupplierWorkflow() {
       setProgress(0);
     } finally {
       setAnalyzing(false);
+      setMatchingPhase(null);
     }
   };
 
@@ -344,6 +486,9 @@ export function SupplierWorkflow() {
     setProgress(0);
     setComments("");
     setIsExistingSupplier(null);
+    setCatalogPrefill(null);
+    setCatalogMatchInfo(null);
+    setMatchingPhase(null);
   };
 
   /**
@@ -429,6 +574,7 @@ export function SupplierWorkflow() {
             serverError={serverError}
             analyzing={analyzing}
             progress={progress}
+            matchingPhase={matchingPhase}
             fileInputRef={fileInputRef}
             comments={comments}
             onCommentsChange={setComments}
@@ -442,7 +588,11 @@ export function SupplierWorkflow() {
         )}
 
         {step === 2 && result && (
-          <ReviewStep result={result} onApprove={approve} />
+          <ReviewStep
+            result={result}
+            catalogPrefill={catalogPrefill}
+            onApprove={approve}
+          />
         )}
 
         {step === 3 && result && (
@@ -461,6 +611,7 @@ function UploadStep({
   serverError,
   analyzing,
   progress,
+  matchingPhase,
   fileInputRef,
   comments,
   onCommentsChange,
@@ -476,6 +627,7 @@ function UploadStep({
   serverError: string | null;
   analyzing: boolean;
   progress: number;
+  matchingPhase: "local" | "ai" | null;
   fileInputRef: React.RefObject<HTMLInputElement | null>;
   comments: string;
   onCommentsChange: (value: string) => void;
@@ -612,6 +764,7 @@ function UploadStep({
           fileSize={file.size}
           kind={kind}
           progress={progress}
+          matchingPhase={matchingPhase}
         />
       )}
 
@@ -638,7 +791,9 @@ function UploadStep({
           {analyzing ? (
             <>
               <Loader2 className="w-4 h-4 animate-spin" />
-              Analizando contrato…
+              {matchingPhase === "ai"
+                ? "Buscando proveedor con IA…"
+                : "Analizando contrato…"}
             </>
           ) : (
             <>
@@ -836,14 +991,28 @@ function AnalysisProgressCard({
   fileSize,
   kind,
   progress,
+  matchingPhase,
 }: {
   fileName: string;
   fileSize: number;
   kind: FileKind;
   progress: number;
+  /**
+   * Sub-fase post-extracción: lookup contra el catálogo. `null` = no
+   * matchando (la barra de progreso clásica aplica). `"ai"` = local falló y
+   * estamos esperando al backend, mostramos un mensaje específico.
+   */
+  matchingPhase: "local" | "ai" | null;
 }) {
   const pct = Math.max(0, Math.min(100, Math.round(progress)));
-  const phase = analysisPhase(progress);
+  // Mientras corre el match IA, sobreescribimos la fase para dar feedback
+  // claro de qué está pasando (la barra está al 100% pero seguimos esperando).
+  const phase =
+    matchingPhase === "ai"
+      ? "Buscando coincidencia en el maestro con IA…"
+      : matchingPhase === "local"
+        ? "Buscando coincidencia en el maestro…"
+        : analysisPhase(progress);
   return (
     <div className="rounded-xl border border-primary/30 bg-primary/5">
       <div className="flex items-center gap-3 px-4 py-3 border-b border-border/50">
@@ -865,7 +1034,7 @@ function AnalysisProgressCard({
             className="text-[12.5px] font-semibold text-primary tabular-nums"
             aria-live="polite"
           >
-            {pct}%
+            {matchingPhase === "ai" ? "—" : `${pct}%`}
           </p>
         </div>
         <div
@@ -877,12 +1046,16 @@ function AnalysisProgressCard({
           className="relative h-1.5 w-full overflow-hidden rounded-full bg-secondary/70 border border-border/50"
         >
           <div
-            className="h-full rounded-full bg-primary shadow-[0_0_12px_0_hsl(var(--primary)/0.5)] transition-[width] duration-200 ease-out"
+            className={`h-full rounded-full bg-primary shadow-[0_0_12px_0_hsl(var(--primary)/0.5)] transition-[width] duration-200 ease-out ${
+              matchingPhase === "ai" ? "animate-pulse" : ""
+            }`}
             style={{ width: `${pct}%` }}
           />
         </div>
         <p className="text-[11px] text-muted-foreground">
-          Esto suele tomar entre 5 y 20 segundos.
+          {matchingPhase === "ai"
+            ? "Pidiéndole a Claude que elija el proveedor del catálogo."
+            : "Esto suele tomar entre 5 y 20 segundos."}
         </p>
       </div>
     </div>
@@ -899,6 +1072,15 @@ function AnalysisProgressCard({
  * `wide: true` makes the field span both columns of its section grid (handy
  * for free-text fields like address or policy text).
  */
+/**
+ * Una opción de un dropdown. Renderizamos como `codigo · descripcion` en el UI
+ * y guardamos sólo `codigo` como valor del campo.
+ */
+export interface SelectOption {
+  codigo: string;
+  descripcion: string;
+}
+
 export interface FieldDef {
   key: DisplayFieldKey;
   label: string;
@@ -907,17 +1089,64 @@ export interface FieldDef {
   inputType?: "text" | "date" | "email";
   /** Pull initial value + source chip from this AI-extracted field. */
   fromExtracted?:
+    // Identidad / contacto / legal
     | "fecha"
     | "proveedor"
     | "nombre_comercial"
     | "cedula"
     | "direccion"
     | "telefono"
+    | "pais"
+    | "state_province"
+    | "type_of_business"
+    | "contract_starts"
+    | "contract_ends"
+    | "reservations_email"
+    // Servicio
+    | "product_name"
+    | "ocupacion"
+    // Clasificación
+    | "tipo_unidad"
+    | "tipo_servicio"
+    | "categoria"
+    // Temporada
+    | "season_name"
+    | "season_starts"
+    | "season_ends"
+    | "meals_included"
+    // Tarifas
+    | "precios_neto_iva"
+    | "precio_rack_iva"
+    | "porcentaje_comision"
+    | "precios_neto_iva_fds"
+    | "precio_rack_iva_fds"
+    | "porcentaje_comision_fds"
+    // Políticas
+    | "cancellation_policy"
+    | "range_payment_policy"
+    | "kids_policy"
+    | "other_included"
+    | "feeds_adicionales"
+    // Bancarios
     | "tipo_moneda"
     | "numero_cuenta"
     | "banco";
   multiline?: boolean;
   wide?: boolean;
+  /**
+   * Si está presente, el campo se renderiza como dropdown en vez de input de
+   * texto. Las opciones se evalúan en cada render para soportar dependencias
+   * dinámicas (ej: las categorías dependen del tipo de servicio elegido).
+   *
+   * Recibe el mapa completo de valores actuales del formulario y devuelve la
+   * lista de opciones a mostrar. Si la lista está vacía y existe `dependsOn`,
+   * el FieldRow lo refleja con un mensaje "Seleccionar X primero".
+   */
+  options?: (
+    values: Record<DisplayFieldKey, string | null>,
+  ) => ReadonlyArray<SelectOption>;
+  /** Texto explicativo cuando `options(values).length === 0`. */
+  dependsOnLabel?: string;
 }
 
 /**
@@ -1008,12 +1237,12 @@ export const SECTIONS: SectionDef[] = [
       { key: "cedula_juridica", label: "Cédula Jurídica", icon: Hash, placeholder: "Ej: 3-101-123456", fromExtracted: "cedula" },
       { key: "contract_date", label: "Contract Date", icon: Calendar, placeholder: "YYYY-MM-DD", inputType: "date", fromExtracted: "fecha" },
       { key: "nombre_comercial", label: "Nombre Comercial", icon: BookMarked, placeholder: "Ej: ACME", fromExtracted: "nombre_comercial" },
-      { key: "pais", label: "País", icon: Globe, placeholder: "Ej: Costa Rica" },
-      { key: "state_province", label: "State / Province", icon: MapPin, placeholder: "Ej: San José" },
+      { key: "pais", label: "País", icon: Globe, placeholder: "Ej: Costa Rica", fromExtracted: "pais" },
+      { key: "state_province", label: "State / Province", icon: MapPin, placeholder: "Ej: Puntarenas", fromExtracted: "state_province" },
       { key: "location", label: "Location", icon: MapPin, placeholder: "Calle, número, ciudad…", fromExtracted: "direccion", wide: true, multiline: true },
-      { key: "type_of_business", label: "Type of Business", icon: Briefcase, placeholder: "Ej: Hotel, agencia, operador…" },
-      { key: "contract_starts", label: "Contract Starts", icon: CalendarCheck2, placeholder: "YYYY-MM-DD", inputType: "date" },
-      { key: "contract_ends", label: "Contract Ends", icon: CalendarRange, placeholder: "YYYY-MM-DD", inputType: "date" },
+      { key: "type_of_business", label: "Type of Business", icon: Briefcase, placeholder: "Ej: Hotel, Tour Operator…", fromExtracted: "type_of_business" },
+      { key: "contract_starts", label: "Contract Starts", icon: CalendarCheck2, placeholder: "YYYY-MM-DD", inputType: "date", fromExtracted: "contract_starts" },
+      { key: "contract_ends", label: "Contract Ends", icon: CalendarRange, placeholder: "YYYY-MM-DD", inputType: "date", fromExtracted: "contract_ends" },
     ],
   },
   {
@@ -1024,11 +1253,32 @@ export const SECTIONS: SectionDef[] = [
     accent: ACCENTS.sky,
     fields: [
       { key: "codigo_servicio", label: "Código Servicio", icon: Hash, placeholder: "Ej: SVC-1024" },
-      { key: "product_name", label: "Product Name", icon: Tag, placeholder: "Ej: Habitación Standard" },
-      { key: "tipo_unidad", label: "Tipo Unidad", icon: BedDouble, placeholder: "Ej: Habitación / Tour / Vehículo" },
-      { key: "tipo_servicio", label: "Tipo Servicio", icon: Tag, placeholder: "Ej: Alojamiento" },
-      { key: "categoria", label: "Categoría", icon: Star, placeholder: "Ej: 4 estrellas" },
-      { key: "ocupacion", label: "Ocupación", icon: Users, placeholder: "Ej: Doble · 2 adultos" },
+      { key: "product_name", label: "Product Name", icon: Tag, placeholder: "Ej: COTINGA, Garden", fromExtracted: "product_name" },
+      // P · Q · R: clasificadores del catálogo Utopía. La IA los rellena
+      // automáticamente como parte de la extracción (ver backend tool schema).
+      // El usuario los puede editar como texto si la IA se equivoca.
+      {
+        key: "tipo_unidad",
+        label: "Tipo Unidad",
+        icon: BedDouble,
+        placeholder: "N o S",
+        fromExtracted: "tipo_unidad",
+      },
+      {
+        key: "tipo_servicio",
+        label: "Tipo Servicio",
+        icon: Tag,
+        placeholder: "Ej: HO, TO, TR…",
+        fromExtracted: "tipo_servicio",
+      },
+      {
+        key: "categoria",
+        label: "Categoría",
+        icon: Star,
+        placeholder: "Ej: OCV, STD, UNI…",
+        fromExtracted: "categoria",
+      },
+      { key: "ocupacion", label: "Ocupación", icon: Users, placeholder: "Ej: DBL, SGL", fromExtracted: "ocupacion" },
     ],
   },
   {
@@ -1038,10 +1288,10 @@ export const SECTIONS: SectionDef[] = [
     icon: Sun,
     accent: ACCENTS.amber,
     fields: [
-      { key: "season_name", label: "Season Name", icon: Sparkles, placeholder: "Ej: Alta, Baja, Verde…" },
-      { key: "season_starts", label: "Season Starts", icon: Calendar, placeholder: "YYYY-MM-DD", inputType: "date" },
-      { key: "season_ends", label: "Season Ends", icon: Calendar, placeholder: "YYYY-MM-DD", inputType: "date" },
-      { key: "meals_included", label: "Meals Included", icon: Utensils, placeholder: "Ej: Desayuno · Cena" },
+      { key: "season_name", label: "Season Name", icon: Sparkles, placeholder: "Ej: GREEN SEASON, ALTA…", fromExtracted: "season_name" },
+      { key: "season_starts", label: "Season Starts", icon: Calendar, placeholder: "YYYY-MM-DD", inputType: "date", fromExtracted: "season_starts" },
+      { key: "season_ends", label: "Season Ends", icon: Calendar, placeholder: "YYYY-MM-DD", inputType: "date", fromExtracted: "season_ends" },
+      { key: "meals_included", label: "Meals Included", icon: Utensils, placeholder: "Ej: BREAKFAST, MAP…", fromExtracted: "meals_included" },
     ],
   },
   {
@@ -1052,10 +1302,10 @@ export const SECTIONS: SectionDef[] = [
     accent: ACCENTS.emerald,
     fields: [
       { key: "tipo_tarifa_neta", label: "Tipo Tarifa Neta", icon: DollarSign, placeholder: "Ej: Por persona / por unidad" },
-      { key: "precios_neto_iva", label: "Precios Neto con IVA Incluido", icon: Banknote, placeholder: "Ej: 120.00 USD" },
-      { key: "precio_rack_iva", label: "Precio Rack con IVA Incluido", icon: Banknote, placeholder: "Ej: 180.00 USD" },
+      { key: "precios_neto_iva", label: "Precios Neto con IVA Incluido", icon: Banknote, placeholder: "Ej: 276.75", fromExtracted: "precios_neto_iva" },
+      { key: "precio_rack_iva", label: "Precio Rack con IVA Incluido", icon: Banknote, placeholder: "Ej: 369", fromExtracted: "precio_rack_iva" },
       { key: "tipo_tarifa_mayorista", label: "Tipo Tarifa Mayorista", icon: Receipt, placeholder: "Ej: Wholesale" },
-      { key: "porcentaje_comision", label: "Porcentaje de Comisión", icon: Percent, placeholder: "Ej: 18%" },
+      { key: "porcentaje_comision", label: "Porcentaje de Comisión", icon: Percent, placeholder: "Ej: 25", fromExtracted: "porcentaje_comision" },
     ],
   },
   {
@@ -1067,10 +1317,10 @@ export const SECTIONS: SectionDef[] = [
     fields: [
       { key: "tipo_tarifa_fds", label: "Tipo Tarifa Fin de Semana", icon: DollarSign, placeholder: "Ej: Weekend rate" },
       { key: "t_tar_neta_fds", label: "T.Tar Neta Fin de Semana", icon: DollarSign, placeholder: "Tipo de tarifa neta FdS" },
-      { key: "precios_neto_iva_fds", label: "Precios Neto con IVA Incluido Fin de Semana", icon: Banknote, placeholder: "Ej: 140.00 USD" },
-      { key: "precio_rack_iva_fds", label: "Precio Rack con IVA Incluido Fin de Semana", icon: Banknote, placeholder: "Ej: 200.00 USD" },
+      { key: "precios_neto_iva_fds", label: "Precios Neto con IVA Incluido Fin de Semana", icon: Banknote, placeholder: "Ej: 276.75", fromExtracted: "precios_neto_iva_fds" },
+      { key: "precio_rack_iva_fds", label: "Precio Rack con IVA Incluido Fin de Semana", icon: Banknote, placeholder: "Ej: 369", fromExtracted: "precio_rack_iva_fds" },
       { key: "tipo_tarifa_mayorista_fds", label: "Tipo Tarifa Mayorista Fin de Semana", icon: Receipt, placeholder: "Ej: Wholesale FdS" },
-      { key: "porcentaje_comision_fds", label: "Porcentaje de Comisión Fin de Semana", icon: Percent, placeholder: "Ej: 18%" },
+      { key: "porcentaje_comision_fds", label: "Porcentaje de Comisión Fin de Semana", icon: Percent, placeholder: "Ej: 25", fromExtracted: "porcentaje_comision_fds" },
     ],
   },
   {
@@ -1080,12 +1330,12 @@ export const SECTIONS: SectionDef[] = [
     icon: ShieldAlert,
     accent: ACCENTS.rose,
     fields: [
-      { key: "cancellation_policy", label: "Cancellation Policy", icon: ShieldAlert, placeholder: "Resumen de la política de cancelación", wide: true, multiline: true },
-      { key: "range_payment_policy", label: "Range Payment Policy", icon: Wallet, placeholder: "Ventana de pago aplicable", wide: true, multiline: true },
+      { key: "cancellation_policy", label: "Cancellation Policy", icon: ShieldAlert, placeholder: "Resumen de la política de cancelación", wide: true, multiline: true, fromExtracted: "cancellation_policy" },
+      { key: "range_payment_policy", label: "Range Payment Policy", icon: Wallet, placeholder: "Ventana de pago aplicable", wide: true, multiline: true, fromExtracted: "range_payment_policy" },
       { key: "others_payment_cancel", label: "Others in Payment or Cancellation", icon: FileText, placeholder: "Cláusulas adicionales", wide: true, multiline: true },
-      { key: "kids_policy", label: "Kids Policy", icon: Baby, placeholder: "Reglas para menores", wide: true, multiline: true },
-      { key: "other_included", label: "Other Included", icon: PlusCircle, placeholder: "Otros servicios incluidos" },
-      { key: "feeds_adicionales", label: "Feeds Adicionales", icon: Receipt, placeholder: "Cargos extras" },
+      { key: "kids_policy", label: "Kids Policy", icon: Baby, placeholder: "Reglas para menores", wide: true, multiline: true, fromExtracted: "kids_policy" },
+      { key: "other_included", label: "Other Included", icon: PlusCircle, placeholder: "Otros servicios incluidos", fromExtracted: "other_included" },
+      { key: "feeds_adicionales", label: "Feeds Adicionales", icon: Receipt, placeholder: "Cargos extras", fromExtracted: "feeds_adicionales" },
     ],
   },
   {
@@ -1095,7 +1345,7 @@ export const SECTIONS: SectionDef[] = [
     icon: Mail,
     accent: ACCENTS.sky,
     fields: [
-      { key: "reservations_email", label: "Reservations Email", icon: Mail, placeholder: "reservas@proveedor.com", inputType: "email" },
+      { key: "reservations_email", label: "Reservations Email", icon: Mail, placeholder: "reservas@proveedor.com", inputType: "email", fromExtracted: "reservations_email" },
       { key: "cond_credito", label: "Cond. Crédito", icon: CreditCard, placeholder: "Ej: 30 días neto" },
       { key: "plazo", label: "Plazo", icon: Clock, placeholder: "Ej: 30 días" },
     ],
@@ -1126,15 +1376,77 @@ export const SECTIONS: SectionDef[] = [
  */
 export const ALL_FIELDS: FieldDef[] = SECTIONS.flatMap((s) => s.fields);
 
-/** Build a `{ displayKey -> initial value }` map from the AI extraction. */
+/**
+ * Convierte un índice 1-based en su letra de columna estilo Excel:
+ *   1 → A, 26 → Z, 27 → AA, 52 → AZ, 53 → BA, etc.
+ *
+ * El maestro de proveedores en producción está versionado como xlsx, así que
+ * etiquetar cada campo del formulario con su letra de columna correspondiente
+ * mantiene la equivalencia visual con esa hoja y facilita citar campos por
+ * letra en conversación ("revisa la columna AA").
+ */
+export function excelColumnLetter(n: number): string {
+  if (!Number.isFinite(n) || n < 1) return "";
+  let s = "";
+  let x = Math.floor(n);
+  while (x > 0) {
+    const r = (x - 1) % 26;
+    s = String.fromCharCode(65 + r) + s;
+    x = Math.floor((x - 1) / 26);
+  }
+  return s;
+}
+
+/**
+ * Mapa precomputado `key -> letra Excel` siguiendo el orden de `ALL_FIELDS`.
+ * Si en el futuro reordenas SECTIONS, este mapa se actualiza solo — y por eso
+ * vive como derivación de la fuente de verdad en lugar de como literal.
+ *
+ * Hoy: 52 campos → A..Z, AA..AZ.
+ */
+export const FIELD_EXCEL_COL: Record<DisplayFieldKey, string> = ALL_FIELDS
+  .reduce<Record<string, string>>((acc, f, i) => {
+    acc[f.key] = excelColumnLetter(i + 1);
+    return acc;
+  }, {}) as Record<DisplayFieldKey, string>;
+
+/**
+ * Campos que muestran el aviso "Revisar — la información puede ser incorrecta".
+ * Estos son los identificadores del proveedor que vienen pre-llenados desde el
+ * maestro CrtLisProv (cuando hay match) o del nombre extraído del contrato —
+ * en ambos casos el match no es 100% confiable y conviene que el humano
+ * confirme antes de aprobar.
+ */
+export const FIELDS_NEEDING_REVIEW: ReadonlySet<DisplayFieldKey> = new Set<DisplayFieldKey>([
+  "tipo_actividad",
+  "zona_turismo",
+  "proveedor",
+]);
+
+/**
+ * Build a `{ displayKey -> initial value }` map from the AI extraction.
+ *
+ * El `catalogPrefill` (cuando viene) sobreescribe los 4 campos del maestro
+ * (tipo_actividad, zona_turismo, proveedor, codigo_servicio). Esos campos no
+ * tienen `fromExtracted`, así que sin catálogo arrancarían vacíos — con
+ * catálogo, traen el valor del maestro como punto de partida (que el usuario
+ * puede editar normalmente en step 2).
+ */
 function buildInitialValues(
   extracted: ExtractedContract,
+  catalogPrefill?: CatalogPrefill | null,
 ): Record<DisplayFieldKey, string | null> {
   const out: Partial<Record<DisplayFieldKey, string | null>> = {};
   for (const field of ALL_FIELDS) {
     out[field.key] = field.fromExtracted
       ? (extracted[field.fromExtracted] ?? null)
       : null;
+  }
+  if (catalogPrefill) {
+    if (catalogPrefill.tipo_actividad) out.tipo_actividad = catalogPrefill.tipo_actividad;
+    if (catalogPrefill.zona_turismo) out.zona_turismo = catalogPrefill.zona_turismo;
+    if (catalogPrefill.proveedor) out.proveedor = catalogPrefill.proveedor;
+    if (catalogPrefill.codigo_servicio) out.codigo_servicio = catalogPrefill.codigo_servicio;
   }
   return out as Record<DisplayFieldKey, string | null>;
 }
@@ -1176,17 +1488,23 @@ const ROW_FILTERS: { id: RowFilter; label: string }[] = [
 
 function ReviewStep({
   result,
+  catalogPrefill,
   onApprove,
 }: {
   result: ExtractContractResponse;
+  catalogPrefill: CatalogPrefill | null;
   onApprove: () => void;
 }) {
   const { data, validation, meta } = result;
   const conf = CONFIANZA_STYLES[data.confianza];
 
-  // Initial values seeded from the AI extraction. Keys are display-field
-  // names; values come from the mapped `fromExtracted` entry (or null).
-  const initialValues = useMemo(() => buildInitialValues(data), [data]);
+  // Initial values seeded from the AI extraction + catalog prefill (cuando
+  // hubo match). Keys are display-field names; AI mapping comes via
+  // `fromExtracted`; los 4 campos del maestro vienen del prefill si aplica.
+  const initialValues = useMemo(
+    () => buildInitialValues(data, catalogPrefill),
+    [data, catalogPrefill],
+  );
 
   /**
    * User overrides keyed by display field name. A key is present here only
@@ -1308,6 +1626,12 @@ function ReviewStep({
           </p>
         </div>
       </div>
+
+      {/* CatalogMatchBanner se removió a pedido — el lookup contra el maestro
+         sigue corriendo y los 4 campos siguen pre-llenándose, pero ya no
+         renderizamos el banner verde/amber con confianza/reasoning. Si en el
+         futuro queremos re-mostrarlo, descomentar:
+         <CatalogMatchBanner info={catalogMatchInfo} /> */}
 
       {validation.warnings.length > 0 && (
         <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-[12.5px] text-amber-200">
@@ -1753,7 +2077,15 @@ function SectionCard({
               <FieldRow
                 key={f.key}
                 field={f}
+                excelCol={FIELD_EXCEL_COL[f.key]}
+                needsReview={FIELDS_NEEDING_REVIEW.has(f.key)}
                 value={displayValues[f.key]}
+                // Evaluamos `options` aquí (no en FieldRow) porque la función
+                // necesita el mapa completo de valores actuales — lo tenemos
+                // a este nivel y no queremos hacer prop-drilling de
+                // displayValues hasta FieldRow.
+                options={f.options ? f.options(displayValues) : undefined}
+                dependsOnLabel={f.dependsOnLabel}
                 source={
                   f.fromExtracted
                     ? extracted.paginas_origen[f.fromExtracted]
@@ -1786,14 +2118,34 @@ function SectionCard({
  */
 function FieldRow({
   field,
+  excelCol,
+  needsReview,
   value,
+  options,
+  dependsOnLabel,
   source,
   isMarkedMissing,
   filename,
   onSave,
 }: {
   field: FieldDef;
+  /** Letra de columna estilo Excel (A..Z, AA..AZ). Se renderiza antes del label. */
+  excelCol: string;
+  /**
+   * Si true, agrega un badge "Revisar" en la cabecera del campo. Lo usamos en
+   * los identificadores del proveedor (tipo_actividad / zona_turismo /
+   * proveedor) — el match contra el maestro o la extracción IA pueden estar
+   * mal y queremos que el humano confirme antes de aprobar.
+   */
+  needsReview: boolean;
   value: string | null;
+  /**
+   * Si está presente, el campo se renderiza como `<select>` en lugar del
+   * input de texto con flujo edit/save. Lista vacía + `dependsOnLabel`
+   * presente = mensaje "depende de otro campo".
+   */
+  options?: ReadonlyArray<SelectOption>;
+  dependsOnLabel?: string;
   source: string | number | undefined;
   isMarkedMissing: boolean;
   filename: string;
@@ -1801,6 +2153,7 @@ function FieldRow({
 }) {
   const { icon: Icon, label, placeholder, inputType, multiline } = field;
   const missing = value === null || value === "";
+  const isSelect = !!options;
 
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
@@ -1844,14 +2197,41 @@ function FieldRow({
 
   return (
     <div className="group px-5 py-4 min-w-0 hover:bg-secondary/20 transition-colors">
-      <div className="flex items-center gap-2 text-muted-foreground min-w-0">
+      <div className="flex items-center gap-2 text-muted-foreground min-w-0 flex-wrap">
+        {/* Letra de columna Excel — pill monoespaciada para que se lea como
+            "A · TIPO ACTIVIDAD" igual que en una hoja de cálculo. */}
+        <span
+          className="inline-flex items-center justify-center min-w-[26px] h-5 px-1.5 rounded-md border border-border/70 bg-secondary/60 text-[10.5px] font-mono font-semibold text-muted-foreground/90 tabular-nums shrink-0"
+          aria-label={`Columna ${excelCol}`}
+          title={`Columna ${excelCol}`}
+        >
+          {excelCol}
+        </span>
         <Icon className="w-4 h-4 shrink-0" />
         <p className="text-[12px] uppercase tracking-wider font-semibold truncate">
           {label}
         </p>
+        {needsReview && (
+          <span
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border border-amber-500/40 bg-amber-500/10 text-[10px] font-semibold uppercase tracking-wider text-amber-300 normal-case shrink-0"
+            title="La información puede ser incorrecta — por favor revisa antes de aprobar."
+          >
+            <AlertTriangle className="w-3 h-3" />
+            Revisar — puede ser incorrecto
+          </span>
+        )}
       </div>
 
-      {editing ? (
+      {isSelect ? (
+        <SelectFieldBody
+          value={value}
+          options={options ?? []}
+          dependsOnLabel={dependsOnLabel}
+          placeholder={placeholder}
+          label={label}
+          onSave={onSave}
+        />
+      ) : editing ? (
         <div className="mt-2 flex items-start gap-2">
           {multiline ? (
             <textarea
@@ -1920,6 +2300,92 @@ function FieldRow({
             </button>
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Body de un FieldRow tipo dropdown.
+ *
+ * Render inline (sin flujo edit/save con pencil): se elige del dropdown y
+ * commiteamos en el `onChange`. Para cambiar el valor el usuario interactúa
+ * directamente con el `<select>` — un click menos vs. text fields.
+ *
+ * Si la lista de opciones está vacía y `dependsOnLabel` está presente,
+ * mostramos un mensaje (deshabilitado) en lugar del select. Esto cubre el
+ * caso de Categoría cuando todavía no hay Tipo de Servicio elegido.
+ *
+ * Mostramos `codigo · descripcion` en cada `<option>` para que el usuario vea
+ * el contexto (ej: "OCV · OCEAN VIEW"), pero solo guardamos el `codigo` —
+ * compatible con el formato del xlsx maestro.
+ */
+function SelectFieldBody({
+  value,
+  options,
+  dependsOnLabel,
+  placeholder,
+  label,
+  onSave,
+}: {
+  value: string | null;
+  options: ReadonlyArray<SelectOption>;
+  dependsOnLabel?: string;
+  placeholder?: string;
+  label: string;
+  onSave: (next: string | null) => void;
+}) {
+  const empty = options.length === 0;
+  // Si el valor actual no está en la lista (ej: el usuario cambió tipo_servicio
+  // y el codigo guardado ya no aplica), mostramos el codigo crudo como una
+  // opción "stale" para que sea explícito que está fuera de catálogo.
+  const valueInOptions =
+    value !== null && options.some((o) => o.codigo === value);
+  const showStale = value !== null && value !== "" && !valueInOptions && !empty;
+
+  if (empty) {
+    return (
+      <div className="mt-1.5">
+        <p className="text-[13px] italic text-muted-foreground/70">
+          {dependsOnLabel ?? "Sin opciones disponibles."}
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-2 flex items-start gap-2">
+      <select
+        value={value ?? ""}
+        onChange={(e) => {
+          const v = e.target.value;
+          onSave(v === "" ? null : v);
+        }}
+        aria-label={label}
+        className="flex-1 min-w-0 rounded-md border border-border bg-secondary/40 px-3 py-2 text-[15px] text-foreground outline-none focus:border-primary focus:bg-secondary/60 cursor-pointer"
+      >
+        <option value="">— {placeholder ?? "Selecciona una opción"} —</option>
+        {showStale && value && (
+          <option value={value} className="italic">
+            {value} · (fuera de catálogo)
+          </option>
+        )}
+        {options.map((opt) => (
+          <option key={opt.codigo} value={opt.codigo}>
+            {opt.codigo} · {opt.descripcion}
+          </option>
+        ))}
+      </select>
+      {value && (
+        <button
+          type="button"
+          onClick={() => onSave(null)}
+          aria-label={`Limpiar ${label}`}
+          title="Limpiar selección"
+          className="inline-flex items-center justify-center h-9 w-9 rounded-md border border-border bg-secondary/60 text-muted-foreground hover:text-destructive hover:bg-secondary transition-colors shrink-0"
+        >
+          <X className="w-4 h-4" />
+        </button>
       )}
     </div>
   );

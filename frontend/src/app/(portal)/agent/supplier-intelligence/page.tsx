@@ -1,17 +1,14 @@
 "use client";
 
 import {
-  ArrowRight,
   CalendarRange,
   Clock3,
   FileCheck2,
   Gauge,
-  History,
   Sparkles,
   TrendingUp,
   type LucideIcon,
 } from "lucide-react";
-import Link from "next/link";
 import { useState } from "react";
 import { useAuth } from "@/lib/useAuth";
 import { SupplierWorkflow } from "./workflow";
@@ -23,8 +20,9 @@ import { SupplierWorkflow } from "./workflow";
  *   (hoy / semana / mes / trimestre / all-time). Values swap per range —
  *   mock numbers until the backend publishes real counters per window.
  * - Below, the three-step workflow (`<SupplierWorkflow />`) replaces the
- *   old chat UI. The document-history section was removed per product
- *   feedback: it duplicated data visible in Utopía itself.
+ *   old chat UI. The document-history sub-page now lives as its own nav
+ *   item in the sidebar (anidado bajo Supplier Intelligence) — el link
+ *   debajo del workflow se removió porque duplicaba la navegación.
  */
 
 type MetricTone = "primary" | "blue" | "amber" | "violet";
@@ -277,26 +275,6 @@ export default function SupplierIntelligencePage() {
 
       {/* Workflow */}
       <SupplierWorkflow />
-
-      {/* Link to the full history sub-page (table + filters). */}
-      <Link
-        href="/agent/supplier-intelligence/history"
-        className="group flex items-center gap-3 rounded-2xl border border-border bg-card/80 px-5 py-4 hover:border-primary/40 hover:bg-card/90 transition-colors"
-      >
-        <div className="w-10 h-10 rounded-xl bg-primary/10 border border-primary/30 flex items-center justify-center shrink-0">
-          <History className="w-4.5 h-4.5 text-primary" />
-        </div>
-        <div className="flex-1 min-w-0">
-          <p className="text-[14.5px] font-semibold text-foreground">
-            Ver historial de contratos
-          </p>
-          <p className="mt-0.5 text-[12.5px] text-muted-foreground">
-            Tabla con todos los contratos procesados, con filtros por estado,
-            tipo de archivo y fecha.
-          </p>
-        </div>
-        <ArrowRight className="w-4 h-4 text-muted-foreground group-hover:text-primary group-hover:translate-x-0.5 transition-all shrink-0" />
-      </Link>
     </div>
   );
 }

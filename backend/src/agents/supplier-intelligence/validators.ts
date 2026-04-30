@@ -1,4 +1,8 @@
 import type { ExtractedContract, ValidationResult } from "./types.js";
+import {
+  TIPO_SERVICIO_CODES,
+  CATEGORIAS_BY_TIPO_SERVICIO,
+} from "./generated/serviceTypesData.js";
 
 /**
  * Validate the IBAN checksum per ISO 13616 (mod-97 = 1).
@@ -98,6 +102,42 @@ export function validateExtraction(
     warnings.push(
       "El teléfono extraído tiene un número de dígitos fuera del rango E.164 (7–15).",
     );
+  }
+
+  // tipo_servicio — si Claude devolvió un código fuera del catálogo (no
+  // debería pasar por el enum del schema, pero defensive), lo limpiamos a
+  // null para no propagar basura al frontend, y avisamos.
+  if (
+    extraction.tipo_servicio &&
+    !TIPO_SERVICIO_CODES.includes(extraction.tipo_servicio)
+  ) {
+    warnings.push(
+      `Tipo de servicio "${extraction.tipo_servicio}" no está en el catálogo Utopía — se ignoró.`,
+    );
+    extraction = { ...extraction, tipo_servicio: null, categoria: null };
+  }
+
+  // categoria — debe pertenecer al tipo_servicio elegido. Si no, advertimos
+  // y la dejamos null para que el usuario revise; mantenemos tipo_servicio
+  // para no perder esa parte del trabajo.
+  if (extraction.categoria) {
+    if (!extraction.tipo_servicio) {
+      warnings.push(
+        "Se devolvió 'categoria' pero 'tipo_servicio' es null — categoria ignorada.",
+      );
+      extraction = { ...extraction, categoria: null };
+    } else {
+      const validCats = CATEGORIAS_BY_TIPO_SERVICIO[extraction.tipo_servicio];
+      const ok =
+        Array.isArray(validCats) &&
+        validCats.some((c) => c.codigo === extraction.categoria);
+      if (!ok) {
+        warnings.push(
+          `Categoría "${extraction.categoria}" no es válida para tipo_servicio "${extraction.tipo_servicio}" — se ignoró.`,
+        );
+        extraction = { ...extraction, categoria: null };
+      }
+    }
   }
 
   // Campos faltantes / baja confianza → recomendar revisión humana.

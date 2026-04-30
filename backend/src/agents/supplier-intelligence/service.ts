@@ -153,16 +153,68 @@ function coerceExtraction(input: unknown): ExtractedContract {
       ? (r.paginas_origen as Record<string, string | number>)
       : {};
 
+  // Estrechar tipo_unidad al literal — cualquier valor fuera del enum se
+  // trata como null (defensa contra alucinaciones del modelo).
+  const tipoUnidad = (() => {
+    const v = r.tipo_unidad;
+    if (v === "N" || v === "S") return v;
+    return null;
+  })();
+
+  // stringOrNumberAsString — algunos campos pueden venir como número (ej:
+  // precios) y los queremos como string para preservar formato.
+  const numericAsString = (v: unknown): string | null => {
+    if (v === null || v === undefined) return null;
+    if (typeof v === "string") return v;
+    if (typeof v === "number" && Number.isFinite(v)) return String(v);
+    return null;
+  };
+
   return {
+    // identidad / contacto / legal
     fecha: stringOrNull(r.fecha),
     proveedor: stringOrNull(r.proveedor),
     nombre_comercial: stringOrNull(r.nombre_comercial),
     cedula: stringOrNull(r.cedula),
     direccion: stringOrNull(r.direccion),
     telefono: stringOrNull(r.telefono),
+    pais: stringOrNull(r.pais),
+    state_province: stringOrNull(r.state_province),
+    type_of_business: stringOrNull(r.type_of_business),
+    contract_starts: stringOrNull(r.contract_starts),
+    contract_ends: stringOrNull(r.contract_ends),
+    reservations_email: stringOrNull(r.reservations_email),
+    // servicio
+    product_name: stringOrNull(r.product_name),
+    ocupacion: stringOrNull(r.ocupacion),
+    // clasificación
+    tipo_unidad: tipoUnidad,
+    tipo_servicio: stringOrNull(r.tipo_servicio),
+    categoria: stringOrNull(r.categoria),
+    // temporada
+    season_name: stringOrNull(r.season_name),
+    season_starts: stringOrNull(r.season_starts),
+    season_ends: stringOrNull(r.season_ends),
+    meals_included: stringOrNull(r.meals_included),
+    // tarifas estándar
+    precios_neto_iva: numericAsString(r.precios_neto_iva),
+    precio_rack_iva: numericAsString(r.precio_rack_iva),
+    porcentaje_comision: numericAsString(r.porcentaje_comision),
+    // tarifas FdS
+    precios_neto_iva_fds: numericAsString(r.precios_neto_iva_fds),
+    precio_rack_iva_fds: numericAsString(r.precio_rack_iva_fds),
+    porcentaje_comision_fds: numericAsString(r.porcentaje_comision_fds),
+    // políticas
+    cancellation_policy: stringOrNull(r.cancellation_policy),
+    range_payment_policy: stringOrNull(r.range_payment_policy),
+    kids_policy: stringOrNull(r.kids_policy),
+    other_included: stringOrNull(r.other_included),
+    feeds_adicionales: stringOrNull(r.feeds_adicionales),
+    // bancarios
     tipo_moneda: stringOrNull(r.tipo_moneda),
     numero_cuenta: stringOrNull(r.numero_cuenta),
     banco: stringOrNull(r.banco),
+    // metadatos
     confianza,
     campos_faltantes: camposFaltantes,
     paginas_origen: paginasOrigen,
