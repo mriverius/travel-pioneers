@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // @ts-check
 /**
- * Build script — convierte data/CrtLisProv.xlsx en src/lib/supplierCatalog.ts.
+ * Build script — convierte data/lista-proveedores.xlsx en src/lib/supplierCatalog.ts.
  *
  * Por qué un script: el archivo tiene ~14k filas (~2 MB sin compactar). Generar
  * un módulo TS al build evita parsear xlsx en el browser, mantiene tipos
@@ -12,7 +12,7 @@
  *   - es idempotente: si el xlsx no cambió, sobreescribe con contenido idéntico
  *
  * Cuándo correrlo:
- *   - cada vez que reemplaces frontend/data/CrtLisProv.xlsx con una versión
+ *   - cada vez que reemplaces frontend/data/lista-proveedores.xlsx con una versión
  *     más reciente del maestro de proveedores
  *
  * Importante: usamos la lib `xlsx` instalada en el backend (no agregamos una
@@ -26,7 +26,7 @@ import { writeFileSync, existsSync } from "node:fs";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FRONTEND_ROOT = resolve(__dirname, "..");
 const REPO_ROOT = resolve(FRONTEND_ROOT, "..");
-const XLSX_PATH = resolve(FRONTEND_ROOT, "data", "CrtLisProv.xlsx");
+const XLSX_PATH = resolve(FRONTEND_ROOT, "data", "lista-proveedores.xlsx");
 const OUT_PATH = resolve(FRONTEND_ROOT, "src", "lib", "supplierCatalog.ts");
 
 // Resolver `xlsx` desde el backend para no inflar las deps del frontend con
@@ -47,7 +47,7 @@ try {
 if (!existsSync(XLSX_PATH)) {
   console.error(`[build-supplier-catalog] Falta el archivo: ${XLSX_PATH}`);
   console.error(
-    "Coloca CrtLisProv.xlsx en frontend/data/ y vuelve a correr el script.",
+    "Coloca lista-proveedores.xlsx en frontend/data/ y vuelve a correr el script.",
   );
   process.exit(1);
 }
@@ -188,7 +188,7 @@ for (const s of suppliers) {
 }
 
 // --- Salida ---
-const SOURCE_FILE = "data/CrtLisProv.xlsx";
+const SOURCE_FILE = "data/lista-proveedores.xlsx";
 const totalServicios = suppliers.reduce((sum, s) => sum + s.servicios.length, 0);
 
 const banner =

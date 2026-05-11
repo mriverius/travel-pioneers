@@ -1,5 +1,5 @@
 /**
- * Búsqueda en el catálogo de proveedores (CrtLisProv).
+ * Búsqueda en el catálogo de proveedores (lista-proveedores).
  *
  * Por qué un módulo separado del JSON generado: para que `supplierCatalog.ts`
  * (1.6 MB) se cargue por **dynamic import** únicamente cuando el usuario marca

@@ -205,6 +205,68 @@ function safeJsonParse(text: string): unknown {
   }
 }
 
+/**
+ * Variante de `request()` para endpoints que devuelven binario (xlsx, pdf,
+ * zip). Mismo manejo de errores (lee el body como JSON cuando 4xx/5xx para
+ * extraer el message del envelope), pero el success path devuelve
+ * `{ blob, filename }` — filename viene del header Content-Disposition
+ * cuando está presente, sino del fallback que pasa el caller.
+ */
+async function requestBlob(
+  path: string,
+  init: RequestOptions,
+  fallbackFilename: string,
+): Promise<{ blob: Blob; filename: string }> {
+  const { body, headers, auth: authed = false, ...rest } = init;
+
+  const finalHeaders: Record<string, string> = {
+    Accept: "application/octet-stream, */*",
+    ...(headers as Record<string, string> | undefined),
+  };
+  if (body !== undefined) {
+    finalHeaders["Content-Type"] = "application/json";
+  }
+  if (authed) {
+    const token = getSession()?.token;
+    if (token) {
+      finalHeaders.Authorization = `Bearer ${token}`;
+    }
+  }
+
+  const res = await fetch(`${API_URL}${path}`, {
+    ...rest,
+    headers: finalHeaders,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    if (res.status === 401 && authed) clearSession();
+    // Error responses están en JSON — leer el text y parsear normal.
+    const text = await res.text();
+    const payload = text ? (safeJsonParse(text) as BackendErrorShape) : null;
+    const message =
+      payload?.error?.message ??
+      (res.status >= 500
+        ? "Se produjo un error en el servidor. Intenta más tarde."
+        : "La descarga no pudo completarse.");
+    throw new ApiError(
+      res.status,
+      message,
+      parseDetails(payload?.error?.details),
+      payload?.error?.code ?? null,
+    );
+  }
+
+  const blob = await res.blob();
+
+  // Content-Disposition: attachment; filename="..."
+  const disposition = res.headers.get("content-disposition") ?? "";
+  const filenameMatch = disposition.match(/filename\*?=(?:UTF-8'')?["']?([^"';]+)["']?/i);
+  const filename = filenameMatch?.[1]?.trim() ?? fallbackFilename;
+
+  return { blob, filename };
+}
+
 /* ------------------------------ auth endpoints ---------------------------- */
 
 export type Role = "admin" | "member";
@@ -271,13 +333,17 @@ export interface CreateUserResponse {
 
 export type ExtractionConfianza = "alta" | "media" | "baja";
 
+export type ExtractionTipoUnidad = "N" | "S";
+
+/** Source page for an extracted field: page number, "inferido", or "multiple". */
+export type ExtractionSourcePage = string | number;
+
 /**
- * Mirrors the backend `ExtractedContract` interface one-to-one. Calibrated
- * contra contrato real (Travel Pioneers / Parador 2026) y fila ground-truth
- * Monteverde Lodge & Gardens.
+ * Datos que aparecen una sola vez en el contrato (proveedor, vigencia,
+ * clasificación de catálogo, bancos). Se replican en cada fila del xlsx.
+ * Mirrors the backend `SharedFields` interface one-to-one.
  */
-export interface ExtractedContract {
-  // Identidad / contacto / legal
+export interface ExtractedSharedFields {
   fecha: string | null;
   proveedor: string | null;
   nombre_comercial: string | null;
@@ -290,40 +356,55 @@ export interface ExtractedContract {
   contract_starts: string | null;
   contract_ends: string | null;
   reservations_email: string | null;
-  // Servicio
-  product_name: string | null;
-  ocupacion: string | null;
-  // Clasificación catálogo Utopía
-  tipo_unidad: "N" | "S" | null;
+  tipo_unidad: ExtractionTipoUnidad | null;
   tipo_servicio: string | null;
+  tipo_moneda: string | null;
+  numero_cuenta: string | null;
+  banco: string | null;
+}
+
+/**
+ * Una fila del xlsx — una combinación product × season. Las políticas viven
+ * aquí porque pueden variar por temporada; cuando no varían, la UI las
+ * colapsa visualmente en "Igual en todas las filas".
+ */
+export interface ExtractedContractRow {
+  product_name: string | null;
   categoria: string | null;
-  // Temporada
+  ocupacion: string | null;
   season_name: string | null;
   season_starts: string | null;
   season_ends: string | null;
   meals_included: string | null;
-  // Tarifas estándar
   precios_neto_iva: string | null;
   precio_rack_iva: string | null;
   porcentaje_comision: string | null;
-  // Tarifas fin de semana
   precios_neto_iva_fds: string | null;
   precio_rack_iva_fds: string | null;
   porcentaje_comision_fds: string | null;
-  // Políticas
   cancellation_policy: string | null;
   range_payment_policy: string | null;
   kids_policy: string | null;
   other_included: string | null;
   feeds_adicionales: string | null;
-  // Bancarios (cuenta 1)
-  tipo_moneda: string | null;
-  numero_cuenta: string | null;
-  banco: string | null;
-  // Metadatos
+}
+
+export type ExtractedSharedFieldKey = keyof ExtractedSharedFields;
+export type ExtractedRowFieldKey = keyof ExtractedContractRow;
+
+/**
+ * Resultado de la extracción IA. Mirrors backend `ExtractedContract`.
+ * Calibrated contra Parador 2026 con 21 filas (7 categorías × 3 temporadas).
+ */
+export interface ExtractedContract {
+  shared_fields: ExtractedSharedFields;
+  rows: ExtractedContractRow[];
   confianza: ExtractionConfianza;
   campos_faltantes: string[];
-  paginas_origen: Record<string, string | number>;
+  /** Map of shared-field key -> source page. */
+  paginas_origen_shared: Record<string, ExtractionSourcePage>;
+  /** Per-row source pages, parallel to `rows`. */
+  paginas_origen_rows: Record<string, ExtractionSourcePage>[];
 }
 
 export interface ExtractionValidation {
@@ -360,6 +441,26 @@ export interface ExtractContractInput {
   comments?: string;
   /** Required toggle from step 1 — `true` if the supplier already exists. */
   isExistingSupplier: boolean;
+}
+
+/* --- generate-xlsx (genera el xlsx final con los datos editados) --- */
+
+/**
+ * Catalog prefill input — datos del maestro lista-proveedores que se escriben
+ * en las columnas A, B, C, N del xlsx. null cuando el proveedor es nuevo.
+ */
+export interface GenerateXlsxCatalogPrefill {
+  tipo_actividad: string | null;
+  zona_turismo: string | null;
+  /** Código corto del proveedor en el maestro (columna C). */
+  proveedor_codigo: string | null;
+  codigo_servicio: string | null;
+}
+
+export interface GenerateXlsxInput {
+  shared_fields: ExtractedSharedFields;
+  rows: ExtractedContractRow[];
+  catalog_prefill?: GenerateXlsxCatalogPrefill | null;
 }
 
 /* --- match-supplier (fallback IA del lookup contra el catálogo) --- */
@@ -470,7 +571,7 @@ export const api = {
       );
     },
     /**
-     * Fallback IA para el lookup contra el catálogo CrtLisProv. Solo se usa
+     * Fallback IA para el lookup contra el catálogo lista-proveedores. Solo se usa
      * cuando el matching local del frontend (exact / prefix / includes)
      * falla — el backend cobra Anthropic en cada llamada, así que no abuses.
      */
@@ -481,6 +582,22 @@ export const api = {
           method: "POST",
           body: input,
         },
+      );
+    },
+    /**
+     * Genera y descarga el xlsx final con los datos editados de step 2.
+     * Devuelve `{ blob, filename }` — el caller hace el download con
+     * `URL.createObjectURL(blob)` + un `<a download>` programático.
+     *
+     * El filename viene del header Content-Disposition del backend (formato
+     * `${proveedor}-${year}.xlsx`); el fallback solo se usa si el backend no
+     * envía el header.
+     */
+    generateXlsx(input: GenerateXlsxInput) {
+      return requestBlob(
+        "/api/supplier-intelligence/generate-xlsx",
+        { method: "POST", body: input },
+        "contrato.xlsx",
       );
     },
   },

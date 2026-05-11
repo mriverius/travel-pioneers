@@ -1,5 +1,5 @@
 // AUTO-GENERATED — no editar a mano.
-// Fuente: frontend/data/CORREGIDA PLANTILLA-AGENTE-UTOPIA 28 ABRIL.xlsx
+// Fuente: frontend/data/plantilla-agente-utopia.xlsx
 // Regenerar: `npm run build:service-types` (desde frontend/).
 // Stats: 25 tipos · 70 categorías · 24 tipos con categorías · 10 tipos del catálogo sin categorías.
 

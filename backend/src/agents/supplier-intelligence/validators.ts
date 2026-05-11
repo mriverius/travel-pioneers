@@ -1,4 +1,8 @@
-import type { ExtractedContract, ValidationResult } from "./types.js";
+import type {
+  ContractRow,
+  ExtractedContract,
+  ValidationResult,
+} from "./types.js";
 import {
   TIPO_SERVICIO_CODES,
   CATEGORIAS_BY_TIPO_SERVICIO,
@@ -43,9 +47,6 @@ export function isValidIban(raw: string): boolean {
  * Quick heuristic for Costa Rica's cédula jurídica (format X-XXX-XXXXXX).
  * Non-CR shapes are allowed through with just a warning so we don't reject
  * perfectly valid Mexican RFCs, Colombian NITs, etc.
- *
- * TODO: expand to country-specific validators (RFC MX, NIT CO, CIF ES, etc.)
- * once we decide how to pass the country hint through the request.
  */
 export function looksLikeCostaRicaCedulaJuridica(raw: string): boolean {
   return /^\d-\d{3}-\d{6}$/.test(raw.trim());
@@ -53,13 +54,68 @@ export function looksLikeCostaRicaCedulaJuridica(raw: string): boolean {
 
 /**
  * Very loose E.164 check: strip everything non-digit, require 7–15 digits.
- * We don't try to verify the country code because the model is already
- * instructed to include one and any stricter check would produce false
- * negatives on valid numbers (e.g. short service codes).
  */
 export function phoneDigitCountInRange(raw: string): boolean {
   const digits = raw.replace(/\D+/g, "");
   return digits.length >= 7 && digits.length <= 15;
+}
+
+/**
+ * Limpia una fila en sitio: si la categoría no pertenece al tipo_servicio
+ * shared, devolvemos la fila con categoria=null y un mensaje de warning. No
+ * mutamos — devolvemos una copia.
+ */
+function sanitizeRow(
+  row: ContractRow,
+  tipoServicio: string | null,
+  rowIndex: number,
+  warnings: string[],
+): ContractRow {
+  if (!row.categoria) return row;
+  if (!tipoServicio) {
+    warnings.push(
+      `Fila ${rowIndex + 1}: se devolvió 'categoria' pero 'tipo_servicio' es null — categoria ignorada.`,
+    );
+    return { ...row, categoria: null };
+  }
+  const validCats = CATEGORIAS_BY_TIPO_SERVICIO[tipoServicio];
+  const ok =
+    Array.isArray(validCats) &&
+    validCats.some((c) => c.codigo === row.categoria);
+  if (!ok) {
+    warnings.push(
+      `Fila ${rowIndex + 1} (${row.product_name ?? "?"} / ${row.season_name ?? "?"}): ` +
+        `categoría "${row.categoria}" no es válida para tipo_servicio ` +
+        `"${tipoServicio}" — se ignoró.`,
+    );
+    return { ...row, categoria: null };
+  }
+  return row;
+}
+
+/**
+ * Detect whether a per-row policy field actually varies between rows. If
+ * every non-null value is the same string, the UI can collapse it as
+ * "shared". This is informational only — included in warnings for human
+ * review.
+ */
+function policiesVaryByRow(
+  rows: ContractRow[],
+  key: keyof Pick<
+    ContractRow,
+    | "cancellation_policy"
+    | "range_payment_policy"
+    | "kids_policy"
+    | "other_included"
+    | "feeds_adicionales"
+  >,
+): boolean {
+  const values = rows
+    .map((r) => r[key])
+    .filter((v): v is string => typeof v === "string" && v.trim() !== "");
+  if (values.length < 2) return false;
+  const first = values[0];
+  return values.some((v) => v !== first);
 }
 
 /**
@@ -77,8 +133,9 @@ export function validateExtraction(
   let extraction = data;
 
   // numero_cuenta — if it looks like an IBAN (starts with two letters), check it.
-  if (extraction.numero_cuenta) {
-    const normalized = extraction.numero_cuenta.replace(/\s+/g, "");
+  const accountNumber = extraction.shared_fields.numero_cuenta;
+  if (accountNumber) {
+    const normalized = accountNumber.replace(/\s+/g, "");
     if (/^[A-Za-z]{2}/.test(normalized)) {
       if (!isValidIban(normalized)) {
         warnings.push(
@@ -90,7 +147,8 @@ export function validateExtraction(
   }
 
   // cédula — warn only; countries other than CR are legitimate.
-  if (extraction.cedula && !looksLikeCostaRicaCedulaJuridica(extraction.cedula)) {
+  const cedula = extraction.shared_fields.cedula;
+  if (cedula && !looksLikeCostaRicaCedulaJuridica(cedula)) {
     warnings.push(
       "La cédula no sigue el formato de Costa Rica (X-XXX-XXXXXX). " +
         "Puede ser válida para otro país.",
@@ -98,7 +156,8 @@ export function validateExtraction(
   }
 
   // teléfono — warn if digit count is clearly out of E.164 range.
-  if (extraction.telefono && !phoneDigitCountInRange(extraction.telefono)) {
+  const telefono = extraction.shared_fields.telefono;
+  if (telefono && !phoneDigitCountInRange(telefono)) {
     warnings.push(
       "El teléfono extraído tiene un número de dígitos fuera del rango E.164 (7–15).",
     );
@@ -106,38 +165,79 @@ export function validateExtraction(
 
   // tipo_servicio — si Claude devolvió un código fuera del catálogo (no
   // debería pasar por el enum del schema, pero defensive), lo limpiamos a
-  // null para no propagar basura al frontend, y avisamos.
-  if (
-    extraction.tipo_servicio &&
-    !TIPO_SERVICIO_CODES.includes(extraction.tipo_servicio)
-  ) {
+  // null y limpiamos la categoría de todas las filas.
+  let tipoServicio = extraction.shared_fields.tipo_servicio;
+  if (tipoServicio && !TIPO_SERVICIO_CODES.includes(tipoServicio)) {
     warnings.push(
-      `Tipo de servicio "${extraction.tipo_servicio}" no está en el catálogo Utopía — se ignoró.`,
+      `Tipo de servicio "${tipoServicio}" no está en el catálogo Utopía — se ignoró.`,
     );
-    extraction = { ...extraction, tipo_servicio: null, categoria: null };
+    tipoServicio = null;
+    extraction = {
+      ...extraction,
+      shared_fields: { ...extraction.shared_fields, tipo_servicio: null },
+      rows: extraction.rows.map((r) => ({ ...r, categoria: null })),
+    };
   }
 
-  // categoria — debe pertenecer al tipo_servicio elegido. Si no, advertimos
-  // y la dejamos null para que el usuario revise; mantenemos tipo_servicio
-  // para no perder esa parte del trabajo.
-  if (extraction.categoria) {
-    if (!extraction.tipo_servicio) {
-      warnings.push(
-        "Se devolvió 'categoria' pero 'tipo_servicio' es null — categoria ignorada.",
-      );
-      extraction = { ...extraction, categoria: null };
-    } else {
-      const validCats = CATEGORIAS_BY_TIPO_SERVICIO[extraction.tipo_servicio];
-      const ok =
-        Array.isArray(validCats) &&
-        validCats.some((c) => c.codigo === extraction.categoria);
-      if (!ok) {
-        warnings.push(
-          `Categoría "${extraction.categoria}" no es válida para tipo_servicio "${extraction.tipo_servicio}" — se ignoró.`,
-        );
-        extraction = { ...extraction, categoria: null };
-      }
+  // Validar categoría por fila. Cada fila debe tener una categoría válida
+  // para el tipo_servicio shared. Si no, se limpia y se avisa.
+  const sanitizedRows = extraction.rows.map((r, i) =>
+    sanitizeRow(r, tipoServicio, i, warnings),
+  );
+  if (sanitizedRows.some((r, i) => r !== extraction.rows[i])) {
+    extraction = { ...extraction, rows: sanitizedRows };
+  }
+
+  // Validar consistencia de filas: cada fila necesita al menos product_name +
+  // season_name + un precio para ser útil.
+  extraction.rows.forEach((r, i) => {
+    const hasName = !!r.product_name?.trim();
+    const hasSeason = !!r.season_name?.trim();
+    const hasPrice =
+      !!r.precios_neto_iva?.trim() || !!r.precio_rack_iva?.trim();
+    if (!hasName) {
+      warnings.push(`Fila ${i + 1}: falta product_name.`);
     }
+    if (!hasSeason) {
+      warnings.push(`Fila ${i + 1}: falta season_name.`);
+    }
+    if (!hasPrice) {
+      warnings.push(
+        `Fila ${i + 1} (${r.product_name ?? "?"} / ${r.season_name ?? "?"}): ` +
+          `no tiene precio neto ni rack — revisar.`,
+      );
+    }
+  });
+
+  // Detect duplicated (product_name, season_name) combinations — eso indica
+  // que la IA generó la misma fila dos veces.
+  const seenKeys = new Set<string>();
+  extraction.rows.forEach((r, i) => {
+    const key = `${r.product_name ?? ""}__${r.season_name ?? ""}`;
+    if (seenKeys.has(key) && r.product_name && r.season_name) {
+      warnings.push(
+        `Fila ${i + 1}: combinación duplicada (${r.product_name} × ${r.season_name}).`,
+      );
+    }
+    seenKeys.add(key);
+  });
+
+  // Informational: detect if policies vary by row (helps the UI know whether
+  // to collapse them as "shared" in the display).
+  const variances: string[] = [];
+  if (policiesVaryByRow(extraction.rows, "cancellation_policy")) {
+    variances.push("cancellation_policy");
+  }
+  if (policiesVaryByRow(extraction.rows, "range_payment_policy")) {
+    variances.push("range_payment_policy");
+  }
+  if (policiesVaryByRow(extraction.rows, "kids_policy")) {
+    variances.push("kids_policy");
+  }
+  if (variances.length > 0) {
+    warnings.push(
+      `Políticas que varían por fila: ${variances.join(", ")}. Revisa cada fila individualmente.`,
+    );
   }
 
   // Campos faltantes / baja confianza → recomendar revisión humana.

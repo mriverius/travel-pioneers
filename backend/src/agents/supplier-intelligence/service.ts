@@ -15,20 +15,29 @@ import {
 import { validateExtraction } from "./validators.js";
 import type {
   Confianza,
+  ContractRow,
   ExtractedContract,
   PreparedDocument,
+  SharedFields,
+  SourcePage,
+  TipoUnidad,
   ValidationResult,
 } from "./types.js";
 
 /**
- * The Sonnet generation is the chosen balance of price/accuracy per the
- * product spec. Pinned here rather than read from env because a downgrade
- * would silently degrade extraction quality.
+ * Opus 4.6 es el modelo de extracción. Es más caro y más lento que Sonnet,
+ * pero la tarea ahora requiere generar potencialmente decenas de filas con
+ * razonamiento sobre múltiples temporadas/categorías — Opus paga el precio
+ * en calidad de extracción.
  */
-export const SUPPLIER_INTELLIGENCE_MODEL = "claude-sonnet-4-5";
+export const SUPPLIER_INTELLIGENCE_MODEL = "claude-opus-4-6";
 
-/** Cap on output tokens — the full schema is ~150 tokens, 1500 is generous. */
-const MAX_TOKENS = 1500;
+/**
+ * Cap de output tokens. Antes era 1500 cuando devolvíamos 1 fila plana
+ * (~150 tokens). Ahora un contrato como Parador con 21 filas ronda los
+ * ~5-8k tokens. Subimos a 16k para tener margen sin riesgo de cortes.
+ */
+const MAX_TOKENS = 16_000;
 
 /**
  * Optional context the caller can attach to an extraction. The `comments`
@@ -64,7 +73,7 @@ function buildContextBlock(ctx: ExtractionContext | undefined): string | null {
         "del correo). Úsalos SOLO como contexto complementario; el documento " +
         "sigue siendo la fuente autoritativa. Si un dato aparece únicamente " +
         "aquí y no en el documento, márcalo como \"inferido\" en " +
-        "paginas_origen.\n\n" +
+        "paginas_origen_shared.\n\n" +
         `-----BEGIN USER NOTES-----\n${ctx.comments.trim()}\n-----END USER NOTES-----`,
     );
   }
@@ -103,8 +112,10 @@ function buildUserMessage(
     content.push({
       type: "text",
       text:
-        "Extrae los 9 campos del contrato adjunto usando el tool " +
-        `"${EXTRAER_DATOS_CONTRATO_TOOL_NAME}". Respeta las reglas del system prompt.`,
+        "Extrae los datos del contrato adjunto usando el tool " +
+        `"${EXTRAER_DATOS_CONTRATO_TOOL_NAME}". Genera TODAS las ` +
+        "combinaciones product × season en `rows` — no resumas a una sola " +
+        "fila. Respeta las reglas del system prompt.",
     });
   } else {
     const label =
@@ -114,12 +125,99 @@ function buildUserMessage(
       text:
         `A continuación el contenido del ${label} ya convertido a texto.\n\n` +
         `-----BEGIN DOCUMENT-----\n${doc.text}\n-----END DOCUMENT-----\n\n` +
-        `Extrae los 9 campos usando el tool "${EXTRAER_DATOS_CONTRATO_TOOL_NAME}". ` +
-        `Respeta las reglas del system prompt.`,
+        `Extrae los datos usando el tool "${EXTRAER_DATOS_CONTRATO_TOOL_NAME}". ` +
+        `Genera TODAS las combinaciones product × season en \`rows\` — no ` +
+        `resumas a una sola fila. Respeta las reglas del system prompt.`,
     });
   }
 
   return { role: "user", content };
+}
+
+const stringOrNull = (v: unknown): string | null =>
+  v === null || typeof v === "string" ? v : null;
+
+/**
+ * stringOrNumberAsString — algunos campos pueden venir como número (ej:
+ * precios) y los queremos como string para preservar formato.
+ */
+const numericAsString = (v: unknown): string | null => {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "string") return v;
+  if (typeof v === "number" && Number.isFinite(v)) return String(v);
+  return null;
+};
+
+function coerceTipoUnidad(v: unknown): TipoUnidad | null {
+  if (v === "N" || v === "S") return v;
+  return null;
+}
+
+function coerceSharedFields(input: unknown): SharedFields {
+  if (!input || typeof input !== "object") {
+    throw new Error("shared_fields no es un objeto");
+  }
+  const r = input as Record<string, unknown>;
+  return {
+    fecha: stringOrNull(r.fecha),
+    proveedor: stringOrNull(r.proveedor),
+    nombre_comercial: stringOrNull(r.nombre_comercial),
+    cedula: stringOrNull(r.cedula),
+    direccion: stringOrNull(r.direccion),
+    telefono: stringOrNull(r.telefono),
+    pais: stringOrNull(r.pais),
+    state_province: stringOrNull(r.state_province),
+    type_of_business: stringOrNull(r.type_of_business),
+    contract_starts: stringOrNull(r.contract_starts),
+    contract_ends: stringOrNull(r.contract_ends),
+    reservations_email: stringOrNull(r.reservations_email),
+    tipo_unidad: coerceTipoUnidad(r.tipo_unidad),
+    tipo_servicio: stringOrNull(r.tipo_servicio),
+    tipo_moneda: stringOrNull(r.tipo_moneda),
+    numero_cuenta: stringOrNull(r.numero_cuenta),
+    banco: stringOrNull(r.banco),
+  };
+}
+
+function coerceRow(input: unknown): ContractRow {
+  if (!input || typeof input !== "object") {
+    throw new Error("rows[i] no es un objeto");
+  }
+  const r = input as Record<string, unknown>;
+  return {
+    product_name: stringOrNull(r.product_name),
+    categoria: stringOrNull(r.categoria),
+    ocupacion: stringOrNull(r.ocupacion),
+    season_name: stringOrNull(r.season_name),
+    season_starts: stringOrNull(r.season_starts),
+    season_ends: stringOrNull(r.season_ends),
+    meals_included: stringOrNull(r.meals_included),
+    precios_neto_iva: numericAsString(r.precios_neto_iva),
+    precio_rack_iva: numericAsString(r.precio_rack_iva),
+    porcentaje_comision: numericAsString(r.porcentaje_comision),
+    precios_neto_iva_fds: numericAsString(r.precios_neto_iva_fds),
+    precio_rack_iva_fds: numericAsString(r.precio_rack_iva_fds),
+    porcentaje_comision_fds: numericAsString(r.porcentaje_comision_fds),
+    cancellation_policy: stringOrNull(r.cancellation_policy),
+    range_payment_policy: stringOrNull(r.range_payment_policy),
+    kids_policy: stringOrNull(r.kids_policy),
+    other_included: stringOrNull(r.other_included),
+    feeds_adicionales: stringOrNull(r.feeds_adicionales),
+  };
+}
+
+function coercePaginasOrigen(
+  input: unknown,
+): Record<string, SourcePage> {
+  if (!input || typeof input !== "object") return {};
+  const r = input as Record<string, unknown>;
+  const out: Record<string, SourcePage> = {};
+  for (const [k, v] of Object.entries(r)) {
+    if (typeof v === "string" || typeof v === "number") {
+      out[k] = v;
+    }
+  }
+  return out;
 }
 
 /**
@@ -133,91 +231,41 @@ function coerceExtraction(input: unknown): ExtractedContract {
   }
   const r = input as Record<string, unknown>;
 
-  const stringOrNull = (v: unknown): string | null =>
-    v === null || typeof v === "string" ? v : null;
+  const shared_fields = coerceSharedFields(r.shared_fields);
 
-  const confianza = (() => {
+  const rawRows = Array.isArray(r.rows) ? r.rows : [];
+  if (rawRows.length === 0) {
+    throw new Error("rows está vacío — el contrato debe tener al menos una combinación");
+  }
+  const rows = rawRows.map(coerceRow);
+
+  const confianza = ((): Confianza => {
     const c = r.confianza;
     if (c === "alta" || c === "media" || c === "baja") return c;
-    // Default to "baja" if the model ever returns something unexpected — we'd
-    // rather mark it for human review than silently accept it.
-    return "baja" as Confianza;
+    return "baja";
   })();
 
-  const camposFaltantes = Array.isArray(r.campos_faltantes)
+  const campos_faltantes = Array.isArray(r.campos_faltantes)
     ? r.campos_faltantes.filter((x): x is string => typeof x === "string")
     : [];
 
-  const paginasOrigen =
-    r.paginas_origen && typeof r.paginas_origen === "object"
-      ? (r.paginas_origen as Record<string, string | number>)
-      : {};
+  const paginas_origen_shared = coercePaginasOrigen(r.paginas_origen_shared);
 
-  // Estrechar tipo_unidad al literal — cualquier valor fuera del enum se
-  // trata como null (defensa contra alucinaciones del modelo).
-  const tipoUnidad = (() => {
-    const v = r.tipo_unidad;
-    if (v === "N" || v === "S") return v;
-    return null;
-  })();
-
-  // stringOrNumberAsString — algunos campos pueden venir como número (ej:
-  // precios) y los queremos como string para preservar formato.
-  const numericAsString = (v: unknown): string | null => {
-    if (v === null || v === undefined) return null;
-    if (typeof v === "string") return v;
-    if (typeof v === "number" && Number.isFinite(v)) return String(v);
-    return null;
-  };
+  // paginas_origen_rows debe ser un array paralelo a rows.
+  const rawRowPages = Array.isArray(r.paginas_origen_rows)
+    ? r.paginas_origen_rows
+    : [];
+  const paginas_origen_rows: Record<string, SourcePage>[] = rows.map((_, i) =>
+    coercePaginasOrigen(rawRowPages[i]),
+  );
 
   return {
-    // identidad / contacto / legal
-    fecha: stringOrNull(r.fecha),
-    proveedor: stringOrNull(r.proveedor),
-    nombre_comercial: stringOrNull(r.nombre_comercial),
-    cedula: stringOrNull(r.cedula),
-    direccion: stringOrNull(r.direccion),
-    telefono: stringOrNull(r.telefono),
-    pais: stringOrNull(r.pais),
-    state_province: stringOrNull(r.state_province),
-    type_of_business: stringOrNull(r.type_of_business),
-    contract_starts: stringOrNull(r.contract_starts),
-    contract_ends: stringOrNull(r.contract_ends),
-    reservations_email: stringOrNull(r.reservations_email),
-    // servicio
-    product_name: stringOrNull(r.product_name),
-    ocupacion: stringOrNull(r.ocupacion),
-    // clasificación
-    tipo_unidad: tipoUnidad,
-    tipo_servicio: stringOrNull(r.tipo_servicio),
-    categoria: stringOrNull(r.categoria),
-    // temporada
-    season_name: stringOrNull(r.season_name),
-    season_starts: stringOrNull(r.season_starts),
-    season_ends: stringOrNull(r.season_ends),
-    meals_included: stringOrNull(r.meals_included),
-    // tarifas estándar
-    precios_neto_iva: numericAsString(r.precios_neto_iva),
-    precio_rack_iva: numericAsString(r.precio_rack_iva),
-    porcentaje_comision: numericAsString(r.porcentaje_comision),
-    // tarifas FdS
-    precios_neto_iva_fds: numericAsString(r.precios_neto_iva_fds),
-    precio_rack_iva_fds: numericAsString(r.precio_rack_iva_fds),
-    porcentaje_comision_fds: numericAsString(r.porcentaje_comision_fds),
-    // políticas
-    cancellation_policy: stringOrNull(r.cancellation_policy),
-    range_payment_policy: stringOrNull(r.range_payment_policy),
-    kids_policy: stringOrNull(r.kids_policy),
-    other_included: stringOrNull(r.other_included),
-    feeds_adicionales: stringOrNull(r.feeds_adicionales),
-    // bancarios
-    tipo_moneda: stringOrNull(r.tipo_moneda),
-    numero_cuenta: stringOrNull(r.numero_cuenta),
-    banco: stringOrNull(r.banco),
-    // metadatos
+    shared_fields,
+    rows,
     confianza,
-    campos_faltantes: camposFaltantes,
-    paginas_origen: paginasOrigen,
+    campos_faltantes,
+    paginas_origen_shared,
+    paginas_origen_rows,
   };
 }
 

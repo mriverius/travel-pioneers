@@ -3,6 +3,7 @@ import rateLimit from "express-rate-limit";
 import asyncHandler from "../utils/asyncHandler.js";
 import { extractContractHandler } from "../agents/supplier-intelligence/controller.js";
 import { matchSupplierHandler } from "../agents/supplier-intelligence/matchController.js";
+import { generateXlsxHandler } from "../agents/supplier-intelligence/generateController.js";
 import { supplierIntelligenceErrorHandler } from "../agents/supplier-intelligence/errorHandler.js";
 import { handleContractUpload } from "../agents/supplier-intelligence/uploadMiddleware.js";
 
@@ -42,10 +43,32 @@ const matchLimiter = rateLimit({
 });
 
 /**
+ * Generación de xlsx: no llama a Anthropic, no es costosa, pero seguimos
+ * protegiendo contra abuso/payload basura.
+ */
+const generateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: {
+      message: "Demasiadas solicitudes de generación. Intenta de nuevo en un minuto.",
+    },
+  },
+});
+
+/**
  * Cap de payload: 600 candidatos × ~250 bytes + overhead. 1 MB es holgado y
  * sigue siendo un límite duro contra requests basura.
  */
 const matchJsonParser = json({ limit: "1mb" });
+
+/**
+ * Cap de payload para generate-xlsx: hasta 500 filas × ~3 KB cada una +
+ * shared. 4 MB es holgado para los contratos más grandes que veremos.
+ */
+const generateJsonParser = json({ limit: "4mb" });
 
 /**
  * POST /api/supplier-intelligence/extract
@@ -73,6 +96,20 @@ router.post(
   matchLimiter,
   matchJsonParser,
   asyncHandler(matchSupplierHandler),
+);
+
+/**
+ * POST /api/supplier-intelligence/generate-xlsx
+ *
+ * Recibe { shared_fields, rows[], catalog_prefill? } editados desde step 2 y
+ * devuelve el xlsx final (clonando plantilla-agente-utopia.xlsx con N filas
+ * escritas). Streaming friendly — el response es un buffer binario.
+ */
+router.post(
+  "/generate-xlsx",
+  generateLimiter,
+  generateJsonParser,
+  asyncHandler(generateXlsxHandler),
 );
 
 // Scoped error middleware — emits the `{ success: false, error: { code, message } }`

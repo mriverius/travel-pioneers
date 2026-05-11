@@ -2,7 +2,7 @@
 // @ts-check
 /**
  * Build script — convierte las hojas "Tipos de Servicio" y "Categorias" del
- * archivo `data/CORREGIDA PLANTILLA-AGENTE-UTOPIA 28 ABRIL.xlsx` en un módulo
+ * archivo `data/plantilla-agente-utopia.xlsx` en un módulo
  * TypeScript con tres listas:
  *
  *   - TIPO_UNIDAD_OPTIONS:   {N, S} — convención fija (no viene del xlsx).
@@ -27,7 +27,7 @@ const REPO_ROOT = resolve(FRONTEND_ROOT, "..");
 const XLSX_PATH = resolve(
   FRONTEND_ROOT,
   "data",
-  "CORREGIDA PLANTILLA-AGENTE-UTOPIA 28 ABRIL.xlsx",
+  "plantilla-agente-utopia.xlsx",
 );
 const OUT_PATH = resolve(FRONTEND_ROOT, "src", "lib", "serviceTypesCatalog.ts");
 /**
@@ -138,7 +138,7 @@ const tiposSinCategoria = tiposServicio
 // --- Salida ---
 const banner =
   `// AUTO-GENERATED — no editar a mano.\n` +
-  `// Fuente: frontend/data/CORREGIDA PLANTILLA-AGENTE-UTOPIA 28 ABRIL.xlsx\n` +
+  `// Fuente: frontend/data/plantilla-agente-utopia.xlsx\n` +
   `// Regenerar: \`npm run build:service-types\` (desde frontend/).\n` +
   `// Stats: ${tiposServicio.length} tipos · ${categoriasTotal} categorías · ` +
   `${tiposConCategorias} tipos con categorías · ${tiposSinCategoria} tipos del catálogo sin categorías.\n`;
@@ -196,7 +196,7 @@ const categoriasPromptLines = Object.entries(categoriasByTipo)
 
 const backendBody =
   `// AUTO-GENERATED — no editar a mano. Mirror del catálogo del frontend.\n` +
-  `// Fuente: frontend/data/CORREGIDA PLANTILLA-AGENTE-UTOPIA 28 ABRIL.xlsx\n` +
+  `// Fuente: frontend/data/plantilla-agente-utopia.xlsx\n` +
   `// Regenerar: \`npm run build:service-types\` desde frontend/.\n` +
   `// Stats: ${tiposServicio.length} tipos · ${categoriasTotal} categorías.\n\n` +
   `export interface ServiceTypeOption {\n` +

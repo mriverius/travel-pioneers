@@ -16,9 +16,9 @@ import {
   ALL_FIELDS,
   SECTIONS,
   type DisplayFieldKey,
-  type FileKind,
   type SectionDef,
-} from "./workflow";
+} from "./historyTypes";
+import { type FileKind } from "./workflow";
 
 /* ---------------------------------- Types --------------------------------- */
 

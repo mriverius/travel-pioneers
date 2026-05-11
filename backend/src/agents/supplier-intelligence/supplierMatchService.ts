@@ -5,7 +5,7 @@ import logger from "../../config/logger.js";
 import { getAnthropicClient } from "./anthropicClient.js";
 
 /**
- * Fuzzy match de nombres de proveedor contra el catálogo CrtLisProv usando
+ * Fuzzy match de nombres de proveedor contra el catálogo lista-proveedores usando
  * Claude. Esto corre como **fallback** del lookup local del frontend (exact /
  * prefix / includes) — solo se invoca cuando esos modos fallan, así que en la
  * práctica este endpoint se llama poco y mantiene el costo controlado.

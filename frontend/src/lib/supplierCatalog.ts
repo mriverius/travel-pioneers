@@ -1,5 +1,5 @@
 // AUTO-GENERATED — no editar a mano.
-// Fuente: frontend/data/CrtLisProv.xlsx
+// Fuente: frontend/data/lista-proveedores.xlsx
 // Regenerar: `npm run build:catalog` (desde frontend/).
 // Stats: 457 proveedores · 14260 servicios · 14260 filas crudas.
 

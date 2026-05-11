@@ -15,36 +15,35 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
-  Clock,
   Cloud,
   CloudUpload,
   Compass,
   CreditCard,
-  DollarSign,
+  Download,
   ExternalLink,
   FileSpreadsheet,
   FileText,
   Globe,
   Hash,
+  Info,
   Landmark,
   Loader2,
   Mail,
   Map as MapIcon,
   MapPin,
   MessageSquareText,
-  Package,
   Pencil,
   Percent,
-  PlusCircle,
+  Phone,
+  Plus,
   Receipt,
   RotateCcw,
-  Search,
   ShieldAlert,
-  ShieldCheck,
   Sparkles,
   Star,
   Sun,
   Tag,
+  Trash2,
   Users,
   UserCheck,
   UserPlus,
@@ -66,84 +65,20 @@ import {
   ApiError,
   type ExtractContractResponse,
   type ExtractedContract,
+  type ExtractedContractRow,
+  type ExtractedRowFieldKey,
+  type ExtractedSharedFieldKey,
+  type ExtractedSharedFields,
   type ExtractionConfianza,
+  type ExtractionSourcePage,
+  type GenerateXlsxCatalogPrefill,
 } from "@/lib/api";
 import {
   findSupplierByNameWithAI,
   findServiceForSupplier,
   type SupplierMatch,
 } from "@/lib/supplierLookup";
-
-/**
- * Full set of business fields surfaced in step 2. Most of these aren't
- * extracted by the AI today (the backend only fills a 9-field subset) — we
- * still render them so the user can fill them in manually before pushing the
- * record downstream.
- *
- * Keys are deliberately snake_case + Spanish/English mirror of the labels so
- * they're stable to wire to a future API payload.
- */
-export type DisplayFieldKey =
-  // Identidad / ubicación / contrato
-  | "tipo_actividad"
-  | "zona_turismo"
-  | "proveedor"
-  | "razon_social"
-  | "cedula_juridica"
-  | "contract_date"
-  | "nombre_comercial"
-  | "pais"
-  | "state_province"
-  | "location"
-  | "type_of_business"
-  | "contract_starts"
-  | "contract_ends"
-  // Servicio
-  | "codigo_servicio"
-  | "product_name"
-  | "tipo_unidad"
-  | "tipo_servicio"
-  | "categoria"
-  | "ocupacion"
-  // Temporada
-  | "season_name"
-  | "season_starts"
-  | "season_ends"
-  | "meals_included"
-  // Tarifas estándar
-  | "tipo_tarifa_neta"
-  | "precios_neto_iva"
-  | "precio_rack_iva"
-  | "tipo_tarifa_mayorista"
-  | "porcentaje_comision"
-  // Tarifas fin de semana
-  | "tipo_tarifa_fds"
-  | "t_tar_neta_fds"
-  | "precios_neto_iva_fds"
-  | "precio_rack_iva_fds"
-  | "tipo_tarifa_mayorista_fds"
-  | "porcentaje_comision_fds"
-  // Políticas
-  | "cancellation_policy"
-  | "range_payment_policy"
-  | "others_payment_cancel"
-  | "kids_policy"
-  | "other_included"
-  | "feeds_adicionales"
-  // Reservas y crédito
-  | "reservations_email"
-  | "cond_credito"
-  | "plazo"
-  // Cuentas bancarias (3 slots)
-  | "cuenta_bancaria_1"
-  | "banco_1"
-  | "moneda_1"
-  | "cuenta_bancaria_2"
-  | "banco_2"
-  | "moneda_2"
-  | "cuenta_bancaria_3"
-  | "banco_3"
-  | "moneda_3";
+import { CATEGORIAS_BY_TIPO_SERVICIO, TIPOS_SERVICIO } from "@/lib/serviceTypesCatalog";
 
 /**
  * Two-step supplier-contract workflow wired to the backend agent at
@@ -151,39 +86,37 @@ export type DisplayFieldKey =
  *
  *   1. Upload   — drag & drop / pick a single .pdf / .docx / .doc / .xlsx /
  *                 .xls (max 20 MB — matches backend limit).
- *   2. Review   — show the 9 extracted fields, confidence, warnings, and the
- *                 per-field source pages returned by Claude. A "Procesar
- *                 otro contrato" button resets the flow.
- *
- * Step 3 (approve → push to Utopía) is intentionally out of scope right now;
- * the stepper is 2 steps to match the current backend surface area.
+ *   2. Review   — Header card con los campos compartidos + tabla con las N
+ *                 filas (combinaciones product × season). Edición inline,
+ *                 source-page como tooltip al hover.
+ *   3. Download — POST /generate-xlsx con los datos aprobados y descarga el
+ *                 xlsx final (clonado de plantilla-agente-utopia.xlsx).
  */
 
 type Step = 1 | 2 | 3;
 
 export type FileKind = "pdf" | "docx" | "xlsx";
 
+/* -------------------------------------------------------------------------- */
+/*                       Catalog prefill from master                          */
+/* -------------------------------------------------------------------------- */
+
 /**
- * Subconjunto de campos de step 2 que pueden ser pre-llenados desde el
- * catálogo CrtLisProv cuando el usuario marca "Sí, existente" en step 1.
+ * Subconjunto de campos shared que vienen pre-llenados desde el catálogo
+ * lista-proveedores cuando el usuario marca "Sí, existente" en step 1.
  *
- * Mantenemos esto explícito (no `Partial<Record<DisplayFieldKey, ...>>`) para
- * que el contrato entre lookup → ReviewStep sea visible: si en el futuro
- * agregamos otra columna del maestro, hay que añadirla aquí.
+ * Mantenemos esto explícito (no `Partial<...>`) para que el contrato entre
+ * lookup → ReviewStep sea visible: si en el futuro agregamos otra columna
+ * del maestro, hay que añadirla aquí.
  */
 export type CatalogPrefill = {
   tipo_actividad: string | null;
   zona_turismo: string | null;
-  proveedor: string | null;
+  /** Código corto del proveedor en el maestro (columna C del xlsx). */
+  proveedor_codigo: string | null;
   codigo_servicio: string | null;
 };
 
-/**
- * Resultado del lookup contra el catálogo. Lo guardamos junto al prefill para
- * poder mostrar al usuario qué pasó (match exacto, no encontrado, etc.) en un
- * banner de step 2 — ese feedback es importante porque los 4 campos vienen
- * "mágicamente" llenos sin que el usuario los haya tocado.
- */
 export type CatalogMatchInfo =
   | {
       status: "matched";
@@ -191,7 +124,6 @@ export type CatalogMatchInfo =
       supplierCode: string;
       matchedBy: SupplierMatch["matchedBy"];
       serviceMatched: boolean;
-      /** Solo cuando matchedBy === "ai". */
       aiConfidence?: SupplierMatch["aiConfidence"];
       aiReasoning?: string;
     }
@@ -200,11 +132,6 @@ export type CatalogMatchInfo =
 
 const MAX_FILE_BYTES = 20 * 1024 * 1024; // 20 MB — must match backend cap.
 
-/**
- * Accept attribute for the native file picker. We list both MIME and
- * extension so browsers that don't recognize one fall back to the other.
- * Matches the backend's `detectDocKind()` whitelist exactly.
- */
 const ACCEPT_ATTR = [
   "application/pdf",
   ".pdf",
@@ -221,7 +148,7 @@ const ACCEPT_ATTR = [
 const STEPS: { id: Step; label: string; hint: string }[] = [
   { id: 1, label: "Cargar documento", hint: "PDF, Word o Excel · máx 20 MB" },
   { id: 2, label: "Revisar información", hint: "Datos extraídos por IA" },
-  { id: 3, label: "Subir al maestro", hint: "Sincronización con xlsx en la nube" },
+  { id: 3, label: "Descargar xlsx", hint: "Genera el archivo con N filas" },
 ];
 
 function inferKind(mime: string, name: string): FileKind | null {
@@ -259,6 +186,41 @@ function fileIcon(kind: FileKind) {
   return <FileText className="w-4 h-4 text-amber-300" />;
 }
 
+/* -------------------------------------------------------------------------- */
+/*                            Excel column utility                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Convierte un índice 1-based en su letra de columna estilo Excel:
+ *   1 → A, 26 → Z, 27 → AA, 52 → AZ, 53 → BA, etc.
+ */
+export function excelColumnLetter(n: number): string {
+  if (!Number.isFinite(n) || n < 1) return "";
+  let s = "";
+  let x = Math.floor(n);
+  while (x > 0) {
+    const r = (x - 1) % 26;
+    s = String.fromCharCode(65 + r) + s;
+    x = Math.floor((x - 1) / 26);
+  }
+  return s;
+}
+
+/* ============================================================================
+   SUPPLIER WORKFLOW (orchestrator)
+   ========================================================================== */
+
+/**
+ * Aprobación de step 2 → step 3. Recibe los datos finales editados que el
+ * usuario aprobó: shared_fields editado, rows editados, y el catalog_prefill
+ * (también potencialmente editado).
+ */
+export interface ApprovedPayload {
+  sharedFields: ExtractedSharedFields;
+  rows: ExtractedContractRow[];
+  catalogPrefill: GenerateXlsxCatalogPrefill | null;
+}
+
 export function SupplierWorkflow() {
   const [step, setStep] = useState<Step>(1);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -266,54 +228,27 @@ export function SupplierWorkflow() {
   const [analyzing, setAnalyzing] = useState(false);
   const [result, setResult] = useState<ExtractContractResponse | null>(null);
   const [serverError, setServerError] = useState<string | null>(null);
-  // Simulated progress while the backend is thinking. We don't get streaming
-  // progress from the Anthropic call, so we ease toward 90% and snap to 100%
-  // when the response lands — a white lie that keeps the UI feeling alive.
   const [progress, setProgress] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  /**
-   * Optional free-form context the user pastes from the email body. Forwarded
-   * to the backend so Claude can use it as supplementary extraction context.
-   */
   const [comments, setComments] = useState("");
-  /**
-   * Required toggle in step 1. `null` means "not chosen yet" — we keep the
-   * 'Analizar con IA' button disabled in that state. The backend rejects the
-   * request with a 400 if it ever arrives missing.
-   */
   const [isExistingSupplier, setIsExistingSupplier] = useState<boolean | null>(
     null,
   );
-  /**
-   * Pre-fill de los 4 campos del maestro (tipo_actividad, zona_turismo,
-   * proveedor, codigo_servicio) cuando el usuario marca "existente" y
-   * matcheamos al proveedor en CrtLisProv. `null` cuando no hubo match o el
-   * proveedor es nuevo.
-   */
   const [catalogPrefill, setCatalogPrefill] = useState<CatalogPrefill | null>(
     null,
   );
-  /**
-   * Info del match (o no-match). Se calcula durante `startAnalysis` y se
-   * mantiene en estado para diagnóstico/log — el banner UI fue removido a
-   * pedido del usuario (la setter sigue siendo `setCatalogMatchInfo` para
-   * que el flujo no necesite cambios). Si en el futuro quieres re-mostrar el
-   * feedback en step 2, lee este estado en `ReviewStep`.
-   */
   const [, setCatalogMatchInfo] = useState<CatalogMatchInfo | null>(null);
-  /**
-   * Sub-estado durante el lookup post-extracción. `null` cuando no estamos
-   * matchando. `"local"` cuando estamos corriendo el matcher local (rápido,
-   * casi instantáneo — apenas se ve). `"ai"` cuando local falló y estamos
-   * esperando al backend — esto sí es visible (~2-5s) y merece feedback UI.
-   */
   const [matchingPhase, setMatchingPhase] = useState<"local" | "ai" | null>(
     null,
   );
 
-  // Ease toward 90% while analyzing. Slower as we approach the ceiling so it
-  // feels like work is happening even on long extractions.
+  /** Datos aprobados que se envían al endpoint de generación. */
+  const [approvedPayload, setApprovedPayload] = useState<ApprovedPayload | null>(
+    null,
+  );
+
+  // Ease toward 90% while analyzing.
   useEffect(() => {
     if (!analyzing) return;
     const id = window.setInterval(() => {
@@ -356,7 +291,6 @@ export function SupplierWorkflow() {
 
   const handlePick = (e: ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
-    // Reset so picking the same file again fires change.
     e.target.value = "";
     if (!f) return;
     acceptFile(f);
@@ -369,72 +303,53 @@ export function SupplierWorkflow() {
   };
 
   const startAnalysis = async () => {
-    // Guard: file required, supplier flag must be chosen, no double-fire.
     if (!selectedFile || analyzing || isExistingSupplier === null) return;
     setAnalyzing(true);
     setServerError(null);
-    setProgress(4); // kick off visibly above zero
+    setProgress(4);
     try {
       const response = await api.supplierIntelligence.extract(selectedFile, {
         comments,
         isExistingSupplier,
       });
-      // Snap to 100% and let the filled bar linger briefly before we
-      // transition to the review step — feels more finished than a hard cut.
       setProgress(100);
 
-      // Lookup contra el maestro CrtLisProv.
-      //   - Si el usuario marcó "nuevo": no buscamos, todo en blanco.
-      //   - Si marcó "existente":
-      //     1. Intentamos local (exact/prefix/includes) por nombre comercial,
-      //        luego por proveedor crudo. Esto es gratis y resuelve los casos
-      //        obvios.
-      //     2. Si nada matcheó, llamamos al fallback IA (POST /match-supplier)
-      //        con la primera query no vacía — Claude elige del catálogo
-      //        completo. Esto cubre casos como "HOTEL PARADOR RESORT & SPA"
-      //        → "PARADOR RESORT & SPA MANUEL ANTONIO" donde el prefijo
-      //        "HOTEL" rompe la heurística local.
-      //     3. Si nada matcheó (ni local ni IA), dejamos los 4 campos vacíos
-      //        y el banner del step 2 se lo dice al usuario.
+      // Lookup contra el maestro lista-proveedores usando el nombre comercial
+      // (o razón social como fallback) extraído por la IA.
       let prefill: CatalogPrefill | null = null;
       let matchInfo: CatalogMatchInfo | null = null;
       if (isExistingSupplier) {
-        // Anuncia al usuario que estamos en la fase de matching (la barra ya
-        // llegó a 100% de la extracción IA, esto es el siguiente sub-paso).
         setMatchingPhase("local");
-        const candidates = [response.data.nombre_comercial, response.data.proveedor]
+        const sharedNames = [
+          response.data.shared_fields.nombre_comercial,
+          response.data.shared_fields.proveedor,
+        ]
           .map((s) => s?.trim())
           .filter((s): s is string => !!s);
-        if (candidates.length === 0) {
+        if (sharedNames.length === 0) {
           matchInfo = { status: "skipped", reason: "no_query" };
         } else {
           let match: SupplierMatch | null = null;
           let aiAttempted = false;
-          for (const c of candidates) {
-            // Primero solo local — barato y rápido.
+          for (const c of sharedNames) {
             match = await findSupplierByNameWithAI(c, { enableAIFallback: false });
             if (match) break;
           }
           if (!match) {
-            // Local falló para todos los candidatos → fallback IA con la primera query.
             setMatchingPhase("ai");
             aiAttempted = true;
-            match = await findSupplierByNameWithAI(candidates[0], {
+            match = await findSupplierByNameWithAI(sharedNames[0] as string, {
               enableAIFallback: true,
             });
           }
           if (match) {
-            // Hint para resolver el código de servicio: descripción libre que
-            // pudo dar el usuario en `comments` o el nombre del archivo. La
-            // extracción actual no devuelve nombre/descripción del servicio,
-            // así que con frecuencia no habrá match a nivel servicio.
             const serviceHint =
               comments?.trim() || selectedFile.name || "";
             const service = findServiceForSupplier(match.supplier, serviceHint);
             prefill = {
               tipo_actividad: match.supplier.actividad,
               zona_turismo: match.supplier.zona,
-              proveedor: match.supplier.codigo,
+              proveedor_codigo: match.supplier.codigo,
               codigo_servicio: service?.codigo ?? null,
             };
             matchInfo = {
@@ -447,7 +362,11 @@ export function SupplierWorkflow() {
               aiReasoning: match.aiReasoning,
             };
           } else {
-            matchInfo = { status: "not_found", query: candidates[0], aiAttempted };
+            matchInfo = {
+              status: "not_found",
+              query: sharedNames[0] as string,
+              aiAttempted,
+            };
           }
         }
         setMatchingPhase(null);
@@ -461,8 +380,6 @@ export function SupplierWorkflow() {
       setResult(response);
       setStep(2);
     } catch (err) {
-      // Surface the server's message verbatim — the backend's error copy is
-      // already user-facing (Spanish, specific, e.g. "El archivo excede …").
       if (err instanceof ApiError) {
         setServerError(err.message);
       } else {
@@ -489,15 +406,11 @@ export function SupplierWorkflow() {
     setCatalogPrefill(null);
     setCatalogMatchInfo(null);
     setMatchingPhase(null);
+    setApprovedPayload(null);
   };
 
-  /**
-   * Triggered from step 2 when the reviewer presses "Aprobar datos". For now
-   * this is a UI-only transition into the mock step 3 — no real network call.
-   * When the backend learns to push to the cloud xlsx maestro, replace the
-   * fake progress in `ApprovalStep` with a real upload call.
-   */
-  const approve = () => {
+  const approve = (payload: ApprovedPayload) => {
+    setApprovedPayload(payload);
     setStep(3);
   };
 
@@ -530,11 +443,7 @@ export function SupplierWorkflow() {
                           : "bg-secondary/50 text-muted-foreground border-border"
                     }`}
                   >
-                    {state === "complete" ? (
-                      <Check className="w-4 h-4" />
-                    ) : (
-                      s.id
-                    )}
+                    {state === "complete" ? <Check className="w-4 h-4" /> : s.id}
                   </div>
                   <div className="hidden sm:block min-w-0">
                     <p
@@ -565,7 +474,6 @@ export function SupplierWorkflow() {
         </ol>
       </div>
 
-      {/* Body — keyed on step so the page-enter animation replays */}
       <div key={step} className="animate-page-enter">
         {step === 1 && (
           <UploadStep
@@ -595,15 +503,21 @@ export function SupplierWorkflow() {
           />
         )}
 
-        {step === 3 && result && (
-          <ApprovalStep result={result} onReset={reset} />
+        {step === 3 && result && approvedPayload && (
+          <DownloadStep
+            payload={approvedPayload}
+            meta={result.meta}
+            onReset={reset}
+          />
         )}
       </div>
     </section>
   );
 }
 
-/* ---------------------------------- STEP 1 -------------------------------- */
+/* ============================================================================
+   STEP 1 — Upload
+   ========================================================================== */
 
 function UploadStep({
   file,
@@ -640,13 +554,8 @@ function UploadStep({
 }) {
   const [dragActive, setDragActive] = useState(false);
   const kind = file ? inferKind(file.type, file.name) : null;
-  // Cap matches backend validation in `controller.ts` (MAX_COMMENTS_LENGTH).
   const COMMENTS_MAX = 5000;
-  // Button is enabled only when we have a file, the supplier flag is set, and
-  // we're not already analyzing. The flag check matters: the backend will
-  // 400 on submit without it.
-  const canSubmit =
-    !!file && !analyzing && isExistingSupplier !== null;
+  const canSubmit = !!file && !analyzing && isExistingSupplier !== null;
 
   return (
     <div className="px-5 sm:px-8 py-7 space-y-5">
@@ -738,9 +647,7 @@ function UploadStep({
               {fileIcon(kind)}
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-[13px] text-foreground truncate">
-                {file.name}
-              </p>
+              <p className="text-[13px] text-foreground truncate">{file.name}</p>
               <p className="text-[11px] text-muted-foreground">
                 {humanSize(file.size)} · {kind.toUpperCase()}
               </p>
@@ -807,13 +714,6 @@ function UploadStep({
   );
 }
 
-/**
- * Required Sí / No segmented toggle. We render it as two buttons rather than
- * a single checkbox because "existing supplier" is a binary state we always
- * need a deliberate answer for — leaving it implicit would let users submit
- * with an unintended default. While `value` is null we add a subtle ring on
- * the whole control so it's clear something still needs attention.
- */
 function ExistingSupplierToggle({
   value,
   onChange,
@@ -901,12 +801,6 @@ function ToggleButton({
   );
 }
 
-/**
- * Optional free-form comments textarea. The label is explicit about why this
- * exists (email-body context) so users understand it's worth filling in when
- * they have it. We surface a live character counter once they're past 80% of
- * the limit — silent until then to avoid noise.
- */
 function CommentsField({
   value,
   onChange,
@@ -974,11 +868,6 @@ function Badge({ label }: { label: string }) {
   );
 }
 
-/**
- * Phase copy mapped to the simulated progress range. Claude's `messages.create`
- * is a single round-trip so we can't surface real sub-step progress — the
- * bands below just match what the backend is conceptually doing.
- */
 function analysisPhase(progress: number): string {
   if (progress < 25) return "Preparando el documento…";
   if (progress < 75) return "Extrayendo campos con IA…";
@@ -997,16 +886,9 @@ function AnalysisProgressCard({
   fileSize: number;
   kind: FileKind;
   progress: number;
-  /**
-   * Sub-fase post-extracción: lookup contra el catálogo. `null` = no
-   * matchando (la barra de progreso clásica aplica). `"ai"` = local falló y
-   * estamos esperando al backend, mostramos un mensaje específico.
-   */
   matchingPhase: "local" | "ai" | null;
 }) {
   const pct = Math.max(0, Math.min(100, Math.round(progress)));
-  // Mientras corre el match IA, sobreescribimos la fase para dar feedback
-  // claro de qué está pasando (la barra está al 100% pero seguimos esperando).
   const phase =
     matchingPhase === "ai"
       ? "Buscando coincidencia en el maestro con IA…"
@@ -1054,24 +936,18 @@ function AnalysisProgressCard({
         </div>
         <p className="text-[11px] text-muted-foreground">
           {matchingPhase === "ai"
-            ? "Pidiéndole a Claude que elija el proveedor del catálogo."
-            : "Esto suele tomar entre 5 y 20 segundos."}
+            ? "Pidiéndole a Claude que elija el proveedor del catálogo. Opus 4.6 puede tardar 30-60s para contratos con muchas combinaciones."
+            : "Opus 4.6 puede tardar entre 30 y 90 segundos para contratos con muchas filas (ej. 21 combinaciones)."}
         </p>
       </div>
     </div>
   );
 }
 
-/* ---------------------------------- STEP 2 -------------------------------- */
+/* ============================================================================
+   FIELD DEFINITIONS (shared + row)
+   ========================================================================== */
 
-/**
- * Schema for a single editable field rendered in step 2. The optional
- * `fromExtracted` mapping tells us which AI-extracted field (if any) seeds
- * the initial value — and therefore where source-page chips come from.
- *
- * `wide: true` makes the field span both columns of its section grid (handy
- * for free-text fields like address or policy text).
- */
 /**
  * Una opción de un dropdown. Renderizamos como `codigo · descripcion` en el UI
  * y guardamos sólo `codigo` como valor del campo.
@@ -1081,375 +957,454 @@ export interface SelectOption {
   descripcion: string;
 }
 
-export interface FieldDef {
-  key: DisplayFieldKey;
+/**
+ * Campos del header card (shared). El key puede ser:
+ *   - una clave de ExtractedSharedFields (la IA llena el valor inicial), o
+ *   - una clave del catalog prefill ("tipo_actividad", "zona_turismo",
+ *     "proveedor_codigo", "codigo_servicio") — sin AI, viene del maestro.
+ */
+type SharedDisplayKey =
+  | ExtractedSharedFieldKey
+  | "tipo_actividad"
+  | "zona_turismo"
+  | "proveedor_codigo"
+  | "codigo_servicio";
+
+interface SharedFieldDef {
+  key: SharedDisplayKey;
   label: string;
   icon: LucideIcon;
+  excelCol: string;
   placeholder?: string;
   inputType?: "text" | "date" | "email";
-  /** Pull initial value + source chip from this AI-extracted field. */
-  fromExtracted?:
-    // Identidad / contacto / legal
-    | "fecha"
-    | "proveedor"
-    | "nombre_comercial"
-    | "cedula"
-    | "direccion"
-    | "telefono"
-    | "pais"
-    | "state_province"
-    | "type_of_business"
-    | "contract_starts"
-    | "contract_ends"
-    | "reservations_email"
-    // Servicio
-    | "product_name"
-    | "ocupacion"
-    // Clasificación
-    | "tipo_unidad"
-    | "tipo_servicio"
-    | "categoria"
-    // Temporada
-    | "season_name"
-    | "season_starts"
-    | "season_ends"
-    | "meals_included"
-    // Tarifas
-    | "precios_neto_iva"
-    | "precio_rack_iva"
-    | "porcentaje_comision"
-    | "precios_neto_iva_fds"
-    | "precio_rack_iva_fds"
-    | "porcentaje_comision_fds"
-    // Políticas
-    | "cancellation_policy"
-    | "range_payment_policy"
-    | "kids_policy"
-    | "other_included"
-    | "feeds_adicionales"
-    // Bancarios
-    | "tipo_moneda"
-    | "numero_cuenta"
-    | "banco";
   multiline?: boolean;
-  wide?: boolean;
+  /** Si true, viene del catálogo lista-proveedores en lugar de la IA. */
+  fromCatalog?: boolean;
   /**
-   * Si está presente, el campo se renderiza como dropdown en vez de input de
-   * texto. Las opciones se evalúan en cada render para soportar dependencias
-   * dinámicas (ej: las categorías dependen del tipo de servicio elegido).
-   *
-   * Recibe el mapa completo de valores actuales del formulario y devuelve la
-   * lista de opciones a mostrar. Si la lista está vacía y existe `dependsOn`,
-   * el FieldRow lo refleja con un mensaje "Seleccionar X primero".
+   * Si está presente, el campo se renderiza como dropdown. Las opciones se
+   * recalculan en cada render por si dependen de otros campos.
    */
   options?: (
-    values: Record<DisplayFieldKey, string | null>,
+    values: Record<SharedDisplayKey, string | null>,
   ) => ReadonlyArray<SelectOption>;
-  /** Texto explicativo cuando `options(values).length === 0`. */
-  dependsOnLabel?: string;
 }
 
-/**
- * Tailwind color tokens used by section accent. Keep these as full class
- * strings (not interpolated) so Tailwind's JIT can pick them up.
- */
-export interface SectionAccent {
-  iconBg: string;
-  iconText: string;
-  ring: string;
-  pillBg: string;
-  pillText: string;
-  pillBorder: string;
-}
-
-export const ACCENTS = {
-  primary: {
-    iconBg: "bg-primary/15",
-    iconText: "text-primary",
-    ring: "border-primary/30",
-    pillBg: "bg-primary/10",
-    pillText: "text-primary",
-    pillBorder: "border-primary/30",
-  },
-  sky: {
-    iconBg: "bg-sky-500/15",
-    iconText: "text-sky-300",
-    ring: "border-sky-500/30",
-    pillBg: "bg-sky-500/10",
-    pillText: "text-sky-300",
-    pillBorder: "border-sky-500/30",
-  },
-  emerald: {
-    iconBg: "bg-emerald-500/15",
-    iconText: "text-emerald-300",
-    ring: "border-emerald-500/30",
-    pillBg: "bg-emerald-500/10",
-    pillText: "text-emerald-300",
-    pillBorder: "border-emerald-500/30",
-  },
-  amber: {
-    iconBg: "bg-amber-500/15",
-    iconText: "text-amber-300",
-    ring: "border-amber-500/30",
-    pillBg: "bg-amber-500/10",
-    pillText: "text-amber-300",
-    pillBorder: "border-amber-500/30",
-  },
-  violet: {
-    iconBg: "bg-violet-500/15",
-    iconText: "text-violet-300",
-    ring: "border-violet-500/30",
-    pillBg: "bg-violet-500/10",
-    pillText: "text-violet-300",
-    pillBorder: "border-violet-500/30",
-  },
-  rose: {
-    iconBg: "bg-rose-500/15",
-    iconText: "text-rose-300",
-    ring: "border-rose-500/30",
-    pillBg: "bg-rose-500/10",
-    pillText: "text-rose-300",
-    pillBorder: "border-rose-500/30",
-  },
-} satisfies Record<string, SectionAccent>;
-
-export interface SectionDef {
+interface SharedSectionDef {
   id: string;
   title: string;
-  subtitle?: string;
   icon: LucideIcon;
-  accent: SectionAccent;
-  fields: FieldDef[];
+  fields: SharedFieldDef[];
 }
 
-export const SECTIONS: SectionDef[] = [
+const TIPO_UNIDAD_OPTIONS: ReadonlyArray<SelectOption> = [
+  { codigo: "N", descripcion: "Por noche" },
+  { codigo: "S", descripcion: "Por servicio" },
+];
+
+const SHARED_SECTIONS: SharedSectionDef[] = [
   {
-    id: "identidad",
-    title: "Información del proveedor",
-    subtitle: "Identidad legal, ubicación y vigencia del contrato.",
-    icon: Building2,
-    accent: ACCENTS.primary,
+    id: "catalog",
+    title: "Catálogo de proveedores",
+    icon: BookMarked,
     fields: [
-      { key: "tipo_actividad", label: "Tipo Actividad", icon: Compass, placeholder: "Ej: Hospedaje, tour, transporte…" },
-      { key: "zona_turismo", label: "Zona Turismo", icon: MapIcon, placeholder: "Ej: Pacífico Central" },
-      { key: "proveedor", label: "Proveedor", icon: Building2, placeholder: "Identificador del proveedor" },
-      { key: "razon_social", label: "Razón Social", icon: Building2, placeholder: "Ej: ACME Servicios S.A.", fromExtracted: "proveedor" },
-      { key: "cedula_juridica", label: "Cédula Jurídica", icon: Hash, placeholder: "Ej: 3-101-123456", fromExtracted: "cedula" },
-      { key: "contract_date", label: "Contract Date", icon: Calendar, placeholder: "YYYY-MM-DD", inputType: "date", fromExtracted: "fecha" },
-      { key: "nombre_comercial", label: "Nombre Comercial", icon: BookMarked, placeholder: "Ej: ACME", fromExtracted: "nombre_comercial" },
-      { key: "pais", label: "País", icon: Globe, placeholder: "Ej: Costa Rica", fromExtracted: "pais" },
-      { key: "state_province", label: "State / Province", icon: MapPin, placeholder: "Ej: Puntarenas", fromExtracted: "state_province" },
-      { key: "location", label: "Location", icon: MapPin, placeholder: "Calle, número, ciudad…", fromExtracted: "direccion", wide: true, multiline: true },
-      { key: "type_of_business", label: "Type of Business", icon: Briefcase, placeholder: "Ej: Hotel, Tour Operator…", fromExtracted: "type_of_business" },
-      { key: "contract_starts", label: "Contract Starts", icon: CalendarCheck2, placeholder: "YYYY-MM-DD", inputType: "date", fromExtracted: "contract_starts" },
-      { key: "contract_ends", label: "Contract Ends", icon: CalendarRange, placeholder: "YYYY-MM-DD", inputType: "date", fromExtracted: "contract_ends" },
+      {
+        key: "tipo_actividad",
+        label: "Tipo Actividad",
+        icon: Compass,
+        excelCol: "A",
+        placeholder: "Ej: Hospedaje, Tour, Transporte…",
+        fromCatalog: true,
+      },
+      {
+        key: "zona_turismo",
+        label: "Zona Turismo",
+        icon: MapIcon,
+        excelCol: "B",
+        placeholder: "Ej: Pacífico Central",
+        fromCatalog: true,
+      },
+      {
+        key: "proveedor_codigo",
+        label: "Proveedor (código del maestro)",
+        icon: Building2,
+        excelCol: "C",
+        placeholder: "Identificador corto del proveedor",
+        fromCatalog: true,
+      },
+      {
+        key: "codigo_servicio",
+        label: "Código Servicio",
+        icon: Hash,
+        excelCol: "N",
+        placeholder: "Ej: SVC-1024",
+        fromCatalog: true,
+      },
     ],
   },
   {
-    id: "servicio",
-    title: "Servicio",
-    subtitle: "Producto contratado y unidad comercializada.",
-    icon: Package,
-    accent: ACCENTS.sky,
+    id: "identidad",
+    title: "Identidad del proveedor",
+    icon: Building2,
     fields: [
-      { key: "codigo_servicio", label: "Código Servicio", icon: Hash, placeholder: "Ej: SVC-1024" },
-      { key: "product_name", label: "Product Name", icon: Tag, placeholder: "Ej: COTINGA, Garden", fromExtracted: "product_name" },
-      // P · Q · R: clasificadores del catálogo Utopía. La IA los rellena
-      // automáticamente como parte de la extracción (ver backend tool schema).
-      // El usuario los puede editar como texto si la IA se equivoca.
+      {
+        key: "proveedor",
+        label: "Razón Social",
+        icon: Building2,
+        excelCol: "D",
+        placeholder: "Ej: ACME Servicios S.A.",
+      },
+      {
+        key: "nombre_comercial",
+        label: "Nombre Comercial",
+        icon: BookMarked,
+        excelCol: "G",
+        placeholder: "Ej: ACME",
+      },
+      {
+        key: "cedula",
+        label: "Cédula Jurídica",
+        icon: Hash,
+        excelCol: "E",
+        placeholder: "Ej: 3-101-123456",
+      },
+      {
+        key: "fecha",
+        label: "Contract Date",
+        icon: Calendar,
+        excelCol: "F",
+        placeholder: "YYYY-MM-DD",
+        inputType: "date",
+      },
+      {
+        key: "telefono",
+        label: "Teléfono",
+        icon: Phone,
+        excelCol: "—",
+        placeholder: "Ej: (506) 2777-1414",
+      },
+    ],
+  },
+  {
+    id: "ubicacion",
+    title: "Ubicación",
+    icon: MapPin,
+    fields: [
+      {
+        key: "pais",
+        label: "País",
+        icon: Globe,
+        excelCol: "H",
+        placeholder: "Ej: Costa Rica",
+      },
+      {
+        key: "state_province",
+        label: "State / Province",
+        icon: MapPin,
+        excelCol: "I",
+        placeholder: "Ej: Puntarenas",
+      },
+      {
+        key: "direccion",
+        label: "Dirección (Location)",
+        icon: MapPin,
+        excelCol: "J",
+        placeholder: "Calle, número, ciudad…",
+        multiline: true,
+      },
+      {
+        key: "type_of_business",
+        label: "Type of Business",
+        icon: Briefcase,
+        excelCol: "K",
+        placeholder: "Ej: Hotel, Tour Operator…",
+      },
+    ],
+  },
+  {
+    id: "contrato",
+    title: "Vigencia y contacto operativo",
+    icon: CalendarRange,
+    fields: [
+      {
+        key: "contract_starts",
+        label: "Contract Starts",
+        icon: CalendarCheck2,
+        excelCol: "L",
+        placeholder: "YYYY-MM-DD",
+        inputType: "date",
+      },
+      {
+        key: "contract_ends",
+        label: "Contract Ends",
+        icon: CalendarRange,
+        excelCol: "M",
+        placeholder: "YYYY-MM-DD",
+        inputType: "date",
+      },
+      {
+        key: "reservations_email",
+        label: "Reservations Email",
+        icon: Mail,
+        excelCol: "AO",
+        placeholder: "reservas@proveedor.com",
+        inputType: "email",
+      },
+    ],
+  },
+  {
+    id: "clasificacion",
+    title: "Clasificación catálogo Utopía",
+    icon: Tag,
+    fields: [
       {
         key: "tipo_unidad",
         label: "Tipo Unidad",
         icon: BedDouble,
+        excelCol: "P",
         placeholder: "N o S",
-        fromExtracted: "tipo_unidad",
+        options: () => TIPO_UNIDAD_OPTIONS,
       },
       {
         key: "tipo_servicio",
         label: "Tipo Servicio",
         icon: Tag,
+        excelCol: "Q",
         placeholder: "Ej: HO, TO, TR…",
-        fromExtracted: "tipo_servicio",
+        options: () => TIPOS_SERVICIO,
+      },
+    ],
+  },
+  {
+    id: "banco",
+    title: "Datos bancarios",
+    icon: Landmark,
+    fields: [
+      {
+        key: "numero_cuenta",
+        label: "Cuenta Bancaria",
+        icon: CreditCard,
+        excelCol: "AR",
+        placeholder: "IBAN preferido",
       },
       {
-        key: "categoria",
-        label: "Categoría",
-        icon: Star,
-        placeholder: "Ej: OCV, STD, UNI…",
-        fromExtracted: "categoria",
+        key: "banco",
+        label: "Banco",
+        icon: Landmark,
+        excelCol: "AS",
+        placeholder: "Ej: BAC Credomatic",
       },
-      { key: "ocupacion", label: "Ocupación", icon: Users, placeholder: "Ej: DBL, SGL", fromExtracted: "ocupacion" },
-    ],
-  },
-  {
-    id: "temporada",
-    title: "Temporada",
-    subtitle: "Vigencia comercial del producto.",
-    icon: Sun,
-    accent: ACCENTS.amber,
-    fields: [
-      { key: "season_name", label: "Season Name", icon: Sparkles, placeholder: "Ej: GREEN SEASON, ALTA…", fromExtracted: "season_name" },
-      { key: "season_starts", label: "Season Starts", icon: Calendar, placeholder: "YYYY-MM-DD", inputType: "date", fromExtracted: "season_starts" },
-      { key: "season_ends", label: "Season Ends", icon: Calendar, placeholder: "YYYY-MM-DD", inputType: "date", fromExtracted: "season_ends" },
-      { key: "meals_included", label: "Meals Included", icon: Utensils, placeholder: "Ej: BREAKFAST, MAP…", fromExtracted: "meals_included" },
-    ],
-  },
-  {
-    id: "tarifas",
-    title: "Tarifas estándar",
-    subtitle: "Precios de lunes a jueves (o tarifa base).",
-    icon: DollarSign,
-    accent: ACCENTS.emerald,
-    fields: [
-      { key: "tipo_tarifa_neta", label: "Tipo Tarifa Neta", icon: DollarSign, placeholder: "Ej: Por persona / por unidad" },
-      { key: "precios_neto_iva", label: "Precios Neto con IVA Incluido", icon: Banknote, placeholder: "Ej: 276.75", fromExtracted: "precios_neto_iva" },
-      { key: "precio_rack_iva", label: "Precio Rack con IVA Incluido", icon: Banknote, placeholder: "Ej: 369", fromExtracted: "precio_rack_iva" },
-      { key: "tipo_tarifa_mayorista", label: "Tipo Tarifa Mayorista", icon: Receipt, placeholder: "Ej: Wholesale" },
-      { key: "porcentaje_comision", label: "Porcentaje de Comisión", icon: Percent, placeholder: "Ej: 25", fromExtracted: "porcentaje_comision" },
-    ],
-  },
-  {
-    id: "tarifas_fds",
-    title: "Tarifas fin de semana",
-    subtitle: "Precios aplicables sábados, domingos y feriados.",
-    icon: DollarSign,
-    accent: ACCENTS.violet,
-    fields: [
-      { key: "tipo_tarifa_fds", label: "Tipo Tarifa Fin de Semana", icon: DollarSign, placeholder: "Ej: Weekend rate" },
-      { key: "t_tar_neta_fds", label: "T.Tar Neta Fin de Semana", icon: DollarSign, placeholder: "Tipo de tarifa neta FdS" },
-      { key: "precios_neto_iva_fds", label: "Precios Neto con IVA Incluido Fin de Semana", icon: Banknote, placeholder: "Ej: 276.75", fromExtracted: "precios_neto_iva_fds" },
-      { key: "precio_rack_iva_fds", label: "Precio Rack con IVA Incluido Fin de Semana", icon: Banknote, placeholder: "Ej: 369", fromExtracted: "precio_rack_iva_fds" },
-      { key: "tipo_tarifa_mayorista_fds", label: "Tipo Tarifa Mayorista Fin de Semana", icon: Receipt, placeholder: "Ej: Wholesale FdS" },
-      { key: "porcentaje_comision_fds", label: "Porcentaje de Comisión Fin de Semana", icon: Percent, placeholder: "Ej: 25", fromExtracted: "porcentaje_comision_fds" },
-    ],
-  },
-  {
-    id: "politicas",
-    title: "Políticas",
-    subtitle: "Cancelación, pago, niños y otros incluidos.",
-    icon: ShieldAlert,
-    accent: ACCENTS.rose,
-    fields: [
-      { key: "cancellation_policy", label: "Cancellation Policy", icon: ShieldAlert, placeholder: "Resumen de la política de cancelación", wide: true, multiline: true, fromExtracted: "cancellation_policy" },
-      { key: "range_payment_policy", label: "Range Payment Policy", icon: Wallet, placeholder: "Ventana de pago aplicable", wide: true, multiline: true, fromExtracted: "range_payment_policy" },
-      { key: "others_payment_cancel", label: "Others in Payment or Cancellation", icon: FileText, placeholder: "Cláusulas adicionales", wide: true, multiline: true },
-      { key: "kids_policy", label: "Kids Policy", icon: Baby, placeholder: "Reglas para menores", wide: true, multiline: true, fromExtracted: "kids_policy" },
-      { key: "other_included", label: "Other Included", icon: PlusCircle, placeholder: "Otros servicios incluidos", fromExtracted: "other_included" },
-      { key: "feeds_adicionales", label: "Feeds Adicionales", icon: Receipt, placeholder: "Cargos extras", fromExtracted: "feeds_adicionales" },
-    ],
-  },
-  {
-    id: "credito",
-    title: "Reservas y crédito",
-    subtitle: "Contacto operativo y términos de pago.",
-    icon: Mail,
-    accent: ACCENTS.sky,
-    fields: [
-      { key: "reservations_email", label: "Reservations Email", icon: Mail, placeholder: "reservas@proveedor.com", inputType: "email", fromExtracted: "reservations_email" },
-      { key: "cond_credito", label: "Cond. Crédito", icon: CreditCard, placeholder: "Ej: 30 días neto" },
-      { key: "plazo", label: "Plazo", icon: Clock, placeholder: "Ej: 30 días" },
-    ],
-  },
-  {
-    id: "bancos",
-    title: "Información bancaria",
-    subtitle: "Hasta 3 cuentas bancarias del proveedor.",
-    icon: Landmark,
-    accent: ACCENTS.emerald,
-    fields: [
-      { key: "cuenta_bancaria_1", label: "Cuenta Bancaria 1", icon: CreditCard, placeholder: "IBAN preferido", fromExtracted: "numero_cuenta" },
-      { key: "banco_1", label: "Banco 1", icon: Landmark, placeholder: "Ej: BAC Credomatic", fromExtracted: "banco" },
-      { key: "moneda_1", label: "Moneda 1", icon: Banknote, placeholder: "USD, EUR, CRC…", fromExtracted: "tipo_moneda" },
-      { key: "cuenta_bancaria_2", label: "Cuenta Bancaria 2", icon: CreditCard, placeholder: "IBAN preferido" },
-      { key: "banco_2", label: "Banco 2", icon: Landmark, placeholder: "Ej: BAC Credomatic" },
-      { key: "moneda_2", label: "Moneda 2", icon: Banknote, placeholder: "USD, EUR, CRC…" },
-      { key: "cuenta_bancaria_3", label: "Cuenta Bancaria 3", icon: CreditCard, placeholder: "IBAN preferido" },
-      { key: "banco_3", label: "Banco 3", icon: Landmark, placeholder: "Ej: BAC Credomatic" },
-      { key: "moneda_3", label: "Moneda 3", icon: Banknote, placeholder: "USD, EUR, CRC…" },
+      {
+        key: "tipo_moneda",
+        label: "Moneda",
+        icon: Banknote,
+        excelCol: "AT",
+        placeholder: "USD, EUR, CRC…",
+      },
     ],
   },
 ];
 
 /**
- * Flatten the section schema into a single array — used by the search filter
- * and "edit count" math without re-walking the section tree each render.
- */
-export const ALL_FIELDS: FieldDef[] = SECTIONS.flatMap((s) => s.fields);
-
-/**
- * Convierte un índice 1-based en su letra de columna estilo Excel:
- *   1 → A, 26 → Z, 27 → AA, 52 → AZ, 53 → BA, etc.
- *
- * El maestro de proveedores en producción está versionado como xlsx, así que
- * etiquetar cada campo del formulario con su letra de columna correspondiente
- * mantiene la equivalencia visual con esa hoja y facilita citar campos por
- * letra en conversación ("revisa la columna AA").
- */
-export function excelColumnLetter(n: number): string {
-  if (!Number.isFinite(n) || n < 1) return "";
-  let s = "";
-  let x = Math.floor(n);
-  while (x > 0) {
-    const r = (x - 1) % 26;
-    s = String.fromCharCode(65 + r) + s;
-    x = Math.floor((x - 1) / 26);
-  }
-  return s;
-}
-
-/**
- * Mapa precomputado `key -> letra Excel` siguiendo el orden de `ALL_FIELDS`.
- * Si en el futuro reordenas SECTIONS, este mapa se actualiza solo — y por eso
- * vive como derivación de la fuente de verdad en lugar de como literal.
- *
- * Hoy: 52 campos → A..Z, AA..AZ.
- */
-export const FIELD_EXCEL_COL: Record<DisplayFieldKey, string> = ALL_FIELDS
-  .reduce<Record<string, string>>((acc, f, i) => {
-    acc[f.key] = excelColumnLetter(i + 1);
-    return acc;
-  }, {}) as Record<DisplayFieldKey, string>;
-
-/**
- * Campos que muestran el aviso "Revisar — la información puede ser incorrecta".
- * Estos son los identificadores del proveedor que vienen pre-llenados desde el
- * maestro CrtLisProv (cuando hay match) o del nombre extraído del contrato —
- * en ambos casos el match no es 100% confiable y conviene que el humano
+ * Campos pre-llenados desde el catálogo (cuando hay match). El UI muestra el
+ * badge "Revisar — puede ser incorrecto" sobre estos para que el humano
  * confirme antes de aprobar.
  */
-export const FIELDS_NEEDING_REVIEW: ReadonlySet<DisplayFieldKey> = new Set<DisplayFieldKey>([
+const SHARED_FIELDS_NEEDING_REVIEW: ReadonlySet<SharedDisplayKey> = new Set([
   "tipo_actividad",
   "zona_turismo",
-  "proveedor",
+  "proveedor_codigo",
 ]);
 
 /**
- * Build a `{ displayKey -> initial value }` map from the AI extraction.
- *
- * El `catalogPrefill` (cuando viene) sobreescribe los 4 campos del maestro
- * (tipo_actividad, zona_turismo, proveedor, codigo_servicio). Esos campos no
- * tienen `fromExtracted`, así que sin catálogo arrancarían vacíos — con
- * catálogo, traen el valor del maestro como punto de partida (que el usuario
- * puede editar normalmente en step 2).
+ * Columnas de la tabla de filas. El orden es el orden visual de la tabla.
  */
-function buildInitialValues(
-  extracted: ExtractedContract,
-  catalogPrefill?: CatalogPrefill | null,
-): Record<DisplayFieldKey, string | null> {
-  const out: Partial<Record<DisplayFieldKey, string | null>> = {};
-  for (const field of ALL_FIELDS) {
-    out[field.key] = field.fromExtracted
-      ? (extracted[field.fromExtracted] ?? null)
-      : null;
-  }
-  if (catalogPrefill) {
-    if (catalogPrefill.tipo_actividad) out.tipo_actividad = catalogPrefill.tipo_actividad;
-    if (catalogPrefill.zona_turismo) out.zona_turismo = catalogPrefill.zona_turismo;
-    if (catalogPrefill.proveedor) out.proveedor = catalogPrefill.proveedor;
-    if (catalogPrefill.codigo_servicio) out.codigo_servicio = catalogPrefill.codigo_servicio;
-  }
-  return out as Record<DisplayFieldKey, string | null>;
+interface RowFieldDef {
+  key: ExtractedRowFieldKey;
+  label: string;
+  shortLabel?: string;
+  excelCol: string;
+  icon?: LucideIcon;
+  inputType?: "text" | "date" | "number";
+  multiline?: boolean;
+  /** Ancho mínimo de la columna en píxeles. */
+  minWidth: number;
+  placeholder?: string;
+  /** Dropdown con opciones dinámicas. Recibe el shared.tipo_servicio elegido. */
+  options?: (tipoServicio: string | null) => ReadonlyArray<SelectOption>;
 }
+
+const ROW_FIELDS: RowFieldDef[] = [
+  {
+    key: "product_name",
+    label: "Product Name",
+    shortLabel: "Producto",
+    excelCol: "O",
+    icon: Tag,
+    minWidth: 180,
+    placeholder: "Ej: Garden, Vista Suites",
+  },
+  {
+    key: "categoria",
+    label: "Categoría",
+    excelCol: "R",
+    icon: Star,
+    minWidth: 150,
+    placeholder: "Ej: STD, MAS, PNT",
+    options: (tipoServicio) => {
+      if (!tipoServicio) return [];
+      return CATEGORIAS_BY_TIPO_SERVICIO[tipoServicio] ?? [];
+    },
+  },
+  {
+    key: "ocupacion",
+    label: "Ocupación",
+    shortLabel: "Ocup.",
+    excelCol: "S",
+    icon: Users,
+    minWidth: 100,
+    placeholder: "DBL, SGL, TPL…",
+  },
+  {
+    key: "season_name",
+    label: "Season",
+    shortLabel: "Temporada",
+    excelCol: "T",
+    icon: Sun,
+    minWidth: 130,
+    placeholder: "PEAK, ALTA, BAJA…",
+  },
+  {
+    key: "season_starts",
+    label: "Season Starts",
+    shortLabel: "Inicio",
+    excelCol: "U",
+    icon: Calendar,
+    inputType: "date",
+    minWidth: 140,
+  },
+  {
+    key: "season_ends",
+    label: "Season Ends",
+    shortLabel: "Fin",
+    excelCol: "V",
+    icon: Calendar,
+    inputType: "date",
+    minWidth: 140,
+  },
+  {
+    key: "meals_included",
+    label: "Meals Included",
+    shortLabel: "Meals",
+    excelCol: "W",
+    icon: Utensils,
+    minWidth: 140,
+    placeholder: "BREAKFAST, MAP…",
+  },
+  {
+    key: "precios_neto_iva",
+    label: "Neto c/IVA",
+    excelCol: "Y",
+    icon: Banknote,
+    minWidth: 110,
+    placeholder: "Ej: 295",
+  },
+  {
+    key: "precio_rack_iva",
+    label: "Rack c/IVA",
+    excelCol: "Z",
+    icon: Banknote,
+    minWidth: 110,
+    placeholder: "Ej: 295",
+  },
+  {
+    key: "porcentaje_comision",
+    label: "% Comisión",
+    shortLabel: "%Com",
+    excelCol: "AB",
+    icon: Percent,
+    minWidth: 90,
+    placeholder: "Ej: 25 o 0",
+  },
+  {
+    key: "precios_neto_iva_fds",
+    label: "Neto FdS",
+    excelCol: "AE",
+    icon: Banknote,
+    minWidth: 110,
+    placeholder: "Ej: 295",
+  },
+  {
+    key: "precio_rack_iva_fds",
+    label: "Rack FdS",
+    excelCol: "AF",
+    icon: Banknote,
+    minWidth: 110,
+    placeholder: "Ej: 295",
+  },
+  {
+    key: "porcentaje_comision_fds",
+    label: "% Com. FdS",
+    shortLabel: "%Com FdS",
+    excelCol: "AH",
+    icon: Percent,
+    minWidth: 100,
+    placeholder: "Ej: 25 o 0",
+  },
+  {
+    key: "cancellation_policy",
+    label: "Política de cancelación",
+    shortLabel: "Cancelación",
+    excelCol: "AI",
+    icon: ShieldAlert,
+    multiline: true,
+    minWidth: 280,
+    placeholder: "Resumen 1-2 oraciones",
+  },
+  {
+    key: "range_payment_policy",
+    label: "Política de pago",
+    shortLabel: "Pago",
+    excelCol: "AJ",
+    icon: Wallet,
+    multiline: true,
+    minWidth: 220,
+    placeholder: "Plazo de pago",
+  },
+  {
+    key: "kids_policy",
+    label: "Política de niños",
+    shortLabel: "Niños",
+    excelCol: "AL",
+    icon: Baby,
+    multiline: true,
+    minWidth: 240,
+    placeholder: "Reglas para menores",
+  },
+  {
+    key: "other_included",
+    label: "Otros incluidos",
+    shortLabel: "Other incl.",
+    excelCol: "AM",
+    icon: Plus,
+    multiline: true,
+    minWidth: 200,
+    placeholder: "Wi-Fi, fitness, etc.",
+  },
+  {
+    key: "feeds_adicionales",
+    label: "Fees adicionales",
+    shortLabel: "Fees",
+    excelCol: "AN",
+    icon: Receipt,
+    multiline: true,
+    minWidth: 180,
+    placeholder: "Resort fee, etc.",
+  },
+];
+
+/* ============================================================================
+   STEP 2 — Review (header card + table)
+   ========================================================================== */
 
 const CONFIANZA_STYLES: Record<
   ExtractionConfianza,
@@ -1478,13 +1433,41 @@ const CONFIANZA_STYLES: Record<
   },
 };
 
-type RowFilter = "all" | "filled" | "empty";
-
-const ROW_FILTERS: { id: RowFilter; label: string }[] = [
-  { id: "all", label: "Todos" },
-  { id: "filled", label: "Con valor" },
-  { id: "empty", label: "Vacíos" },
-];
+/**
+ * Construye el state inicial del header card a partir de la respuesta IA y
+ * el catalog prefill. Las claves son SharedDisplayKey.
+ */
+function buildInitialShared(
+  data: ExtractedContract,
+  prefill: CatalogPrefill | null,
+): Record<SharedDisplayKey, string | null> {
+  const out: Record<SharedDisplayKey, string | null> = {
+    // AI-extracted fields
+    fecha: data.shared_fields.fecha,
+    proveedor: data.shared_fields.proveedor,
+    nombre_comercial: data.shared_fields.nombre_comercial,
+    cedula: data.shared_fields.cedula,
+    direccion: data.shared_fields.direccion,
+    telefono: data.shared_fields.telefono,
+    pais: data.shared_fields.pais,
+    state_province: data.shared_fields.state_province,
+    type_of_business: data.shared_fields.type_of_business,
+    contract_starts: data.shared_fields.contract_starts,
+    contract_ends: data.shared_fields.contract_ends,
+    reservations_email: data.shared_fields.reservations_email,
+    tipo_unidad: data.shared_fields.tipo_unidad,
+    tipo_servicio: data.shared_fields.tipo_servicio,
+    tipo_moneda: data.shared_fields.tipo_moneda,
+    numero_cuenta: data.shared_fields.numero_cuenta,
+    banco: data.shared_fields.banco,
+    // Catalog prefill fields
+    tipo_actividad: prefill?.tipo_actividad ?? null,
+    zona_turismo: prefill?.zona_turismo ?? null,
+    proveedor_codigo: prefill?.proveedor_codigo ?? null,
+    codigo_servicio: prefill?.codigo_servicio ?? null,
+  };
+  return out;
+}
 
 function ReviewStep({
   result,
@@ -1493,91 +1476,133 @@ function ReviewStep({
 }: {
   result: ExtractContractResponse;
   catalogPrefill: CatalogPrefill | null;
-  onApprove: () => void;
+  onApprove: (payload: ApprovedPayload) => void;
 }) {
   const { data, validation, meta } = result;
   const conf = CONFIANZA_STYLES[data.confianza];
 
-  // Initial values seeded from the AI extraction + catalog prefill (cuando
-  // hubo match). Keys are display-field names; AI mapping comes via
-  // `fromExtracted`; los 4 campos del maestro vienen del prefill si aplica.
-  const initialValues = useMemo(
-    () => buildInitialValues(data, catalogPrefill),
-    [data, catalogPrefill],
-  );
+  // ---- Shared state ----
+  // ReviewStep solo se monta cuando el parent transiciona a step 2; cuando
+  // el usuario hace "Procesar otro contrato" el parent llama reset() que
+  // desmonta esto. Por eso usamos useState con inicializador (lazy) y NO
+  // un useEffect para re-seed — la prop `result` no cambia dentro del
+  // ciclo de vida del componente.
+  const [sharedValues, setSharedValues] = useState<
+    Record<SharedDisplayKey, string | null>
+  >(() => buildInitialShared(data, catalogPrefill));
 
-  /**
-   * User overrides keyed by display field name. A key is present here only
-   * after the user explicitly saved an edit — `null` means "user cleared the
-   * field", a non-empty string means "user-supplied value". The initial
-   * map stays unchanged.
-   */
-  const [edits, setEdits] = useState<
-    Partial<Record<DisplayFieldKey, string | null>>
-  >({});
-
-  const setFieldEdit = (key: DisplayFieldKey, value: string | null) => {
-    setEdits((prev) => ({ ...prev, [key]: value }));
+  const setSharedField = (key: SharedDisplayKey, value: string | null) => {
+    setSharedValues((prev) => ({ ...prev, [key]: value }));
   };
 
-  /**
-   * Effective per-key value to display: user edit (if any) over initial.
-   * Recomputed when either side changes.
-   */
-  const displayValues = useMemo<Record<DisplayFieldKey, string | null>>(() => {
-    if (Object.keys(edits).length === 0) return initialValues;
-    return { ...initialValues, ...edits };
-  }, [initialValues, edits]);
+  // ---- Rows state ----
+  const [rows, setRows] = useState<ExtractedContractRow[]>(() => data.rows);
 
-  // Toolbar state.
-  const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<RowFilter>("all");
-  // Per-section collapsed state. Default: all collapsed — the field set is
-  // long, so the user opens only the section they want to inspect.
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() =>
-    Object.fromEntries(SECTIONS.map((s) => [s.id, true])),
-  );
-  const toggleSection = (id: string) =>
-    setCollapsed((prev) => ({ ...prev, [id]: !prev[id] }));
-  const setAllCollapsed = (next: boolean) => {
-    setCollapsed(
-      Object.fromEntries(SECTIONS.map((s) => [s.id, next])) as Record<
-        string,
-        boolean
-      >,
+  const setRowField = (
+    rowIdx: number,
+    key: ExtractedRowFieldKey,
+    value: string | null,
+  ) => {
+    setRows((prev) =>
+      prev.map((r, i) => (i === rowIdx ? { ...r, [key]: value } : r)),
     );
   };
-  const allCollapsed = SECTIONS.every((s) => collapsed[s.id]);
 
-  // Helper used by both the section header counters and the filter logic so
-  // they always agree on what counts as "with value".
-  const isFilled = (k: DisplayFieldKey) => {
-    const v = displayValues[k];
-    return typeof v === "string" && v.trim() !== "";
+  const addRow = () => {
+    setRows((prev) => {
+      // Clone the last row's structure but with prices/season cleared, so
+      // shared row context (product_name, ocupacion) is preserved as a hint.
+      const last = prev[prev.length - 1];
+      const blank: ExtractedContractRow = {
+        product_name: last?.product_name ?? null,
+        categoria: last?.categoria ?? null,
+        ocupacion: last?.ocupacion ?? null,
+        season_name: null,
+        season_starts: null,
+        season_ends: null,
+        meals_included: last?.meals_included ?? null,
+        precios_neto_iva: null,
+        precio_rack_iva: null,
+        porcentaje_comision: last?.porcentaje_comision ?? null,
+        precios_neto_iva_fds: null,
+        precio_rack_iva_fds: null,
+        porcentaje_comision_fds: last?.porcentaje_comision_fds ?? null,
+        cancellation_policy: last?.cancellation_policy ?? null,
+        range_payment_policy: last?.range_payment_policy ?? null,
+        kids_policy: last?.kids_policy ?? null,
+        other_included: last?.other_included ?? null,
+        feeds_adicionales: last?.feeds_adicionales ?? null,
+      };
+      return [...prev, blank];
+    });
   };
 
-  const totalFields = ALL_FIELDS.length;
-  const filledCount = ALL_FIELDS.filter((f) => isFilled(f.key)).length;
-
-  const normSearch = search.trim().toLowerCase();
-  const matchesFilter = (f: FieldDef) => {
-    if (normSearch && !f.label.toLowerCase().includes(normSearch)) return false;
-    if (filter === "filled") return isFilled(f.key);
-    if (filter === "empty") return !isFilled(f.key);
-    return true;
+  const removeRow = (rowIdx: number) => {
+    setRows((prev) => {
+      if (prev.length <= 1) return prev; // mantén al menos 1
+      return prev.filter((_, i) => i !== rowIdx);
+    });
   };
 
-  // Visible fields per section after filtering. Sections with zero matches
-  // are hidden entirely so the user isn't scrolling through empty cards.
-  const visibleSections = useMemo(
-    () =>
-      SECTIONS.map((s) => ({
-        section: s,
-        fields: s.fields.filter(matchesFilter),
-      })).filter((s) => s.fields.length > 0),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [normSearch, filter, displayValues],
-  );
+  // ---- Approval ----
+  const handleApprove = () => {
+    const sharedFields: ExtractedSharedFields = {
+      fecha: sharedValues.fecha,
+      proveedor: sharedValues.proveedor,
+      nombre_comercial: sharedValues.nombre_comercial,
+      cedula: sharedValues.cedula,
+      direccion: sharedValues.direccion,
+      telefono: sharedValues.telefono,
+      pais: sharedValues.pais,
+      state_province: sharedValues.state_province,
+      type_of_business: sharedValues.type_of_business,
+      contract_starts: sharedValues.contract_starts,
+      contract_ends: sharedValues.contract_ends,
+      reservations_email: sharedValues.reservations_email,
+      tipo_unidad:
+        sharedValues.tipo_unidad === "N" || sharedValues.tipo_unidad === "S"
+          ? sharedValues.tipo_unidad
+          : null,
+      tipo_servicio: sharedValues.tipo_servicio,
+      tipo_moneda: sharedValues.tipo_moneda,
+      numero_cuenta: sharedValues.numero_cuenta,
+      banco: sharedValues.banco,
+    };
+    const finalCatalogPrefill: GenerateXlsxCatalogPrefill | null =
+      sharedValues.tipo_actividad ||
+      sharedValues.zona_turismo ||
+      sharedValues.proveedor_codigo ||
+      sharedValues.codigo_servicio
+        ? {
+            tipo_actividad: sharedValues.tipo_actividad,
+            zona_turismo: sharedValues.zona_turismo,
+            proveedor_codigo: sharedValues.proveedor_codigo,
+            codigo_servicio: sharedValues.codigo_servicio,
+          }
+        : null;
+    onApprove({
+      sharedFields,
+      rows,
+      catalogPrefill: finalCatalogPrefill,
+    });
+  };
+
+  // ---- Stats ----
+  const rowCount = rows.length;
+  const filledRowCellsCount = rows.reduce((sum, r) => {
+    return (
+      sum +
+      ROW_FIELDS.filter((f) => {
+        const v = r[f.key];
+        return typeof v === "string" && v.trim() !== "";
+      }).length
+    );
+  }, 0);
+  const totalRowCells = rowCount * ROW_FIELDS.length;
+  const completionPct =
+    totalRowCells === 0
+      ? 0
+      : Math.round((filledRowCellsCount / totalRowCells) * 100);
 
   return (
     <div className="px-5 sm:px-8 py-7 space-y-5">
@@ -1600,38 +1625,28 @@ function ReviewStep({
               </span>
               <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-[10.5px] font-semibold uppercase tracking-wider text-emerald-300">
                 <CheckCircle2 className="w-3 h-3" />
-                {filledCount}/{totalFields} con valor
+                {rowCount} {rowCount === 1 ? "fila" : "filas"} extraída
+                {rowCount === 1 ? "" : "s"}
               </span>
             </div>
             <p className="text-[12.5px] text-muted-foreground mt-1 truncate">
-              {meta.filename} · {humanSize(meta.size_bytes)} · modelo{" "}
-              {meta.model}
+              {meta.filename} · {humanSize(meta.size_bytes)} · modelo {meta.model}
             </p>
           </div>
         </div>
 
-        {/* Completion progress bar */}
         <div className="mt-3 space-y-1">
           <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-secondary/70 border border-border/50">
             <div
               className="h-full rounded-full bg-gradient-to-r from-primary to-emerald-400 shadow-[0_0_10px_0_hsl(var(--primary)/0.4)] transition-[width] duration-300 ease-out"
-              style={{
-                width: `${Math.round((filledCount / totalFields) * 100)}%`,
-              }}
+              style={{ width: `${completionPct}%` }}
             />
           </div>
           <p className="text-[10.5px] text-muted-foreground tabular-nums">
-            {Math.round((filledCount / totalFields) * 100)}% del registro
-            completo
+            {completionPct}% de las celdas de la tabla con valor
           </p>
         </div>
       </div>
-
-      {/* CatalogMatchBanner se removió a pedido — el lookup contra el maestro
-         sigue corriendo y los 4 campos siguen pre-llenándose, pero ya no
-         renderizamos el banner verde/amber con confianza/reasoning. Si en el
-         futuro queremos re-mostrarlo, descomentar:
-         <CatalogMatchBanner info={catalogMatchInfo} /> */}
 
       {validation.warnings.length > 0 && (
         <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-[12.5px] text-amber-200">
@@ -1651,89 +1666,33 @@ function ReviewStep({
         </div>
       )}
 
-      {/* Toolbar — search + filter chips + expand/collapse */}
-      <div className="rounded-xl border border-border bg-card/60 px-3.5 py-3 space-y-3">
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5">
-          <div className="relative flex-1 min-w-0">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground/70" />
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Buscar campo… (ej: cuenta, fecha, comisión)"
-              aria-label="Buscar campo"
-              className="w-full h-10 pl-9 pr-3 rounded-md border border-border bg-secondary/40 text-[14px] text-foreground placeholder:text-muted-foreground/60 outline-none focus:border-primary/60 focus:bg-secondary/60 transition-colors"
-            />
-          </div>
-          <button
-            type="button"
-            onClick={() => setAllCollapsed(!allCollapsed)}
-            className="inline-flex items-center justify-center gap-1.5 h-10 px-3.5 rounded-md border border-border bg-secondary/40 text-[13px] font-medium text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors shrink-0"
-          >
-            <ChevronDown
-              className={`w-4 h-4 transition-transform ${
-                allCollapsed ? "" : "rotate-180"
-              }`}
-            />
-            {allCollapsed ? "Expandir todo" : "Colapsar todo"}
-          </button>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {ROW_FILTERS.map((f) => {
-            const active = filter === f.id;
-            return (
-              <button
-                key={f.id}
-                type="button"
-                onClick={() => setFilter(f.id)}
-                aria-pressed={active}
-                className={`inline-flex items-center px-3 py-1.5 rounded-full text-[12.5px] font-medium border transition-colors ${
-                  active
-                    ? "bg-primary text-primary-foreground border-primary shadow-[0_0_10px_0_hsl(var(--primary)/0.35)]"
-                    : "bg-secondary/40 text-muted-foreground border-border hover:text-foreground hover:bg-secondary/70"
-                }`}
-              >
-                {f.label}
-              </button>
-            );
-          })}
-        </div>
-      </div>
+      <SharedFieldsCard
+        values={sharedValues}
+        onChange={setSharedField}
+        paginasOrigen={data.paginas_origen_shared}
+        filename={meta.filename}
+        camposFaltantes={data.campos_faltantes}
+        hasCatalogPrefill={catalogPrefill !== null}
+      />
 
-      {/* Section cards */}
-      {visibleSections.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-border bg-secondary/20 px-4 py-10 text-center">
-          <p className="text-[14.5px] text-muted-foreground">
-            Ningún campo coincide con la búsqueda o el filtro actual.
-          </p>
-        </div>
-      ) : (
-        <div className="space-y-3">
-          {visibleSections.map(({ section, fields }) => (
-            <SectionCard
-              key={section.id}
-              section={section}
-              fields={fields}
-              collapsed={!!collapsed[section.id]}
-              onToggle={() => toggleSection(section.id)}
-              displayValues={displayValues}
-              extracted={data}
-              filename={meta.filename}
-              onSave={setFieldEdit}
-              isFilled={isFilled}
-            />
-          ))}
-        </div>
-      )}
+      <RowsTable
+        rows={rows}
+        tipoServicio={sharedValues.tipo_servicio}
+        paginasOrigenRows={data.paginas_origen_rows}
+        filename={meta.filename}
+        onChange={setRowField}
+        onAddRow={addRow}
+        onRemoveRow={removeRow}
+      />
 
       <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-2 pt-2">
         <button
           type="button"
-          onClick={onApprove}
+          onClick={handleApprove}
           className="btn-premium inline-flex items-center justify-center gap-2 h-11 px-5 rounded-lg text-[13.5px]"
         >
-          <ShieldCheck className="w-4 h-4" />
-          Aprobar datos
+          <Download className="w-4 h-4" />
+          Generar y descargar xlsx
           <ArrowRight className="w-4 h-4 opacity-80" />
         </button>
       </div>
@@ -1741,117 +1700,734 @@ function ReviewStep({
   );
 }
 
-/* ---------------------------------- STEP 3 -------------------------------- */
+/* ============================================================================
+   Shared Fields Card (header)
+   ========================================================================== */
 
-/**
- * Mock cloud-upload phases. The real backend integration doesn't exist yet —
- * we simulate progress against these copy bands so the user gets a believable
- * "uploading to the cloud xlsx maestro" experience while the feature is
- * fictitious. Replace `useFakeUpload` with a real fetch when the endpoint
- * lands.
- */
-const UPLOAD_PHASES: { from: number; to: number; label: string }[] = [
-  { from: 0, to: 18, label: "Conectando con el servidor…" },
-  { from: 18, to: 38, label: "Verificando duplicados en el maestro…" },
-  { from: 38, to: 70, label: "Insertando nueva fila en el xlsx…" },
-  { from: 70, to: 95, label: "Sincronizando con la nube…" },
-  { from: 95, to: 100, label: "Confirmando cambios…" },
-];
+function SharedFieldsCard({
+  values,
+  onChange,
+  paginasOrigen,
+  filename,
+  camposFaltantes,
+  hasCatalogPrefill,
+}: {
+  values: Record<SharedDisplayKey, string | null>;
+  onChange: (key: SharedDisplayKey, value: string | null) => void;
+  paginasOrigen: Record<string, ExtractionSourcePage>;
+  filename: string;
+  camposFaltantes: string[];
+  hasCatalogPrefill: boolean;
+}) {
+  const [collapsed, setCollapsed] = useState(false);
 
-function uploadPhase(progress: number): string {
-  const match = UPLOAD_PHASES.find(
-    (p) => progress >= p.from && progress < p.to,
+  const visibleSections = SHARED_SECTIONS.filter(
+    (s) => s.id !== "catalog" || hasCatalogPrefill,
   );
-  return match?.label ?? "Listo";
+
+  const totalFields = visibleSections.reduce((sum, s) => sum + s.fields.length, 0);
+  const filledCount = visibleSections.reduce(
+    (sum, s) =>
+      sum +
+      s.fields.filter((f) => {
+        const v = values[f.key];
+        return typeof v === "string" && v.trim() !== "";
+      }).length,
+    0,
+  );
+
+  return (
+    <section className="rounded-xl border border-primary/20 bg-card/60 overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setCollapsed((c) => !c)}
+        aria-expanded={!collapsed}
+        className="w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-secondary/30 transition-colors"
+      >
+        <div className="w-10 h-10 rounded-lg bg-primary/15 border border-primary/30 flex items-center justify-center shrink-0">
+          <Info className="w-5 h-5 text-primary" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-[14.5px] font-semibold text-foreground">
+            Información compartida del proveedor
+          </p>
+          <p className="text-[12.5px] text-muted-foreground">
+            Estos datos se replican en cada fila del xlsx.
+          </p>
+        </div>
+        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full border text-[11.5px] font-semibold tabular-nums shrink-0 border-primary/30 bg-primary/10 text-primary">
+          {filledCount}/{totalFields}
+        </span>
+        <ChevronDown
+          className={`w-4 h-4 text-muted-foreground transition-transform shrink-0 ${
+            collapsed ? "" : "rotate-180"
+          }`}
+        />
+      </button>
+      {!collapsed && (
+        <div className="border-t border-border/60 bg-card/40 divide-y divide-border/40">
+          {visibleSections.map((section) => (
+            <SharedSubsection
+              key={section.id}
+              section={section}
+              values={values}
+              onChange={onChange}
+              paginasOrigen={paginasOrigen}
+              filename={filename}
+              camposFaltantes={camposFaltantes}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
 }
 
-/**
- * Drives a simulated 0 → 100 progress bar. Easing: small random increments
- * with a faster ramp early on and a slow finish near 100. Calls `onDone` the
- * moment we cross 100 so the parent can swap to the success view — we
- * deliberately don't linger at 100% with a spinner; that's the visual the
- * user flagged as confusing.
- *
- * The hook is intentionally self-contained — no props, no dependencies — so
- * future replacement with a real `fetch` + `progress` listener is a one-line
- * swap inside ApprovalStep.
- */
-function useFakeUpload(onDone: () => void) {
-  const [progress, setProgress] = useState(0);
-  const doneRef = useRef(false);
-  const onDoneRef = useRef(onDone);
-  // Keep the latest onDone reachable from the interval without re-creating
-  // the timer on every render.
-  useEffect(() => {
-    onDoneRef.current = onDone;
-  }, [onDone]);
+function SharedSubsection({
+  section,
+  values,
+  onChange,
+  paginasOrigen,
+  filename,
+  camposFaltantes,
+}: {
+  section: SharedSectionDef;
+  values: Record<SharedDisplayKey, string | null>;
+  onChange: (key: SharedDisplayKey, value: string | null) => void;
+  paginasOrigen: Record<string, ExtractionSourcePage>;
+  filename: string;
+  camposFaltantes: string[];
+}) {
+  const SectionIcon = section.icon;
+  return (
+    <div className="px-4 py-3.5">
+      <div className="flex items-center gap-2 mb-3">
+        <SectionIcon className="w-4 h-4 text-muted-foreground" />
+        <p className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
+          {section.title}
+        </p>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-5 gap-y-3">
+        {section.fields.map((f) => (
+          <SharedFieldRow
+            key={f.key}
+            field={f}
+            value={values[f.key]}
+            options={f.options ? f.options(values) : undefined}
+            // Source page comes from paginas_origen_shared keyed by the AI
+            // field name. Catalog fields don't have a source page.
+            source={f.fromCatalog ? undefined : paginasOrigen[f.key]}
+            isMarkedMissing={
+              !f.fromCatalog && camposFaltantes.includes(f.key)
+            }
+            needsReview={SHARED_FIELDS_NEEDING_REVIEW.has(f.key)}
+            filename={filename}
+            onSave={(v) => onChange(f.key, v)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SharedFieldRow({
+  field,
+  value,
+  options,
+  source,
+  isMarkedMissing,
+  needsReview,
+  filename,
+  onSave,
+}: {
+  field: SharedFieldDef;
+  value: string | null;
+  options?: ReadonlyArray<SelectOption>;
+  source: ExtractionSourcePage | undefined;
+  isMarkedMissing: boolean;
+  needsReview: boolean;
+  filename: string;
+  onSave: (next: string | null) => void;
+}) {
+  const { icon: Icon, label, placeholder, inputType, multiline } = field;
+  const isSelect = !!options && options.length > 0;
+  const missing = value === null || value === "";
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
+
+  const startEdit = () => {
+    setDraft(value ?? "");
+    setEditing(true);
+  };
 
   useEffect(() => {
-    let cancelled = false;
-    const id = window.setInterval(() => {
-      if (cancelled) return;
-      setProgress((p) => {
-        if (p >= 100) return p;
-        // Bigger jumps when far from the ceiling, smaller as we approach 100
-        // — feels like work happening throughout instead of a linear march.
-        const ceil = 100;
-        const remaining = ceil - p;
-        const jump = Math.max(0.6, remaining * (0.04 + Math.random() * 0.05));
-        return Math.min(ceil, p + jump);
-      });
-    }, 240);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
-  }, []);
+    if (editing) inputRef.current?.focus();
+  }, [editing]);
 
-  // Fire `onDone` exactly once, the instant we hit 100%. Doing this in a
-  // separate effect (rather than inside the setState updater) keeps the
-  // updater pure and avoids a one-tick stall where the spinner was visible
-  // alongside a full bar.
-  useEffect(() => {
-    if (progress >= 100 && !doneRef.current) {
-      doneRef.current = true;
-      onDoneRef.current();
+  const commit = () => {
+    const trimmed = draft.trim();
+    onSave(trimmed === "" ? null : trimmed);
+    setEditing(false);
+    setDraft("");
+  };
+  const cancel = () => {
+    setEditing(false);
+    setDraft("");
+  };
+  const handleKeyDown = (
+    e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>,
+  ) => {
+    if (e.key === "Enter" && !e.shiftKey && !multiline) {
+      e.preventDefault();
+      commit();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      cancel();
     }
-  }, [progress]);
+  };
 
-  return progress;
+  return (
+    <div className={field.multiline ? "md:col-span-2" : undefined}>
+      <div className="flex items-center gap-1.5 text-muted-foreground min-w-0 mb-1">
+        <span
+          className="inline-flex items-center justify-center min-w-[24px] h-4 px-1 rounded border border-border/70 bg-secondary/60 text-[10px] font-mono font-semibold text-muted-foreground/90 tabular-nums shrink-0"
+          title={`Columna ${field.excelCol}`}
+        >
+          {field.excelCol}
+        </span>
+        <Icon className="w-3.5 h-3.5 shrink-0" />
+        <p className="text-[11.5px] uppercase tracking-wider font-semibold truncate">
+          {label}
+        </p>
+        {needsReview && (
+          <span
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-[9.5px] font-semibold uppercase tracking-wider text-amber-300 shrink-0"
+            title="La información puede ser incorrecta — revisa antes de aprobar."
+          >
+            <AlertTriangle className="w-2.5 h-2.5" />
+            Revisar
+          </span>
+        )}
+        {source !== undefined && (
+          <SourceChip source={source} filename={filename} />
+        )}
+      </div>
+
+      {isSelect ? (
+        <div className="flex items-center gap-1.5">
+          <select
+            value={value ?? ""}
+            onChange={(e) => onSave(e.target.value === "" ? null : e.target.value)}
+            aria-label={label}
+            className="flex-1 min-w-0 h-9 rounded-md border border-border bg-secondary/40 px-2.5 text-[13px] text-foreground outline-none focus:border-primary/60 focus:bg-secondary/60 cursor-pointer"
+          >
+            <option value="">— {placeholder ?? "Selecciona…"} —</option>
+            {options!.map((opt) => (
+              <option key={opt.codigo} value={opt.codigo}>
+                {opt.codigo} · {opt.descripcion}
+              </option>
+            ))}
+          </select>
+          {value && (
+            <button
+              type="button"
+              onClick={() => onSave(null)}
+              aria-label={`Limpiar ${label}`}
+              className="inline-flex items-center justify-center h-9 w-9 rounded-md border border-border bg-secondary/60 text-muted-foreground hover:text-destructive transition-colors shrink-0"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+      ) : editing ? (
+        <div className="flex items-start gap-1.5">
+          {multiline ? (
+            <textarea
+              ref={inputRef as React.RefObject<HTMLTextAreaElement>}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder={placeholder}
+              rows={2}
+              className="flex-1 min-w-0 resize-y rounded-md border border-primary/40 bg-secondary/40 px-2.5 py-1.5 text-[13px] leading-relaxed text-foreground outline-none focus:border-primary focus:bg-secondary/60"
+            />
+          ) : (
+            <input
+              ref={inputRef as React.RefObject<HTMLInputElement>}
+              type={inputType ?? "text"}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder={placeholder}
+              className="flex-1 min-w-0 h-9 rounded-md border border-primary/40 bg-secondary/40 px-2.5 text-[13px] text-foreground outline-none focus:border-primary focus:bg-secondary/60"
+            />
+          )}
+          <button
+            type="button"
+            onClick={commit}
+            aria-label={`Guardar ${label}`}
+            className="inline-flex items-center justify-center h-9 w-9 rounded-md bg-primary text-primary-foreground hover:opacity-90 transition-opacity shrink-0"
+          >
+            <Check className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={cancel}
+            aria-label="Cancelar"
+            className="inline-flex items-center justify-center h-9 w-9 rounded-md border border-border bg-secondary/60 text-muted-foreground hover:text-foreground transition-colors shrink-0"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      ) : (
+        <div className="group flex items-start gap-2">
+          <p
+            className={`flex-1 min-w-0 text-[13.5px] leading-relaxed break-words ${
+              missing ? "text-muted-foreground/60 italic" : "text-foreground"
+            }`}
+          >
+            {missing
+              ? isMarkedMissing
+                ? "No encontrado en el documento"
+                : "Vacío — clic en ✎ para agregar"
+              : value}
+          </p>
+          <button
+            type="button"
+            onClick={startEdit}
+            aria-label={missing ? `Agregar ${label}` : `Editar ${label}`}
+            className="inline-flex items-center justify-center h-7 w-7 rounded border border-transparent text-muted-foreground hover:text-primary hover:border-primary/30 hover:bg-primary/10 group-hover:text-primary/70 transition-colors shrink-0"
+          >
+            <Pencil className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================================
+   Rows Table — spreadsheet-style editable grid
+   ========================================================================== */
+
+function RowsTable({
+  rows,
+  tipoServicio,
+  paginasOrigenRows,
+  filename,
+  onChange,
+  onAddRow,
+  onRemoveRow,
+}: {
+  rows: ExtractedContractRow[];
+  tipoServicio: string | null;
+  paginasOrigenRows: Record<string, ExtractionSourcePage>[];
+  filename: string;
+  onChange: (
+    rowIdx: number,
+    key: ExtractedRowFieldKey,
+    value: string | null,
+  ) => void;
+  onAddRow: () => void;
+  onRemoveRow: (rowIdx: number) => void;
+}) {
+  return (
+    <section className="rounded-xl border border-border bg-card/60 overflow-hidden">
+      <header className="flex items-center justify-between px-4 py-3 border-b border-border/60">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className="w-9 h-9 rounded-lg bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center shrink-0">
+            <FileSpreadsheet className="w-4.5 h-4.5 text-emerald-300" />
+          </div>
+          <div className="min-w-0">
+            <p className="text-[14px] font-semibold text-foreground">
+              Filas del xlsx ({rows.length})
+            </p>
+            <p className="text-[11.5px] text-muted-foreground">
+              Una fila por cada combinación product × season. Clic en una celda
+              para editarla.
+            </p>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onAddRow}
+          className="inline-flex items-center gap-1.5 h-9 px-3 rounded-md border border-primary/40 bg-primary/10 text-primary text-[12.5px] font-semibold hover:bg-primary/15 transition-colors shrink-0"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          Agregar fila
+        </button>
+      </header>
+
+      <div className="overflow-x-auto">
+        <table className="w-full border-collapse text-[12.5px]">
+          <thead className="bg-secondary/40 border-b border-border/60 sticky top-0 z-10">
+            <tr>
+              <th
+                scope="col"
+                className="sticky left-0 z-20 bg-secondary/80 backdrop-blur px-2 py-2 text-left text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground/90 border-r border-border/60"
+                style={{ minWidth: 48 }}
+              >
+                #
+              </th>
+              {ROW_FIELDS.map((f) => (
+                <th
+                  key={f.key}
+                  scope="col"
+                  className="px-2 py-2 text-left font-semibold border-r border-border/40 last:border-r-0 whitespace-nowrap"
+                  style={{ minWidth: f.minWidth }}
+                >
+                  <div className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-muted-foreground/90">
+                    <span
+                      className="inline-flex items-center justify-center min-w-[22px] h-3.5 px-0.5 rounded border border-border/70 bg-secondary/60 text-[9px] font-mono font-semibold text-muted-foreground/90"
+                      title={`Columna ${f.excelCol}`}
+                    >
+                      {f.excelCol}
+                    </span>
+                    {f.icon && <f.icon className="w-3 h-3" />}
+                    <span className="text-foreground/90">
+                      {f.shortLabel ?? f.label}
+                    </span>
+                  </div>
+                </th>
+              ))}
+              <th
+                scope="col"
+                className="px-2 py-2 text-right text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground/90"
+                style={{ minWidth: 44 }}
+              >
+                <span className="sr-only">Acciones</span>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, rowIdx) => (
+              <tr
+                key={rowIdx}
+                className="border-b border-border/30 last:border-b-0 hover:bg-secondary/15 transition-colors"
+              >
+                <td
+                  className="sticky left-0 z-10 bg-card/95 backdrop-blur px-2 py-1 text-[11px] font-mono tabular-nums text-muted-foreground border-r border-border/40"
+                  style={{ minWidth: 48 }}
+                >
+                  {rowIdx + 1}
+                </td>
+                {ROW_FIELDS.map((f) => {
+                  const opts = f.options ? f.options(tipoServicio) : undefined;
+                  return (
+                    <td
+                      key={f.key}
+                      className="px-1 py-0.5 align-top border-r border-border/30 last:border-r-0"
+                      style={{ minWidth: f.minWidth }}
+                    >
+                      <TableCell
+                        field={f}
+                        value={row[f.key]}
+                        options={opts}
+                        source={paginasOrigenRows[rowIdx]?.[f.key]}
+                        filename={filename}
+                        onSave={(v) => onChange(rowIdx, f.key, v)}
+                      />
+                    </td>
+                  );
+                })}
+                <td className="px-1 py-1 text-right align-top">
+                  <button
+                    type="button"
+                    onClick={() => onRemoveRow(rowIdx)}
+                    disabled={rows.length <= 1}
+                    aria-label={`Eliminar fila ${rowIdx + 1}`}
+                    title={
+                      rows.length <= 1
+                        ? "Debe haber al menos 1 fila"
+                        : "Eliminar fila"
+                    }
+                    className="inline-flex items-center justify-center h-7 w-7 rounded border border-transparent text-muted-foreground hover:text-destructive hover:border-destructive/40 hover:bg-destructive/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
 }
 
 /**
- * Step 3 — fictitious "subir al maestro" stage. Renders an animated upload
- * card while progress climbs to 100%, then a success card with a CTA to start
- * a new contract. No real network call yet.
+ * Celda editable de la tabla. Click → modo edit (input/textarea/select).
+ * Enter / blur commit. Escape cancel. El source page se muestra como
+ * tooltip al hover sobre la celda completa.
  */
-function ApprovalStep({
-  result,
+function TableCell({
+  field,
+  value,
+  options,
+  source,
+  filename,
+  onSave,
+}: {
+  field: RowFieldDef;
+  value: string | null;
+  options: ReadonlyArray<SelectOption> | undefined;
+  source: ExtractionSourcePage | undefined;
+  filename: string;
+  onSave: (v: string | null) => void;
+}) {
+  const isSelect = !!options;
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (editing) inputRef.current?.focus();
+  }, [editing]);
+
+  const startEdit = () => {
+    setDraft(value ?? "");
+    setEditing(true);
+  };
+
+  const commit = () => {
+    const trimmed = draft.trim();
+    onSave(trimmed === "" ? null : trimmed);
+    setEditing(false);
+    setDraft("");
+  };
+  const cancel = () => {
+    setEditing(false);
+    setDraft("");
+  };
+
+  const handleKeyDown = (
+    e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>,
+  ) => {
+    if (e.key === "Enter" && !e.shiftKey && !field.multiline) {
+      e.preventDefault();
+      commit();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      cancel();
+    }
+  };
+
+  // Tooltip combina la página de origen + filename (igual que en shared)
+  const tooltip = useMemo(() => {
+    if (source === undefined) return undefined;
+    const base =
+      typeof source === "number"
+        ? `Página ${source}`
+        : source === "inferido"
+          ? "Inferido"
+          : source === "multiple"
+            ? "Múltiples páginas"
+            : `Página ${source}`;
+    return `${base} · ${filename}`;
+  }, [source, filename]);
+
+  if (isSelect) {
+    return (
+      <div className="relative" title={tooltip}>
+        <select
+          value={value ?? ""}
+          onChange={(e) => onSave(e.target.value === "" ? null : e.target.value)}
+          className="w-full h-8 rounded border border-transparent bg-transparent px-1.5 text-[12.5px] text-foreground outline-none hover:border-border focus:border-primary/60 focus:bg-secondary/40 cursor-pointer"
+          aria-label={field.label}
+        >
+          <option value="">—</option>
+          {options.map((opt) => (
+            <option key={opt.codigo} value={opt.codigo}>
+              {opt.codigo} · {opt.descripcion}
+            </option>
+          ))}
+          {value && !options.some((o) => o.codigo === value) && (
+            <option value={value} className="italic">
+              {value} (fuera de catálogo)
+            </option>
+          )}
+        </select>
+      </div>
+    );
+  }
+
+  if (editing) {
+    return field.multiline ? (
+      <textarea
+        ref={inputRef as React.RefObject<HTMLTextAreaElement>}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={handleKeyDown}
+        onBlur={commit}
+        placeholder={field.placeholder}
+        rows={3}
+        className="w-full resize-y rounded border border-primary/60 bg-secondary/40 px-1.5 py-1 text-[12.5px] leading-relaxed text-foreground outline-none focus:border-primary"
+      />
+    ) : (
+      <input
+        ref={inputRef as React.RefObject<HTMLInputElement>}
+        type={field.inputType ?? "text"}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={handleKeyDown}
+        onBlur={commit}
+        placeholder={field.placeholder}
+        className="w-full h-8 rounded border border-primary/60 bg-secondary/40 px-1.5 text-[12.5px] text-foreground outline-none focus:border-primary"
+      />
+    );
+  }
+
+  const missing = value === null || value === "";
+  return (
+    <button
+      type="button"
+      onClick={startEdit}
+      title={tooltip}
+      aria-label={`${field.label} — ${missing ? "vacío" : value}. Clic para editar.`}
+      className={`w-full min-h-[2rem] text-left rounded border border-transparent px-1.5 py-1 text-[12.5px] leading-snug transition-colors hover:border-border hover:bg-secondary/30 focus:outline-none focus:border-primary/60 focus:bg-secondary/40 ${
+        missing
+          ? "text-muted-foreground/50 italic"
+          : "text-foreground"
+      } ${field.multiline ? "whitespace-pre-wrap break-words" : "truncate"}`}
+    >
+      {missing ? "—" : value}
+    </button>
+  );
+}
+
+/* ============================================================================
+   Source chip (used in shared header)
+   ========================================================================== */
+
+function SourceChip({
+  source,
+  filename,
+}: {
+  source: ExtractionSourcePage;
+  filename: string;
+}) {
+  const base =
+    typeof source === "number"
+      ? `Pág ${source}`
+      : source === "inferido"
+        ? "Inferido"
+        : source === "multiple"
+          ? "Múltiples págs"
+          : `Pág ${source}`;
+  const tooltip = `${base} · ${filename}`;
+
+  return (
+    <span
+      title={tooltip}
+      className="inline-flex max-w-[140px] items-center gap-1 px-1.5 py-0 rounded border border-border bg-secondary/40 text-[9.5px] font-medium text-muted-foreground whitespace-nowrap shrink-0"
+    >
+      <span className="shrink-0">{base}</span>
+    </span>
+  );
+}
+
+/* ============================================================================
+   STEP 3 — Generate + Download
+   ========================================================================== */
+
+function DownloadStep({
+  payload,
+  meta,
   onReset,
 }: {
-  result: ExtractContractResponse;
+  payload: ApprovedPayload;
+  meta: ExtractContractResponse["meta"];
   onReset: () => void;
 }) {
-  const [done, setDone] = useState(false);
-  const progress = useFakeUpload(() => setDone(true));
-  const { meta } = result;
+  const [phase, setPhase] = useState<"generating" | "done" | "error">("generating");
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [downloaded, setDownloaded] = useState<{
+    filename: string;
+    sizeBytes: number;
+  } | null>(null);
+  // Track started state to avoid the StrictMode double-mount firing two
+  // fetches in dev.
+  const startedRef = useRef(false);
 
-  if (done) {
-    return <UploadSuccessCard meta={meta} onReset={onReset} />;
+  useEffect(() => {
+    if (startedRef.current) return;
+    startedRef.current = true;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const { blob, filename } = await api.supplierIntelligence.generateXlsx({
+          shared_fields: payload.sharedFields,
+          rows: payload.rows,
+          catalog_prefill: payload.catalogPrefill,
+        });
+        if (cancelled) return;
+
+        // Trigger browser download via an in-memory anchor click.
+        const url = URL.createObjectURL(blob);
+        try {
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = filename;
+          // Append to body for Firefox compatibility, click, then remove.
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+        } finally {
+          // Defer revoke so the click has a chance to dispatch first.
+          setTimeout(() => URL.revokeObjectURL(url), 500);
+        }
+
+        setDownloaded({ filename, sizeBytes: blob.size });
+        setPhase("done");
+      } catch (err) {
+        if (cancelled) return;
+        if (err instanceof ApiError) {
+          setErrorMsg(err.message);
+        } else {
+          setErrorMsg(
+            "No pudimos generar el xlsx. Revisa tu conexión e intenta de nuevo.",
+          );
+        }
+        setPhase("error");
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [payload]);
+
+  if (phase === "generating") {
+    return <DownloadInProgressCard rowCount={payload.rows.length} meta={meta} />;
   }
-  return <UploadInProgressCard progress={progress} meta={meta} />;
+  if (phase === "error") {
+    return (
+      <DownloadErrorCard
+        message={errorMsg ?? "Error desconocido."}
+        onReset={onReset}
+      />
+    );
+  }
+  return (
+    <DownloadSuccessCard
+      filename={downloaded?.filename ?? "contrato.xlsx"}
+      sizeBytes={downloaded?.sizeBytes ?? 0}
+      rowCount={payload.rows.length}
+      meta={meta}
+      onReset={onReset}
+    />
+  );
 }
 
-function UploadInProgressCard({
-  progress,
+function DownloadInProgressCard({
+  rowCount,
   meta,
 }: {
-  progress: number;
+  rowCount: number;
   meta: ExtractContractResponse["meta"];
 }) {
-  const pct = Math.max(0, Math.min(100, Math.round(progress)));
-  const phase = uploadPhase(progress);
-
   return (
     <div className="px-5 sm:px-8 py-10 space-y-6">
       <div className="mx-auto max-w-md text-center">
@@ -1862,11 +2438,11 @@ function UploadInProgressCard({
           </div>
         </div>
         <h3 className="mt-5 text-[18px] font-semibold text-foreground">
-          Subiendo al maestro
+          Generando xlsx
         </h3>
         <p className="mt-1.5 text-[13px] text-muted-foreground">
-          Estamos agregando los datos aprobados al documento oficial xlsx en la
-          nube. No cierres esta ventana.
+          Estamos escribiendo {rowCount} {rowCount === 1 ? "fila" : "filas"}{" "}
+          en la plantilla.
         </p>
       </div>
 
@@ -1877,48 +2453,33 @@ function UploadInProgressCard({
           </div>
           <div className="flex-1 min-w-0">
             <p className="text-[13px] font-semibold text-foreground truncate">
-              Maestro de proveedores · xlsx
+              Origen: {meta.filename}
             </p>
             <p className="text-[11.5px] text-muted-foreground truncate">
-              Origen: {meta.filename}
+              {rowCount} {rowCount === 1 ? "combinación" : "combinaciones"} product
+              × season
             </p>
           </div>
           <Loader2 className="w-4 h-4 text-primary animate-spin shrink-0" />
         </div>
-        <div className="flex items-center justify-between gap-3">
-          <p className="text-[13px] text-foreground/90 truncate">{phase}</p>
-          <p
-            className="text-[13px] font-semibold text-primary tabular-nums"
-            aria-live="polite"
-          >
-            {pct}%
-          </p>
-        </div>
-        <div
-          role="progressbar"
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={pct}
-          aria-label="Progreso de subida al maestro"
-          className="relative h-1.5 w-full overflow-hidden rounded-full bg-secondary/70 border border-border/50"
-        >
-          <div
-            className="h-full rounded-full bg-gradient-to-r from-primary to-emerald-400 shadow-[0_0_12px_0_hsl(var(--primary)/0.5)] transition-[width] duration-200 ease-out"
-            style={{ width: `${pct}%` }}
-          />
-        </div>
         <p className="text-[11px] text-muted-foreground">
-          Esto suele tardar unos pocos segundos.
+          Procesando — esto suele tardar 1-3 segundos.
         </p>
       </div>
     </div>
   );
 }
 
-function UploadSuccessCard({
+function DownloadSuccessCard({
+  filename,
+  sizeBytes,
+  rowCount,
   meta,
   onReset,
 }: {
+  filename: string;
+  sizeBytes: number;
+  rowCount: number;
   meta: ExtractContractResponse["meta"];
   onReset: () => void;
 }) {
@@ -1933,11 +2494,11 @@ function UploadSuccessCard({
           />
         </div>
         <h3 className="mt-5 text-[18px] font-semibold text-foreground">
-          ¡Datos sincronizados al maestro!
+          ¡xlsx generado y descargado!
         </h3>
         <p className="mt-1.5 text-[13px] text-muted-foreground">
-          Se agregó una nueva fila al xlsx oficial de proveedores con la
-          información aprobada.
+          El archivo está en tu carpeta de descargas. Si no se descargó
+          automáticamente, revisa el bloqueador de pop-ups del navegador.
         </p>
       </div>
 
@@ -1948,15 +2509,16 @@ function UploadSuccessCard({
           </div>
           <div className="flex-1 min-w-0">
             <p className="text-[13px] font-semibold text-foreground truncate">
-              Maestro de proveedores · xlsx
+              {filename}
             </p>
             <p className="text-[11.5px] text-muted-foreground truncate">
-              1 fila agregada
+              {humanSize(sizeBytes)} · {rowCount}{" "}
+              {rowCount === 1 ? "fila" : "filas"}
             </p>
           </div>
           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-[11px] font-semibold uppercase tracking-wider text-emerald-300">
             <Check className="w-3 h-3" />
-            Sincronizado
+            Descargado
           </span>
         </div>
         <div className="flex items-center gap-3 px-4 py-3">
@@ -1982,7 +2544,7 @@ function UploadSuccessCard({
           className="inline-flex items-center justify-center gap-2 h-11 px-4 rounded-lg border border-border bg-secondary/40 text-[13.5px] text-muted-foreground cursor-not-allowed opacity-70"
         >
           <ExternalLink className="w-4 h-4" />
-          Abrir el maestro xlsx
+          Subir al maestro
         </button>
         <button
           type="button"
@@ -1997,438 +2559,36 @@ function UploadSuccessCard({
   );
 }
 
-/**
- * One section card. Header is clickable to collapse / expand. Title row
- * carries: section icon (color-coded), title, subtitle, completion pill,
- * chevron indicator. Body is a 1- or 2-column grid of FieldRows.
- */
-function SectionCard({
-  section,
-  fields,
-  collapsed,
-  onToggle,
-  displayValues,
-  extracted,
-  filename,
-  onSave,
-  isFilled,
+function DownloadErrorCard({
+  message,
+  onReset,
 }: {
-  section: SectionDef;
-  fields: FieldDef[];
-  collapsed: boolean;
-  onToggle: () => void;
-  displayValues: Record<DisplayFieldKey, string | null>;
-  extracted: ExtractedContract;
-  filename: string;
-  onSave: (key: DisplayFieldKey, value: string | null) => void;
-  isFilled: (k: DisplayFieldKey) => boolean;
+  message: string;
+  onReset: () => void;
 }) {
-  // Use the *full* section field list (not the filtered one) for the
-  // completion counter — the pill should reflect the section as a whole, not
-  // the currently-visible subset.
-  const sectionFilled = section.fields.filter((f) => isFilled(f.key)).length;
-  const sectionTotal = section.fields.length;
-  const SectionIcon = section.icon;
-  const accent = section.accent;
-
   return (
-    <section
-      className={`rounded-xl border bg-card/60 overflow-hidden transition-colors ${accent.ring}`}
-    >
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={!collapsed}
-        className="w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-secondary/30 transition-colors"
-      >
-        <div
-          className={`w-10 h-10 rounded-lg ${accent.iconBg} ${accent.ring} border flex items-center justify-center shrink-0`}
-        >
-          <SectionIcon className={`w-4.5 h-4.5 ${accent.iconText}`} />
+    <div className="px-5 sm:px-8 py-10 space-y-6">
+      <div className="mx-auto max-w-md text-center">
+        <div className="mx-auto w-20 h-20 rounded-2xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-center">
+          <AlertTriangle className="w-10 h-10 text-rose-300" />
         </div>
-        <div className="flex-1 min-w-0">
-          <p className="text-[14.5px] font-semibold text-foreground truncate">
-            {section.title}
-          </p>
-          {section.subtitle && (
-            <p className="text-[12.5px] text-muted-foreground truncate">
-              {section.subtitle}
-            </p>
-          )}
-        </div>
-        <span
-          className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full border text-[11.5px] font-semibold tabular-nums shrink-0 ${accent.pillBg} ${accent.pillBorder} ${accent.pillText}`}
-        >
-          {sectionFilled}/{sectionTotal}
-        </span>
-        <ChevronDown
-          className={`w-4 h-4 text-muted-foreground transition-transform shrink-0 ${
-            collapsed ? "" : "rotate-180"
-          }`}
-        />
-      </button>
-      {!collapsed && (
-        <div className="border-t border-border/60 bg-card/40">
-          {/* Single column — each field reads top-to-bottom like a spreadsheet
-             row. The horizontal divider between rows acts as the column
-             separator that the future Excel export mirrors. */}
-          <div className="divide-y divide-border/50">
-            {fields.map((f) => (
-              <FieldRow
-                key={f.key}
-                field={f}
-                excelCol={FIELD_EXCEL_COL[f.key]}
-                needsReview={FIELDS_NEEDING_REVIEW.has(f.key)}
-                value={displayValues[f.key]}
-                // Evaluamos `options` aquí (no en FieldRow) porque la función
-                // necesita el mapa completo de valores actuales — lo tenemos
-                // a este nivel y no queremos hacer prop-drilling de
-                // displayValues hasta FieldRow.
-                options={f.options ? f.options(displayValues) : undefined}
-                dependsOnLabel={f.dependsOnLabel}
-                source={
-                  f.fromExtracted
-                    ? extracted.paginas_origen[f.fromExtracted]
-                    : undefined
-                }
-                isMarkedMissing={
-                  !!f.fromExtracted &&
-                  extracted.campos_faltantes.includes(f.fromExtracted)
-                }
-                filename={filename}
-                onSave={(v) => onSave(f.key, v)}
-              />
-            ))}
-          </div>
-        </div>
-      )}
-    </section>
-  );
-}
-
-/**
- * Single read/edit row. Two visual modes:
- *
- *   - read:  shows the value (or a missing placeholder) plus the source-page
- *            chip and a pencil button next to each other on the right.
- *            Clicking the pencil flips into edit mode.
- *   - edit:  shows an `<input>` (or a `<textarea>` for multiline fields)
- *            with Save / Cancel actions. Save updates the parent edits map;
- *            Cancel discards the in-progress draft.
- */
-function FieldRow({
-  field,
-  excelCol,
-  needsReview,
-  value,
-  options,
-  dependsOnLabel,
-  source,
-  isMarkedMissing,
-  filename,
-  onSave,
-}: {
-  field: FieldDef;
-  /** Letra de columna estilo Excel (A..Z, AA..AZ). Se renderiza antes del label. */
-  excelCol: string;
-  /**
-   * Si true, agrega un badge "Revisar" en la cabecera del campo. Lo usamos en
-   * los identificadores del proveedor (tipo_actividad / zona_turismo /
-   * proveedor) — el match contra el maestro o la extracción IA pueden estar
-   * mal y queremos que el humano confirme antes de aprobar.
-   */
-  needsReview: boolean;
-  value: string | null;
-  /**
-   * Si está presente, el campo se renderiza como `<select>` en lugar del
-   * input de texto con flujo edit/save. Lista vacía + `dependsOnLabel`
-   * presente = mensaje "depende de otro campo".
-   */
-  options?: ReadonlyArray<SelectOption>;
-  dependsOnLabel?: string;
-  source: string | number | undefined;
-  isMarkedMissing: boolean;
-  filename: string;
-  onSave: (next: string | null) => void;
-}) {
-  const { icon: Icon, label, placeholder, inputType, multiline } = field;
-  const missing = value === null || value === "";
-  const isSelect = !!options;
-
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState("");
-  const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
-
-  const startEdit = () => {
-    setDraft(value ?? "");
-    setEditing(true);
-  };
-
-  // Autofocus the input when entering edit mode for keyboard-friendliness.
-  useEffect(() => {
-    if (editing) inputRef.current?.focus();
-  }, [editing]);
-
-  const cancel = () => {
-    setEditing(false);
-    setDraft("");
-  };
-
-  const commit = () => {
-    const trimmed = draft.trim();
-    onSave(trimmed === "" ? null : trimmed);
-    setEditing(false);
-    setDraft("");
-  };
-
-  const handleKeyDown = (
-    e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>,
-  ) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      commit();
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      cancel();
-    }
-  };
-
-  const hasSource = source !== undefined && source !== null;
-
-  return (
-    <div className="group px-5 py-4 min-w-0 hover:bg-secondary/20 transition-colors">
-      <div className="flex items-center gap-2 text-muted-foreground min-w-0 flex-wrap">
-        {/* Letra de columna Excel — pill monoespaciada para que se lea como
-            "A · TIPO ACTIVIDAD" igual que en una hoja de cálculo. */}
-        <span
-          className="inline-flex items-center justify-center min-w-[26px] h-5 px-1.5 rounded-md border border-border/70 bg-secondary/60 text-[10.5px] font-mono font-semibold text-muted-foreground/90 tabular-nums shrink-0"
-          aria-label={`Columna ${excelCol}`}
-          title={`Columna ${excelCol}`}
-        >
-          {excelCol}
-        </span>
-        <Icon className="w-4 h-4 shrink-0" />
-        <p className="text-[12px] uppercase tracking-wider font-semibold truncate">
-          {label}
-        </p>
-        {needsReview && (
-          <span
-            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border border-amber-500/40 bg-amber-500/10 text-[10px] font-semibold uppercase tracking-wider text-amber-300 normal-case shrink-0"
-            title="La información puede ser incorrecta — por favor revisa antes de aprobar."
-          >
-            <AlertTriangle className="w-3 h-3" />
-            Revisar — puede ser incorrecto
-          </span>
-        )}
-      </div>
-
-      {isSelect ? (
-        <SelectFieldBody
-          value={value}
-          options={options ?? []}
-          dependsOnLabel={dependsOnLabel}
-          placeholder={placeholder}
-          label={label}
-          onSave={onSave}
-        />
-      ) : editing ? (
-        <div className="mt-2 flex items-start gap-2">
-          {multiline ? (
-            <textarea
-              ref={inputRef as React.RefObject<HTMLTextAreaElement>}
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder={placeholder}
-              rows={3}
-              className="flex-1 min-w-0 resize-y rounded-md border border-primary/40 bg-secondary/40 px-3 py-2 text-[15px] leading-relaxed text-foreground outline-none focus:border-primary focus:bg-secondary/60"
-            />
-          ) : (
-            <input
-              ref={inputRef as React.RefObject<HTMLInputElement>}
-              type={inputType ?? "text"}
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder={placeholder}
-              className="flex-1 min-w-0 rounded-md border border-primary/40 bg-secondary/40 px-3 py-2 text-[15px] text-foreground outline-none focus:border-primary focus:bg-secondary/60"
-            />
-          )}
-          <button
-            type="button"
-            onClick={commit}
-            aria-label={`Guardar ${label}`}
-            className="inline-flex items-center justify-center h-9 w-9 rounded-md bg-primary text-primary-foreground hover:opacity-90 transition-opacity shrink-0"
-          >
-            <Check className="w-4 h-4" />
-          </button>
-          <button
-            type="button"
-            onClick={cancel}
-            aria-label="Cancelar edición"
-            className="inline-flex items-center justify-center h-9 w-9 rounded-md border border-border bg-secondary/60 text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors shrink-0"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-      ) : (
-        <div className="mt-1.5 flex items-start gap-3">
-          <p
-            className={`flex-1 min-w-0 text-[15px] leading-relaxed break-words ${
-              missing ? "text-muted-foreground/60 italic" : "text-foreground"
-            }`}
-          >
-            {missing
-              ? isMarkedMissing
-                ? "No encontrado en el documento"
-                : "Vacío — clic en ✎ para agregar"
-              : value}
-          </p>
-          {/* Page-source chip + pencil sit side-by-side on the right of the
-             value, so the audit trail (where it came from) is visually paired
-             with the action that lets you change it. */}
-          <div className="flex items-center gap-2 shrink-0">
-            {hasSource && <SourceChip source={source} filename={filename} />}
-            <button
-              type="button"
-              onClick={startEdit}
-              aria-label={missing ? `Agregar ${label}` : `Editar ${label}`}
-              title={missing ? `Agregar ${label}` : `Editar ${label}`}
-              className="inline-flex items-center justify-center h-8 w-8 rounded-md border border-transparent text-muted-foreground hover:text-primary hover:border-primary/30 hover:bg-primary/10 group-hover:text-primary/70 transition-colors"
-            >
-              <Pencil className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/**
- * Body de un FieldRow tipo dropdown.
- *
- * Render inline (sin flujo edit/save con pencil): se elige del dropdown y
- * commiteamos en el `onChange`. Para cambiar el valor el usuario interactúa
- * directamente con el `<select>` — un click menos vs. text fields.
- *
- * Si la lista de opciones está vacía y `dependsOnLabel` está presente,
- * mostramos un mensaje (deshabilitado) en lugar del select. Esto cubre el
- * caso de Categoría cuando todavía no hay Tipo de Servicio elegido.
- *
- * Mostramos `codigo · descripcion` en cada `<option>` para que el usuario vea
- * el contexto (ej: "OCV · OCEAN VIEW"), pero solo guardamos el `codigo` —
- * compatible con el formato del xlsx maestro.
- */
-function SelectFieldBody({
-  value,
-  options,
-  dependsOnLabel,
-  placeholder,
-  label,
-  onSave,
-}: {
-  value: string | null;
-  options: ReadonlyArray<SelectOption>;
-  dependsOnLabel?: string;
-  placeholder?: string;
-  label: string;
-  onSave: (next: string | null) => void;
-}) {
-  const empty = options.length === 0;
-  // Si el valor actual no está en la lista (ej: el usuario cambió tipo_servicio
-  // y el codigo guardado ya no aplica), mostramos el codigo crudo como una
-  // opción "stale" para que sea explícito que está fuera de catálogo.
-  const valueInOptions =
-    value !== null && options.some((o) => o.codigo === value);
-  const showStale = value !== null && value !== "" && !valueInOptions && !empty;
-
-  if (empty) {
-    return (
-      <div className="mt-1.5">
-        <p className="text-[13px] italic text-muted-foreground/70">
-          {dependsOnLabel ?? "Sin opciones disponibles."}
+        <h3 className="mt-5 text-[18px] font-semibold text-foreground">
+          No pudimos generar el xlsx
+        </h3>
+        <p className="mt-1.5 text-[13px] text-muted-foreground break-words">
+          {message}
         </p>
       </div>
-    );
-  }
-
-  return (
-    <div className="mt-2 flex items-start gap-2">
-      <select
-        value={value ?? ""}
-        onChange={(e) => {
-          const v = e.target.value;
-          onSave(v === "" ? null : v);
-        }}
-        aria-label={label}
-        className="flex-1 min-w-0 rounded-md border border-border bg-secondary/40 px-3 py-2 text-[15px] text-foreground outline-none focus:border-primary focus:bg-secondary/60 cursor-pointer"
-      >
-        <option value="">— {placeholder ?? "Selecciona una opción"} —</option>
-        {showStale && value && (
-          <option value={value} className="italic">
-            {value} · (fuera de catálogo)
-          </option>
-        )}
-        {options.map((opt) => (
-          <option key={opt.codigo} value={opt.codigo}>
-            {opt.codigo} · {opt.descripcion}
-          </option>
-        ))}
-      </select>
-      {value && (
+      <div className="mx-auto max-w-xl flex justify-center">
         <button
           type="button"
-          onClick={() => onSave(null)}
-          aria-label={`Limpiar ${label}`}
-          title="Limpiar selección"
-          className="inline-flex items-center justify-center h-9 w-9 rounded-md border border-border bg-secondary/60 text-muted-foreground hover:text-destructive hover:bg-secondary transition-colors shrink-0"
+          onClick={onReset}
+          className="btn-premium inline-flex items-center justify-center gap-2 h-11 px-5 rounded-lg text-[13.5px]"
         >
-          <X className="w-4 h-4" />
+          <RotateCcw className="w-4 h-4" />
+          Volver al inicio
         </button>
-      )}
+      </div>
     </div>
   );
 }
-
-/**
- * Renders provenance for a single extracted field. The chip reads as:
- *
- *   Página 6 · contrato_acme.pdf    (numeric page in a PDF/Excel)
- *   Inferido · contrato_acme.pdf    (Claude inferred — no single source page)
- *   Múltiples páginas · foo.pdf     (value appears across several pages)
- *
- * The filename is truncated at a reasonable width; the full label is surfaced
- * via the `title` attribute for hover tooltips.
- */
-function SourceChip({
-  source,
-  filename,
-}: {
-  source: string | number;
-  filename: string;
-}) {
-  const base =
-    typeof source === "number"
-      ? `Página ${source}`
-      : source === "inferido"
-        ? "Inferido"
-        : source === "multiple"
-          ? "Múltiples páginas"
-          : `Página ${source}`;
-  const tooltip = `${base} · ${filename}`;
-
-  return (
-    <span
-      title={tooltip}
-      className="inline-flex max-w-[260px] items-center gap-1 px-2 py-0.5 rounded border border-border bg-secondary/40 text-[11px] font-medium text-muted-foreground whitespace-nowrap"
-    >
-      <span className="shrink-0">{base}</span>
-      <span aria-hidden className="text-muted-foreground/50">
-        ·
-      </span>
-      <span className="truncate text-muted-foreground/80">{filename}</span>
-    </span>
-  );
-}
-
