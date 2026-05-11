@@ -35,21 +35,19 @@ const backendRequire = createRequire(resolve(REPO_ROOT, "backend", "package.json
 let XLSX;
 try {
   XLSX = backendRequire("xlsx");
-} catch (err) {
-  console.error(
-    "[build-supplier-catalog] No pude cargar 'xlsx' desde backend/node_modules.\n" +
-      "Asegúrate de haber corrido `npm install` en backend/ primero.",
+} catch {
+  console.warn(
+    "[build-supplier-catalog] 'xlsx' no disponible (backend deps no instaladas). " +
+      "Usando el .ts generado que ya existe en el repo. Skipping.",
   );
-  console.error(err instanceof Error ? err.message : err);
-  process.exit(1);
+  process.exit(0);
 }
 
 if (!existsSync(XLSX_PATH)) {
-  console.error(`[build-supplier-catalog] Falta el archivo: ${XLSX_PATH}`);
-  console.error(
-    "Coloca lista-proveedores.xlsx en frontend/data/ y vuelve a correr el script.",
+  console.warn(
+    `[build-supplier-catalog] ${XLSX_PATH} no encontrado. Usando el .ts generado que ya existe en el repo. Skipping.`,
   );
-  process.exit(1);
+  process.exit(0);
 }
 
 console.log(`[build-supplier-catalog] Leyendo ${XLSX_PATH}…`);

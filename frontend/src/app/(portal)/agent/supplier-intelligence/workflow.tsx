@@ -6,7 +6,6 @@ import {
   CheckCircle2,
   Cloud,
   CloudUpload,
-  ExternalLink,
   FileSpreadsheet,
   FileText,
   Loader2,
@@ -1697,9 +1696,18 @@ function DownloadStep({
   meta: ExtractContractResponse["meta"];
   onReset: () => void;
 }) {
-  const [phase, setPhase] = useState<"generating" | "done" | "error">("generating");
+  const [phase, setPhase] = useState<"generating" | "ready" | "error">(
+    "generating",
+  );
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [downloaded, setDownloaded] = useState<{
+  /**
+   * Blob descargado. Lo mantenemos en state como `objectURL` para que el
+   * botón <a download> pueda apuntar a él. El URL se revoca cuando el
+   * componente se desmonta (procesar otro contrato) — ver el cleanup del
+   * useEffect de abajo.
+   */
+  const [ready, setReady] = useState<{
+    objectUrl: string;
     filename: string;
     sizeBytes: number;
   } | null>(null);
@@ -1720,20 +1728,25 @@ function DownloadStep({
         });
         if (cancelled) return;
 
-        const url = URL.createObjectURL(blob);
+        const objectUrl = URL.createObjectURL(blob);
+
+        // Best-effort: intentamos disparar la descarga automáticamente. Si el
+        // navegador la bloquea (algunos lo hacen cuando la descarga ocurre
+        // después de un fetch sin "user gesture" inmediato), no pasa nada —
+        // el usuario tiene el botón "Descargar xlsx" abajo como fallback.
         try {
           const a = document.createElement("a");
-          a.href = url;
+          a.href = objectUrl;
           a.download = filename;
           document.body.appendChild(a);
           a.click();
           a.remove();
-        } finally {
-          setTimeout(() => URL.revokeObjectURL(url), 500);
+        } catch {
+          // Silent — el botón manual sigue funcionando.
         }
 
-        setDownloaded({ filename, sizeBytes: blob.size });
-        setPhase("done");
+        setReady({ objectUrl, filename, sizeBytes: blob.size });
+        setPhase("ready");
       } catch (err) {
         if (cancelled) return;
         if (err instanceof ApiError) {
@@ -1752,6 +1765,17 @@ function DownloadStep({
     };
   }, [payload]);
 
+  // Revoca el blob URL al desmontar el componente (ej. cuando el usuario
+  // hace clic en "Procesar otro contrato"). Hasta entonces lo mantenemos
+  // vivo para que el botón <a download> siga funcionando si el usuario
+  // hace clic varias veces.
+  useEffect(() => {
+    const url = ready?.objectUrl;
+    return () => {
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [ready?.objectUrl]);
+
   if (phase === "generating") {
     return <DownloadInProgressCard rowCount={payload.rows.length} meta={meta} />;
   }
@@ -1764,9 +1788,10 @@ function DownloadStep({
     );
   }
   return (
-    <DownloadSuccessCard
-      filename={downloaded?.filename ?? "contrato.xlsx"}
-      sizeBytes={downloaded?.sizeBytes ?? 0}
+    <DownloadReadyCard
+      objectUrl={ready?.objectUrl ?? ""}
+      filename={ready?.filename ?? "contrato.xlsx"}
+      sizeBytes={ready?.sizeBytes ?? 0}
       rowCount={payload.rows.length}
       meta={meta}
       onReset={onReset}
@@ -1827,13 +1852,24 @@ function DownloadInProgressCard({
   );
 }
 
-function DownloadSuccessCard({
+/**
+ * Pantalla "xlsx listo para descargar". El CTA principal es un `<a download>`
+ * que apunta al blob URL — esto es lo más confiable: el navegador ve la
+ * acción como una descarga iniciada por gesto explícito del usuario.
+ *
+ * Por debajo intentamos disparar la descarga automáticamente cuando llegó la
+ * respuesta (ver DownloadStep), pero ese auto-click puede ser bloqueado por
+ * el navegador. Este botón siempre funciona.
+ */
+function DownloadReadyCard({
+  objectUrl,
   filename,
   sizeBytes,
   rowCount,
   meta,
   onReset,
 }: {
+  objectUrl: string;
   filename: string;
   sizeBytes: number;
   rowCount: number;
@@ -1851,15 +1887,15 @@ function DownloadSuccessCard({
           />
         </div>
         <h3 className="mt-5 text-[18px] font-semibold text-foreground">
-          ¡xlsx generado y descargado!
+          xlsx listo para descargar
         </h3>
         <p className="mt-1.5 text-[13px] text-muted-foreground">
-          El archivo está en tu carpeta de descargas. Si no se descargó
-          automáticamente, revisa el bloqueador de pop-ups del navegador.
+          Hacé clic en <strong className="text-foreground">Descargar xlsx</strong> abajo
+          para guardar el archivo en tu equipo.
         </p>
       </div>
 
-      <div className="mx-auto max-w-xl rounded-xl border border-border bg-card/60 divide-y divide-border/50">
+      <div className="mx-auto max-w-xl rounded-xl border border-emerald-500/30 bg-emerald-500/5 divide-y divide-border/50">
         <div className="flex items-center gap-3 px-4 py-3">
           <div className="w-9 h-9 rounded-lg bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center shrink-0">
             <FileSpreadsheet className="w-4 h-4 text-emerald-300" />
@@ -1870,13 +1906,9 @@ function DownloadSuccessCard({
             </p>
             <p className="text-[11.5px] text-muted-foreground truncate">
               {humanSize(sizeBytes)} · {rowCount}{" "}
-              {rowCount === 1 ? "fila" : "filas"}
+              {rowCount === 1 ? "fila" : "filas"} · listo
             </p>
           </div>
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-[11px] font-semibold uppercase tracking-wider text-emerald-300">
-            <Check className="w-3 h-3" />
-            Descargado
-          </span>
         </div>
         <div className="flex items-center gap-3 px-4 py-3">
           <div className="w-9 h-9 rounded-lg bg-secondary/70 border border-border flex items-center justify-center shrink-0">
@@ -1893,24 +1925,25 @@ function DownloadSuccessCard({
         </div>
       </div>
 
+      {/* CTA principal: <a download> apuntando al blob. Más confiable que
+          a.click() programático, porque cuenta como user-gesture explícito. */}
       <div className="mx-auto max-w-xl flex flex-col-reverse sm:flex-row sm:items-center sm:justify-between gap-2">
         <button
           type="button"
-          disabled
-          title="Próximamente"
-          className="inline-flex items-center justify-center gap-2 h-11 px-4 rounded-lg border border-border bg-secondary/40 text-[13.5px] text-muted-foreground cursor-not-allowed opacity-70"
-        >
-          <ExternalLink className="w-4 h-4" />
-          Subir al maestro
-        </button>
-        <button
-          type="button"
           onClick={onReset}
-          className="btn-premium inline-flex items-center justify-center gap-2 h-11 px-5 rounded-lg text-[13.5px]"
+          className="inline-flex items-center justify-center gap-2 h-11 px-4 rounded-lg border border-border bg-secondary/40 text-[13.5px] text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
         >
           <RotateCcw className="w-4 h-4" />
           Procesar otro contrato
         </button>
+        <a
+          href={objectUrl}
+          download={filename}
+          className="btn-premium inline-flex items-center justify-center gap-2 h-11 px-5 rounded-lg text-[13.5px]"
+        >
+          <Download className="w-4 h-4" />
+          Descargar xlsx
+        </a>
       </div>
     </div>
   );

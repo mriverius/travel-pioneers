@@ -51,15 +51,19 @@ const backendRequire = createRequire(resolve(REPO_ROOT, "backend", "package.json
 let XLSX;
 try {
   XLSX = backendRequire("xlsx");
-} catch (err) {
-  console.error("[build-service-types] No pude cargar 'xlsx' desde backend/node_modules.");
-  console.error(err instanceof Error ? err.message : err);
-  process.exit(1);
+} catch {
+  console.warn(
+    "[build-service-types] 'xlsx' no disponible (backend deps no instaladas). " +
+      "Usando el .ts generado que ya existe en el repo. Skipping.",
+  );
+  process.exit(0);
 }
 
 if (!existsSync(XLSX_PATH)) {
-  console.error(`[build-service-types] Falta el archivo: ${XLSX_PATH}`);
-  process.exit(1);
+  console.warn(
+    `[build-service-types] ${XLSX_PATH} no encontrado. Usando el .ts generado que ya existe en el repo. Skipping.`,
+  );
+  process.exit(0);
 }
 
 console.log(`[build-service-types] Leyendo ${XLSX_PATH}…`);
