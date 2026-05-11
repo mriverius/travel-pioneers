@@ -3,9 +3,10 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as XLSX from "xlsx";
 import type { WorkBook, WorkSheet } from "xlsx";
-import type { ContractRow, SharedFields } from "./types.js";
+import type { ContractRow, ManualFields, SharedFields } from "./types.js";
 import {
   CATALOG_PREFILL_COL,
+  MANUAL_COL,
   ROW_COL,
   SHARED_COL,
   TEMPLATE_DATA_SHEET_NAME,
@@ -58,6 +59,13 @@ export interface GenerateXlsxInput {
   shared_fields: SharedFields;
   rows: ContractRow[];
   catalog_prefill?: CatalogPrefillInput | null;
+  /**
+   * Campos "manuales" que el usuario llenó en step 2 — son shared (se
+   * replican en cada fila) pero no salen del contrato ni del catálogo.
+   * Cuando viene null/undefined, las columnas X, AA, AC, AD, AG, AK, AP,
+   * AQ, AU..AZ quedan vacías en el xlsx.
+   */
+  manual_fields?: ManualFields | null;
 }
 
 /** Resultado de la generación: buffer + filename sugerido. */
@@ -237,6 +245,15 @@ export function generateContractXlsx(
       if (!col) continue;
       const value = input.shared_fields[key as keyof SharedFields];
       writeCell(dataSheet, col, xlsxRow, value == null ? null : String(value));
+    }
+
+    // Manual fields — replicados en cada fila (igual que shared, pero el
+    // usuario los llena directamente en la UI ya que no salen del contrato)
+    if (input.manual_fields) {
+      for (const [key, col] of Object.entries(MANUAL_COL)) {
+        const value = input.manual_fields[key as keyof ManualFields];
+        writeCell(dataSheet, col, xlsxRow, value == null ? null : String(value));
+      }
     }
 
     // Row-specific fields

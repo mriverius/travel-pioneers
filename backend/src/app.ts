@@ -21,6 +21,11 @@ app.use(
       .map((s) => s.trim())
       .filter(Boolean),
     credentials: true,
+    // Necesario para que el cliente pueda leer el header Content-Disposition
+    // que setea /generate-xlsx con el nombre del archivo a descargar. Sin
+    // esto, fetch().headers.get("content-disposition") devuelve null en
+    // cross-origin y cae al fallback "contrato.xlsx".
+    exposedHeaders: ["Content-Disposition"],
   }),
 );
 app.use(express.json({ limit: "1mb" }));

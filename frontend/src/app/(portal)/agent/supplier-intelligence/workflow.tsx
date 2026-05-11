@@ -2,53 +2,22 @@
 
 import {
   AlertTriangle,
-  ArrowRight,
-  Baby,
-  Banknote,
-  BedDouble,
-  BookMarked,
-  Briefcase,
-  Building2,
-  Calendar,
-  CalendarCheck2,
-  CalendarRange,
   Check,
   CheckCircle2,
-  ChevronDown,
   Cloud,
   CloudUpload,
-  Compass,
-  CreditCard,
-  Download,
   ExternalLink,
   FileSpreadsheet,
   FileText,
-  Globe,
-  Hash,
-  Info,
-  Landmark,
   Loader2,
-  Mail,
-  Map as MapIcon,
-  MapPin,
   MessageSquareText,
-  Pencil,
-  Percent,
-  Phone,
   Plus,
-  Receipt,
   RotateCcw,
-  ShieldAlert,
   Sparkles,
-  Star,
-  Sun,
-  Tag,
   Trash2,
-  Users,
   UserCheck,
   UserPlus,
-  Utensils,
-  Wallet,
+  Download,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -72,23 +41,28 @@ import {
   type ExtractionConfianza,
   type ExtractionSourcePage,
   type GenerateXlsxCatalogPrefill,
+  type GenerateXlsxManualFields,
 } from "@/lib/api";
 import {
   findSupplierByNameWithAI,
   findServiceForSupplier,
   type SupplierMatch,
 } from "@/lib/supplierLookup";
-import { CATEGORIAS_BY_TIPO_SERVICIO, TIPOS_SERVICIO } from "@/lib/serviceTypesCatalog";
+import {
+  CATEGORIAS_BY_TIPO_SERVICIO,
+  TIPOS_SERVICIO,
+} from "@/lib/serviceTypesCatalog";
 
 /**
- * Two-step supplier-contract workflow wired to the backend agent at
+ * Three-step supplier-contract workflow wired to the backend agent at
  * `POST /api/supplier-intelligence/extract`.
  *
- *   1. Upload   — drag & drop / pick a single .pdf / .docx / .doc / .xlsx /
- *                 .xls (max 20 MB — matches backend limit).
- *   2. Review   — Header card con los campos compartidos + tabla con las N
- *                 filas (combinaciones product × season). Edición inline,
- *                 source-page como tooltip al hover.
+ *   1. Upload   — drag & drop a .pdf / .docx / .doc / .xlsx / .xls (≤20 MB).
+ *   2. Review   — Tabla plana de 52 columnas (A..AZ). Cada combinación
+ *                 product × season es una fila. Las columnas compartidas
+ *                 (razón social, cédula, bancos…) muestran el mismo valor
+ *                 en todas las filas; editar una propaga al resto. Source
+ *                 page en tooltip al hover sobre cada celda.
  *   3. Download — POST /generate-xlsx con los datos aprobados y descarga el
  *                 xlsx final (clonado de plantilla-agente-utopia.xlsx).
  */
@@ -102,12 +76,9 @@ export type FileKind = "pdf" | "docx" | "xlsx";
 /* -------------------------------------------------------------------------- */
 
 /**
- * Subconjunto de campos shared que vienen pre-llenados desde el catálogo
- * lista-proveedores cuando el usuario marca "Sí, existente" en step 1.
- *
- * Mantenemos esto explícito (no `Partial<...>`) para que el contrato entre
- * lookup → ReviewStep sea visible: si en el futuro agregamos otra columna
- * del maestro, hay que añadirla aquí.
+ * Datos que vienen del catálogo lista-proveedores cuando el usuario marca
+ * "Sí, existente" en step 1. Estos pre-llenan las columnas A, B, C, N del
+ * xlsx. Cuando no hay match, el usuario los puede llenar a mano en step 2.
  */
 export type CatalogPrefill = {
   tipo_actividad: string | null;
@@ -130,7 +101,7 @@ export type CatalogMatchInfo =
   | { status: "not_found"; query: string; aiAttempted: boolean }
   | { status: "skipped"; reason: "new_supplier" | "no_query" };
 
-const MAX_FILE_BYTES = 20 * 1024 * 1024; // 20 MB — must match backend cap.
+const MAX_FILE_BYTES = 20 * 1024 * 1024;
 
 const ACCEPT_ATTR = [
   "application/pdf",
@@ -147,8 +118,8 @@ const ACCEPT_ATTR = [
 
 const STEPS: { id: Step; label: string; hint: string }[] = [
   { id: 1, label: "Cargar documento", hint: "PDF, Word o Excel · máx 20 MB" },
-  { id: 2, label: "Revisar información", hint: "Datos extraídos por IA" },
-  { id: 3, label: "Descargar xlsx", hint: "Genera el archivo con N filas" },
+  { id: 2, label: "Revisar información", hint: "Tabla con todas las filas" },
+  { id: 3, label: "Descargar xlsx", hint: "Genera el archivo final" },
 ];
 
 function inferKind(mime: string, name: string): FileKind | null {
@@ -186,39 +157,15 @@ function fileIcon(kind: FileKind) {
   return <FileText className="w-4 h-4 text-amber-300" />;
 }
 
-/* -------------------------------------------------------------------------- */
-/*                            Excel column utility                            */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Convierte un índice 1-based en su letra de columna estilo Excel:
- *   1 → A, 26 → Z, 27 → AA, 52 → AZ, 53 → BA, etc.
- */
-export function excelColumnLetter(n: number): string {
-  if (!Number.isFinite(n) || n < 1) return "";
-  let s = "";
-  let x = Math.floor(n);
-  while (x > 0) {
-    const r = (x - 1) % 26;
-    s = String.fromCharCode(65 + r) + s;
-    x = Math.floor((x - 1) / 26);
-  }
-  return s;
-}
-
 /* ============================================================================
    SUPPLIER WORKFLOW (orchestrator)
    ========================================================================== */
 
-/**
- * Aprobación de step 2 → step 3. Recibe los datos finales editados que el
- * usuario aprobó: shared_fields editado, rows editados, y el catalog_prefill
- * (también potencialmente editado).
- */
 export interface ApprovedPayload {
   sharedFields: ExtractedSharedFields;
   rows: ExtractedContractRow[];
   catalogPrefill: GenerateXlsxCatalogPrefill | null;
+  manualFields: GenerateXlsxManualFields | null;
 }
 
 export function SupplierWorkflow() {
@@ -243,12 +190,10 @@ export function SupplierWorkflow() {
     null,
   );
 
-  /** Datos aprobados que se envían al endpoint de generación. */
   const [approvedPayload, setApprovedPayload] = useState<ApprovedPayload | null>(
     null,
   );
 
-  // Ease toward 90% while analyzing.
   useEffect(() => {
     if (!analyzing) return;
     const id = window.setInterval(() => {
@@ -314,8 +259,6 @@ export function SupplierWorkflow() {
       });
       setProgress(100);
 
-      // Lookup contra el maestro lista-proveedores usando el nombre comercial
-      // (o razón social como fallback) extraído por la IA.
       let prefill: CatalogPrefill | null = null;
       let matchInfo: CatalogMatchInfo | null = null;
       if (isExistingSupplier) {
@@ -421,7 +364,6 @@ export function SupplierWorkflow() {
         className="pointer-events-none absolute -top-20 left-1/2 h-56 w-[70%] -translate-x-1/2 rounded-full bg-primary/10 blur-3xl"
       />
 
-      {/* Stepper */}
       <div className="relative px-5 sm:px-8 pt-6 pb-5 border-b border-border">
         <ol className="flex items-center justify-between gap-2">
           {STEPS.map((s, i) => {
@@ -945,55 +887,40 @@ function AnalysisProgressCard({
 }
 
 /* ============================================================================
-   FIELD DEFINITIONS (shared + row)
+   COLUMN DEFINITIONS — flat 52-col schema (A..AZ)
    ========================================================================== */
 
-/**
- * Una opción de un dropdown. Renderizamos como `codigo · descripcion` en el UI
- * y guardamos sólo `codigo` como valor del campo.
- */
 export interface SelectOption {
   codigo: string;
   descripcion: string;
 }
 
 /**
- * Campos del header card (shared). El key puede ser:
- *   - una clave de ExtractedSharedFields (la IA llena el valor inicial), o
- *   - una clave del catalog prefill ("tipo_actividad", "zona_turismo",
- *     "proveedor_codigo", "codigo_servicio") — sin AI, viene del maestro.
+ * Scope de cada columna:
+ *  - "shared": el mismo valor en TODAS las filas del xlsx. Editar una celda
+ *    propaga el cambio al resto de filas. Sub-tipos:
+ *      - ai:      la IA la extrae del contrato (mapea a ExtractedSharedFields)
+ *      - catalog: viene del prefill contra lista-proveedores
+ *      - manual:  no la extrae ni la IA ni el catálogo; el usuario la escribe
+ *  - "row": valor independiente por combinación product × season.
  */
-type SharedDisplayKey =
-  | ExtractedSharedFieldKey
-  | "tipo_actividad"
-  | "zona_turismo"
-  | "proveedor_codigo"
-  | "codigo_servicio";
+type ColumnScope =
+  | { kind: "shared"; source: "ai" | "catalog" | "manual" }
+  | { kind: "row" };
 
-interface SharedFieldDef {
-  key: SharedDisplayKey;
-  label: string;
-  icon: LucideIcon;
+interface ColumnDef {
   excelCol: string;
-  placeholder?: string;
-  inputType?: "text" | "date" | "email";
+  key: string;
+  label: string;
+  shortLabel?: string;
+  scope: ColumnScope;
+  inputType?: "text" | "date" | "email" | "number";
   multiline?: boolean;
-  /** Si true, viene del catálogo lista-proveedores en lugar de la IA. */
-  fromCatalog?: boolean;
-  /**
-   * Si está presente, el campo se renderiza como dropdown. Las opciones se
-   * recalculan en cada render por si dependen de otros campos.
-   */
-  options?: (
-    values: Record<SharedDisplayKey, string | null>,
-  ) => ReadonlyArray<SelectOption>;
-}
-
-interface SharedSectionDef {
-  id: string;
-  title: string;
-  icon: LucideIcon;
-  fields: SharedFieldDef[];
+  minWidth: number;
+  placeholder?: string;
+  options?: (ctx: {
+    tipoServicio: string | null;
+  }) => ReadonlyArray<SelectOption>;
 }
 
 const TIPO_UNIDAD_OPTIONS: ReadonlyArray<SelectOption> = [
@@ -1001,409 +928,98 @@ const TIPO_UNIDAD_OPTIONS: ReadonlyArray<SelectOption> = [
   { codigo: "S", descripcion: "Por servicio" },
 ];
 
-const SHARED_SECTIONS: SharedSectionDef[] = [
-  {
-    id: "catalog",
-    title: "Catálogo de proveedores",
-    icon: BookMarked,
-    fields: [
-      {
-        key: "tipo_actividad",
-        label: "Tipo Actividad",
-        icon: Compass,
-        excelCol: "A",
-        placeholder: "Ej: Hospedaje, Tour, Transporte…",
-        fromCatalog: true,
-      },
-      {
-        key: "zona_turismo",
-        label: "Zona Turismo",
-        icon: MapIcon,
-        excelCol: "B",
-        placeholder: "Ej: Pacífico Central",
-        fromCatalog: true,
-      },
-      {
-        key: "proveedor_codigo",
-        label: "Proveedor (código del maestro)",
-        icon: Building2,
-        excelCol: "C",
-        placeholder: "Identificador corto del proveedor",
-        fromCatalog: true,
-      },
-      {
-        key: "codigo_servicio",
-        label: "Código Servicio",
-        icon: Hash,
-        excelCol: "N",
-        placeholder: "Ej: SVC-1024",
-        fromCatalog: true,
-      },
-    ],
-  },
-  {
-    id: "identidad",
-    title: "Identidad del proveedor",
-    icon: Building2,
-    fields: [
-      {
-        key: "proveedor",
-        label: "Razón Social",
-        icon: Building2,
-        excelCol: "D",
-        placeholder: "Ej: ACME Servicios S.A.",
-      },
-      {
-        key: "nombre_comercial",
-        label: "Nombre Comercial",
-        icon: BookMarked,
-        excelCol: "G",
-        placeholder: "Ej: ACME",
-      },
-      {
-        key: "cedula",
-        label: "Cédula Jurídica",
-        icon: Hash,
-        excelCol: "E",
-        placeholder: "Ej: 3-101-123456",
-      },
-      {
-        key: "fecha",
-        label: "Contract Date",
-        icon: Calendar,
-        excelCol: "F",
-        placeholder: "YYYY-MM-DD",
-        inputType: "date",
-      },
-      {
-        key: "telefono",
-        label: "Teléfono",
-        icon: Phone,
-        excelCol: "—",
-        placeholder: "Ej: (506) 2777-1414",
-      },
-    ],
-  },
-  {
-    id: "ubicacion",
-    title: "Ubicación",
-    icon: MapPin,
-    fields: [
-      {
-        key: "pais",
-        label: "País",
-        icon: Globe,
-        excelCol: "H",
-        placeholder: "Ej: Costa Rica",
-      },
-      {
-        key: "state_province",
-        label: "State / Province",
-        icon: MapPin,
-        excelCol: "I",
-        placeholder: "Ej: Puntarenas",
-      },
-      {
-        key: "direccion",
-        label: "Dirección (Location)",
-        icon: MapPin,
-        excelCol: "J",
-        placeholder: "Calle, número, ciudad…",
-        multiline: true,
-      },
-      {
-        key: "type_of_business",
-        label: "Type of Business",
-        icon: Briefcase,
-        excelCol: "K",
-        placeholder: "Ej: Hotel, Tour Operator…",
-      },
-    ],
-  },
-  {
-    id: "contrato",
-    title: "Vigencia y contacto operativo",
-    icon: CalendarRange,
-    fields: [
-      {
-        key: "contract_starts",
-        label: "Contract Starts",
-        icon: CalendarCheck2,
-        excelCol: "L",
-        placeholder: "YYYY-MM-DD",
-        inputType: "date",
-      },
-      {
-        key: "contract_ends",
-        label: "Contract Ends",
-        icon: CalendarRange,
-        excelCol: "M",
-        placeholder: "YYYY-MM-DD",
-        inputType: "date",
-      },
-      {
-        key: "reservations_email",
-        label: "Reservations Email",
-        icon: Mail,
-        excelCol: "AO",
-        placeholder: "reservas@proveedor.com",
-        inputType: "email",
-      },
-    ],
-  },
-  {
-    id: "clasificacion",
-    title: "Clasificación catálogo Utopía",
-    icon: Tag,
-    fields: [
-      {
-        key: "tipo_unidad",
-        label: "Tipo Unidad",
-        icon: BedDouble,
-        excelCol: "P",
-        placeholder: "N o S",
-        options: () => TIPO_UNIDAD_OPTIONS,
-      },
-      {
-        key: "tipo_servicio",
-        label: "Tipo Servicio",
-        icon: Tag,
-        excelCol: "Q",
-        placeholder: "Ej: HO, TO, TR…",
-        options: () => TIPOS_SERVICIO,
-      },
-    ],
-  },
-  {
-    id: "banco",
-    title: "Datos bancarios",
-    icon: Landmark,
-    fields: [
-      {
-        key: "numero_cuenta",
-        label: "Cuenta Bancaria",
-        icon: CreditCard,
-        excelCol: "AR",
-        placeholder: "IBAN preferido",
-      },
-      {
-        key: "banco",
-        label: "Banco",
-        icon: Landmark,
-        excelCol: "AS",
-        placeholder: "Ej: BAC Credomatic",
-      },
-      {
-        key: "tipo_moneda",
-        label: "Moneda",
-        icon: Banknote,
-        excelCol: "AT",
-        placeholder: "USD, EUR, CRC…",
-      },
-    ],
-  },
+/**
+ * Las 52 columnas A..AZ de la plantilla xlsx en orden. Fuente de verdad para
+ * el render de la tabla y para construir el payload del backend.
+ */
+const ALL_COLUMNS: ColumnDef[] = [
+  { excelCol: "A",  key: "tipo_actividad",    label: "Tipo Actividad",     shortLabel: "Tipo Act.",    scope: { kind: "shared", source: "catalog" }, minWidth: 130, placeholder: "Ej: Hospedaje" },
+  { excelCol: "B",  key: "zona_turismo",      label: "Zona Turismo",       shortLabel: "Zona",         scope: { kind: "shared", source: "catalog" }, minWidth: 140, placeholder: "Ej: Pacífico Central" },
+  { excelCol: "C",  key: "proveedor_codigo",  label: "Proveedor (código)", shortLabel: "Proveedor",    scope: { kind: "shared", source: "catalog" }, minWidth: 130, placeholder: "Ej: PARADOR" },
+  { excelCol: "D",  key: "proveedor",         label: "Razón Social",       shortLabel: "Razón Social", scope: { kind: "shared", source: "ai" },      minWidth: 200, placeholder: "Ej: ACME S.A." },
+  { excelCol: "E",  key: "cedula",            label: "Cédula Jurídica",    shortLabel: "Cédula",       scope: { kind: "shared", source: "ai" },      minWidth: 140, placeholder: "3-101-123456" },
+  { excelCol: "F",  key: "fecha",             label: "Contract Date",      shortLabel: "Fecha",        scope: { kind: "shared", source: "ai" },      minWidth: 130, inputType: "date" },
+  { excelCol: "G",  key: "nombre_comercial",  label: "Nombre Comercial",   shortLabel: "Nombre Com.",  scope: { kind: "shared", source: "ai" },      minWidth: 180, placeholder: "Ej: ACME" },
+  { excelCol: "H",  key: "pais",              label: "País",               shortLabel: "País",         scope: { kind: "shared", source: "ai" },      minWidth: 110, placeholder: "Costa Rica" },
+  { excelCol: "I",  key: "state_province",    label: "State / Province",   shortLabel: "Provincia",    scope: { kind: "shared", source: "ai" },      minWidth: 130, placeholder: "Puntarenas" },
+  { excelCol: "J",  key: "direccion",         label: "Location",           shortLabel: "Dirección",    scope: { kind: "shared", source: "ai" },      minWidth: 240, placeholder: "Calle, ciudad…", multiline: true },
+  { excelCol: "K",  key: "type_of_business",  label: "Type of Business",   shortLabel: "Type Bus.",    scope: { kind: "shared", source: "ai" },      minWidth: 150, placeholder: "Ej: Hotel" },
+  { excelCol: "L",  key: "contract_starts",   label: "Contract Starts",    shortLabel: "Vigencia In.", scope: { kind: "shared", source: "ai" },      minWidth: 140, inputType: "date" },
+  { excelCol: "M",  key: "contract_ends",     label: "Contract Ends",      shortLabel: "Vigencia Fin", scope: { kind: "shared", source: "ai" },      minWidth: 140, inputType: "date" },
+  { excelCol: "N",  key: "codigo_servicio",   label: "Cod. Servicio",      shortLabel: "Cod. Serv.",   scope: { kind: "shared", source: "catalog" }, minWidth: 130, placeholder: "Ej: PARADOR-HO" },
+  { excelCol: "O",  key: "product_name",      label: "Product Name",       shortLabel: "Producto",     scope: { kind: "row" },                       minWidth: 170, placeholder: "Garden, Suites…" },
+  { excelCol: "P",  key: "tipo_unidad",       label: "Tipo Unidad",        shortLabel: "Tipo Unid.",   scope: { kind: "shared", source: "ai" },      minWidth: 130, options: () => TIPO_UNIDAD_OPTIONS },
+  { excelCol: "Q",  key: "tipo_servicio",     label: "Tipo Servicio",      shortLabel: "Tipo Serv.",   scope: { kind: "shared", source: "ai" },      minWidth: 140, options: () => TIPOS_SERVICIO },
+  { excelCol: "R",  key: "categoria",         label: "Categoría",          shortLabel: "Categ.",       scope: { kind: "row" },                       minWidth: 140, options: ({ tipoServicio }) => tipoServicio ? (CATEGORIAS_BY_TIPO_SERVICIO[tipoServicio] ?? []) : [] },
+  { excelCol: "S",  key: "ocupacion",         label: "Ocupación",          shortLabel: "Ocup.",        scope: { kind: "row" },                       minWidth: 100, placeholder: "DBL, SGL…" },
+  { excelCol: "T",  key: "season_name",       label: "Season Name",        shortLabel: "Temporada",    scope: { kind: "row" },                       minWidth: 120, placeholder: "ALTA, BAJA…" },
+  { excelCol: "U",  key: "season_starts",     label: "Season Starts",      shortLabel: "Temp. In.",    scope: { kind: "row" },                       minWidth: 140, inputType: "date" },
+  { excelCol: "V",  key: "season_ends",       label: "Season Ends",        shortLabel: "Temp. Fin",    scope: { kind: "row" },                       minWidth: 140, inputType: "date" },
+  { excelCol: "W",  key: "meals_included",    label: "Meals Included",     shortLabel: "Meals",        scope: { kind: "row" },                       minWidth: 140, placeholder: "BREAKFAST…" },
+  { excelCol: "X",  key: "tipo_tarifa_neta",  label: "Tipo Tarifa Neta",   shortLabel: "T.Tar Neta",   scope: { kind: "shared", source: "manual" },  minWidth: 140, placeholder: "Ej: Por persona" },
+  { excelCol: "Y",  key: "precios_neto_iva",  label: "Precios Neto c/IVA", shortLabel: "Neto c/IVA",   scope: { kind: "row" },                       minWidth: 110, placeholder: "295" },
+  { excelCol: "Z",  key: "precio_rack_iva",   label: "Precio Rack c/IVA",  shortLabel: "Rack c/IVA",   scope: { kind: "row" },                       minWidth: 110, placeholder: "295" },
+  { excelCol: "AA", key: "tipo_tarifa_mayorista",     label: "Tipo Tarifa Mayorista",     shortLabel: "T.Mayor.",       scope: { kind: "shared", source: "manual" }, minWidth: 150, placeholder: "Ej: Wholesale" },
+  { excelCol: "AB", key: "porcentaje_comision",       label: "% Comisión",                shortLabel: "%Com",           scope: { kind: "row" },                      minWidth: 90,  placeholder: "0 / 25" },
+  { excelCol: "AC", key: "tipo_tarifa_fds",           label: "Tipo Tarifa Fin Semana",    shortLabel: "T.Tarifa FdS",   scope: { kind: "shared", source: "manual" }, minWidth: 150, placeholder: "Ej: Weekend" },
+  { excelCol: "AD", key: "t_tar_neta_fds",            label: "T.Tar Neta Fin Semana",     shortLabel: "T.Neta FdS",     scope: { kind: "shared", source: "manual" }, minWidth: 150 },
+  { excelCol: "AE", key: "precios_neto_iva_fds",      label: "Precios Neto FdS",          shortLabel: "Neto FdS",       scope: { kind: "row" },                      minWidth: 110, placeholder: "295" },
+  { excelCol: "AF", key: "precio_rack_iva_fds",       label: "Precio Rack FdS",           shortLabel: "Rack FdS",       scope: { kind: "row" },                      minWidth: 110, placeholder: "295" },
+  { excelCol: "AG", key: "tipo_tarifa_mayorista_fds", label: "Tipo Tarifa Mayor. FdS",    shortLabel: "T.Mayor FdS",    scope: { kind: "shared", source: "manual" }, minWidth: 150 },
+  { excelCol: "AH", key: "porcentaje_comision_fds",   label: "% Comisión FdS",            shortLabel: "%Com FdS",       scope: { kind: "row" },                      minWidth: 100, placeholder: "0 / 25" },
+  { excelCol: "AI", key: "cancellation_policy",       label: "Cancelation Policy",        shortLabel: "Cancelación",    scope: { kind: "row" },                      minWidth: 280, multiline: true },
+  { excelCol: "AJ", key: "range_payment_policy",      label: "Range Payment Policy",      shortLabel: "Pago",           scope: { kind: "row" },                      minWidth: 220, multiline: true },
+  { excelCol: "AK", key: "others_payment_cancel",     label: "Others in Payment / Cancel",shortLabel: "Others P/C",     scope: { kind: "shared", source: "manual" }, minWidth: 180, multiline: true },
+  { excelCol: "AL", key: "kids_policy",               label: "Kids Policy",               shortLabel: "Niños",          scope: { kind: "row" },                      minWidth: 220, multiline: true },
+  { excelCol: "AM", key: "other_included",            label: "Other Included",            shortLabel: "Other Incl.",    scope: { kind: "row" },                      minWidth: 200, multiline: true },
+  { excelCol: "AN", key: "feeds_adicionales",         label: "Fees Adicionales",          shortLabel: "Fees",           scope: { kind: "row" },                      minWidth: 180, multiline: true },
+  { excelCol: "AO", key: "reservations_email",        label: "Reservations Email",        shortLabel: "Email Res.",     scope: { kind: "shared", source: "ai" },     minWidth: 200, inputType: "email" },
+  { excelCol: "AP", key: "cond_credito",              label: "Condiciones Crédito",       shortLabel: "Cond. Créd.",    scope: { kind: "shared", source: "manual" }, minWidth: 150, placeholder: "30 días neto" },
+  { excelCol: "AQ", key: "plazo",                     label: "Plazo",                     shortLabel: "Plazo",          scope: { kind: "shared", source: "manual" }, minWidth: 120, placeholder: "30 días" },
+  { excelCol: "AR", key: "numero_cuenta",             label: "Cuenta Bancaria 1",         shortLabel: "Cuenta 1",       scope: { kind: "shared", source: "ai" },     minWidth: 200, placeholder: "IBAN preferido" },
+  { excelCol: "AS", key: "banco",                     label: "Banco 1",                   shortLabel: "Banco 1",        scope: { kind: "shared", source: "ai" },     minWidth: 150, placeholder: "Ej: BAC" },
+  { excelCol: "AT", key: "tipo_moneda",               label: "Moneda 1",                  shortLabel: "Moneda 1",       scope: { kind: "shared", source: "ai" },     minWidth: 100, placeholder: "USD" },
+  { excelCol: "AU", key: "cuenta_bancaria_2",         label: "Cuenta Bancaria 2",         shortLabel: "Cuenta 2",       scope: { kind: "shared", source: "manual" }, minWidth: 200 },
+  { excelCol: "AV", key: "banco_2",                   label: "Banco 2",                   shortLabel: "Banco 2",        scope: { kind: "shared", source: "manual" }, minWidth: 150 },
+  { excelCol: "AW", key: "moneda_2",                  label: "Moneda 2",                  shortLabel: "Moneda 2",       scope: { kind: "shared", source: "manual" }, minWidth: 100 },
+  { excelCol: "AX", key: "cuenta_bancaria_3",         label: "Cuenta Bancaria 3",         shortLabel: "Cuenta 3",       scope: { kind: "shared", source: "manual" }, minWidth: 200 },
+  { excelCol: "AY", key: "banco_3",                   label: "Banco 3",                   shortLabel: "Banco 3",        scope: { kind: "shared", source: "manual" }, minWidth: 150 },
+  { excelCol: "AZ", key: "moneda_3",                  label: "Moneda 3",                  shortLabel: "Moneda 3",       scope: { kind: "shared", source: "manual" }, minWidth: 100 },
 ];
 
-/**
- * Campos pre-llenados desde el catálogo (cuando hay match). El UI muestra el
- * badge "Revisar — puede ser incorrecto" sobre estos para que el humano
- * confirme antes de aprobar.
- */
-const SHARED_FIELDS_NEEDING_REVIEW: ReadonlySet<SharedDisplayKey> = new Set([
+/** Keys del backend ExtractedSharedFields que tienen columna en el xlsx
+ *  (telefono se extrae para validación pero NO tiene columna). */
+const AI_SHARED_KEYS: ExtractedSharedFieldKey[] = [
+  "fecha", "proveedor", "nombre_comercial", "cedula", "direccion",
+  "pais", "state_province", "type_of_business",
+  "contract_starts", "contract_ends", "reservations_email",
+  "tipo_unidad", "tipo_servicio", "tipo_moneda", "numero_cuenta", "banco",
+];
+
+const CATALOG_KEYS = [
+  "tipo_actividad", "zona_turismo", "proveedor_codigo", "codigo_servicio",
+] as const;
+type CatalogKey = (typeof CATALOG_KEYS)[number];
+
+const MANUAL_KEYS = [
+  "tipo_tarifa_neta", "tipo_tarifa_mayorista", "tipo_tarifa_fds",
+  "t_tar_neta_fds", "tipo_tarifa_mayorista_fds", "others_payment_cancel",
+  "cond_credito", "plazo",
+  "cuenta_bancaria_2", "banco_2", "moneda_2",
+  "cuenta_bancaria_3", "banco_3", "moneda_3",
+] as const;
+type ManualKey = (typeof MANUAL_KEYS)[number];
+
+type SharedKey = CatalogKey | ExtractedSharedFieldKey | ManualKey;
+
+const COLS_NEEDING_REVIEW = new Set<string>([
   "tipo_actividad",
   "zona_turismo",
   "proveedor_codigo",
 ]);
 
-/**
- * Columnas de la tabla de filas. El orden es el orden visual de la tabla.
- */
-interface RowFieldDef {
-  key: ExtractedRowFieldKey;
-  label: string;
-  shortLabel?: string;
-  excelCol: string;
-  icon?: LucideIcon;
-  inputType?: "text" | "date" | "number";
-  multiline?: boolean;
-  /** Ancho mínimo de la columna en píxeles. */
-  minWidth: number;
-  placeholder?: string;
-  /** Dropdown con opciones dinámicas. Recibe el shared.tipo_servicio elegido. */
-  options?: (tipoServicio: string | null) => ReadonlyArray<SelectOption>;
-}
-
-const ROW_FIELDS: RowFieldDef[] = [
-  {
-    key: "product_name",
-    label: "Product Name",
-    shortLabel: "Producto",
-    excelCol: "O",
-    icon: Tag,
-    minWidth: 180,
-    placeholder: "Ej: Garden, Vista Suites",
-  },
-  {
-    key: "categoria",
-    label: "Categoría",
-    excelCol: "R",
-    icon: Star,
-    minWidth: 150,
-    placeholder: "Ej: STD, MAS, PNT",
-    options: (tipoServicio) => {
-      if (!tipoServicio) return [];
-      return CATEGORIAS_BY_TIPO_SERVICIO[tipoServicio] ?? [];
-    },
-  },
-  {
-    key: "ocupacion",
-    label: "Ocupación",
-    shortLabel: "Ocup.",
-    excelCol: "S",
-    icon: Users,
-    minWidth: 100,
-    placeholder: "DBL, SGL, TPL…",
-  },
-  {
-    key: "season_name",
-    label: "Season",
-    shortLabel: "Temporada",
-    excelCol: "T",
-    icon: Sun,
-    minWidth: 130,
-    placeholder: "PEAK, ALTA, BAJA…",
-  },
-  {
-    key: "season_starts",
-    label: "Season Starts",
-    shortLabel: "Inicio",
-    excelCol: "U",
-    icon: Calendar,
-    inputType: "date",
-    minWidth: 140,
-  },
-  {
-    key: "season_ends",
-    label: "Season Ends",
-    shortLabel: "Fin",
-    excelCol: "V",
-    icon: Calendar,
-    inputType: "date",
-    minWidth: 140,
-  },
-  {
-    key: "meals_included",
-    label: "Meals Included",
-    shortLabel: "Meals",
-    excelCol: "W",
-    icon: Utensils,
-    minWidth: 140,
-    placeholder: "BREAKFAST, MAP…",
-  },
-  {
-    key: "precios_neto_iva",
-    label: "Neto c/IVA",
-    excelCol: "Y",
-    icon: Banknote,
-    minWidth: 110,
-    placeholder: "Ej: 295",
-  },
-  {
-    key: "precio_rack_iva",
-    label: "Rack c/IVA",
-    excelCol: "Z",
-    icon: Banknote,
-    minWidth: 110,
-    placeholder: "Ej: 295",
-  },
-  {
-    key: "porcentaje_comision",
-    label: "% Comisión",
-    shortLabel: "%Com",
-    excelCol: "AB",
-    icon: Percent,
-    minWidth: 90,
-    placeholder: "Ej: 25 o 0",
-  },
-  {
-    key: "precios_neto_iva_fds",
-    label: "Neto FdS",
-    excelCol: "AE",
-    icon: Banknote,
-    minWidth: 110,
-    placeholder: "Ej: 295",
-  },
-  {
-    key: "precio_rack_iva_fds",
-    label: "Rack FdS",
-    excelCol: "AF",
-    icon: Banknote,
-    minWidth: 110,
-    placeholder: "Ej: 295",
-  },
-  {
-    key: "porcentaje_comision_fds",
-    label: "% Com. FdS",
-    shortLabel: "%Com FdS",
-    excelCol: "AH",
-    icon: Percent,
-    minWidth: 100,
-    placeholder: "Ej: 25 o 0",
-  },
-  {
-    key: "cancellation_policy",
-    label: "Política de cancelación",
-    shortLabel: "Cancelación",
-    excelCol: "AI",
-    icon: ShieldAlert,
-    multiline: true,
-    minWidth: 280,
-    placeholder: "Resumen 1-2 oraciones",
-  },
-  {
-    key: "range_payment_policy",
-    label: "Política de pago",
-    shortLabel: "Pago",
-    excelCol: "AJ",
-    icon: Wallet,
-    multiline: true,
-    minWidth: 220,
-    placeholder: "Plazo de pago",
-  },
-  {
-    key: "kids_policy",
-    label: "Política de niños",
-    shortLabel: "Niños",
-    excelCol: "AL",
-    icon: Baby,
-    multiline: true,
-    minWidth: 240,
-    placeholder: "Reglas para menores",
-  },
-  {
-    key: "other_included",
-    label: "Otros incluidos",
-    shortLabel: "Other incl.",
-    excelCol: "AM",
-    icon: Plus,
-    multiline: true,
-    minWidth: 200,
-    placeholder: "Wi-Fi, fitness, etc.",
-  },
-  {
-    key: "feeds_adicionales",
-    label: "Fees adicionales",
-    shortLabel: "Fees",
-    excelCol: "AN",
-    icon: Receipt,
-    multiline: true,
-    minWidth: 180,
-    placeholder: "Resort fee, etc.",
-  },
-];
-
 /* ============================================================================
-   STEP 2 — Review (header card + table)
+   STEP 2 — Review (flat 52-col table)
    ========================================================================== */
 
 const CONFIANZA_STYLES: Record<
@@ -1434,39 +1050,29 @@ const CONFIANZA_STYLES: Record<
 };
 
 /**
- * Construye el state inicial del header card a partir de la respuesta IA y
- * el catalog prefill. Las claves son SharedDisplayKey.
+ * Construye el estado inicial de los campos compartidos a partir de la
+ * extracción IA + catalog prefill. Las claves manual arrancan en null
+ * (el usuario las llena en la tabla).
  */
-function buildInitialShared(
+function buildInitialSharedValues(
   data: ExtractedContract,
   prefill: CatalogPrefill | null,
-): Record<SharedDisplayKey, string | null> {
-  const out: Record<SharedDisplayKey, string | null> = {
-    // AI-extracted fields
-    fecha: data.shared_fields.fecha,
-    proveedor: data.shared_fields.proveedor,
-    nombre_comercial: data.shared_fields.nombre_comercial,
-    cedula: data.shared_fields.cedula,
-    direccion: data.shared_fields.direccion,
-    telefono: data.shared_fields.telefono,
-    pais: data.shared_fields.pais,
-    state_province: data.shared_fields.state_province,
-    type_of_business: data.shared_fields.type_of_business,
-    contract_starts: data.shared_fields.contract_starts,
-    contract_ends: data.shared_fields.contract_ends,
-    reservations_email: data.shared_fields.reservations_email,
-    tipo_unidad: data.shared_fields.tipo_unidad,
-    tipo_servicio: data.shared_fields.tipo_servicio,
-    tipo_moneda: data.shared_fields.tipo_moneda,
-    numero_cuenta: data.shared_fields.numero_cuenta,
-    banco: data.shared_fields.banco,
-    // Catalog prefill fields
-    tipo_actividad: prefill?.tipo_actividad ?? null,
-    zona_turismo: prefill?.zona_turismo ?? null,
-    proveedor_codigo: prefill?.proveedor_codigo ?? null,
-    codigo_servicio: prefill?.codigo_servicio ?? null,
-  };
-  return out;
+): Record<SharedKey, string | null> {
+  const out: Record<string, string | null> = {};
+  // 16 AI keys con columna
+  for (const k of AI_SHARED_KEYS) {
+    out[k] = data.shared_fields[k];
+  }
+  // 4 catalog keys
+  out.tipo_actividad = prefill?.tipo_actividad ?? null;
+  out.zona_turismo = prefill?.zona_turismo ?? null;
+  out.proveedor_codigo = prefill?.proveedor_codigo ?? null;
+  out.codigo_servicio = prefill?.codigo_servicio ?? null;
+  // 14 manual keys → null
+  for (const k of MANUAL_KEYS) {
+    out[k] = null;
+  }
+  return out as Record<SharedKey, string | null>;
 }
 
 function ReviewStep({
@@ -1481,23 +1087,16 @@ function ReviewStep({
   const { data, validation, meta } = result;
   const conf = CONFIANZA_STYLES[data.confianza];
 
-  // ---- Shared state ----
-  // ReviewStep solo se monta cuando el parent transiciona a step 2; cuando
-  // el usuario hace "Procesar otro contrato" el parent llama reset() que
-  // desmonta esto. Por eso usamos useState con inicializador (lazy) y NO
-  // un useEffect para re-seed — la prop `result` no cambia dentro del
-  // ciclo de vida del componente.
+  // Shared state (34 keys)
   const [sharedValues, setSharedValues] = useState<
-    Record<SharedDisplayKey, string | null>
-  >(() => buildInitialShared(data, catalogPrefill));
-
-  const setSharedField = (key: SharedDisplayKey, value: string | null) => {
+    Record<SharedKey, string | null>
+  >(() => buildInitialSharedValues(data, catalogPrefill));
+  const setSharedField = (key: SharedKey, value: string | null) => {
     setSharedValues((prev) => ({ ...prev, [key]: value }));
   };
 
-  // ---- Rows state ----
+  // Per-row state (one ContractRow per combinación)
   const [rows, setRows] = useState<ExtractedContractRow[]>(() => data.rows);
-
   const setRowField = (
     rowIdx: number,
     key: ExtractedRowFieldKey,
@@ -1510,8 +1109,6 @@ function ReviewStep({
 
   const addRow = () => {
     setRows((prev) => {
-      // Clone the last row's structure but with prices/season cleared, so
-      // shared row context (product_name, ocupacion) is preserved as a hint.
       const last = prev[prev.length - 1];
       const blank: ExtractedContractRow = {
         product_name: last?.product_name ?? null,
@@ -1539,20 +1136,20 @@ function ReviewStep({
 
   const removeRow = (rowIdx: number) => {
     setRows((prev) => {
-      if (prev.length <= 1) return prev; // mantén al menos 1
+      if (prev.length <= 1) return prev;
       return prev.filter((_, i) => i !== rowIdx);
     });
   };
 
-  // ---- Approval ----
   const handleApprove = () => {
+    // AI shared fields (incluye telefono que extraemos pero no editamos)
     const sharedFields: ExtractedSharedFields = {
       fecha: sharedValues.fecha,
       proveedor: sharedValues.proveedor,
       nombre_comercial: sharedValues.nombre_comercial,
       cedula: sharedValues.cedula,
       direccion: sharedValues.direccion,
-      telefono: sharedValues.telefono,
+      telefono: data.shared_fields.telefono, // not in table, passed through
       pais: sharedValues.pais,
       state_province: sharedValues.state_province,
       type_of_business: sharedValues.type_of_business,
@@ -1568,41 +1165,69 @@ function ReviewStep({
       numero_cuenta: sharedValues.numero_cuenta,
       banco: sharedValues.banco,
     };
-    const finalCatalogPrefill: GenerateXlsxCatalogPrefill | null =
-      sharedValues.tipo_actividad ||
-      sharedValues.zona_turismo ||
-      sharedValues.proveedor_codigo ||
-      sharedValues.codigo_servicio
-        ? {
-            tipo_actividad: sharedValues.tipo_actividad,
-            zona_turismo: sharedValues.zona_turismo,
-            proveedor_codigo: sharedValues.proveedor_codigo,
-            codigo_servicio: sharedValues.codigo_servicio,
-          }
-        : null;
+
+    // Catalog prefill — null si todos los 4 son null/empty
+    const hasAnyCatalog = CATALOG_KEYS.some((k) => {
+      const v = sharedValues[k];
+      return typeof v === "string" && v.trim() !== "";
+    });
+    const finalCatalogPrefill: GenerateXlsxCatalogPrefill | null = hasAnyCatalog
+      ? {
+          tipo_actividad: sharedValues.tipo_actividad,
+          zona_turismo: sharedValues.zona_turismo,
+          proveedor_codigo: sharedValues.proveedor_codigo,
+          codigo_servicio: sharedValues.codigo_servicio,
+        }
+      : null;
+
+    // Manual fields — null si todos los 14 son null/empty
+    const hasAnyManual = MANUAL_KEYS.some((k) => {
+      const v = sharedValues[k];
+      return typeof v === "string" && v.trim() !== "";
+    });
+    const finalManualFields: GenerateXlsxManualFields | null = hasAnyManual
+      ? {
+          tipo_tarifa_neta: sharedValues.tipo_tarifa_neta,
+          tipo_tarifa_mayorista: sharedValues.tipo_tarifa_mayorista,
+          tipo_tarifa_fds: sharedValues.tipo_tarifa_fds,
+          t_tar_neta_fds: sharedValues.t_tar_neta_fds,
+          tipo_tarifa_mayorista_fds: sharedValues.tipo_tarifa_mayorista_fds,
+          others_payment_cancel: sharedValues.others_payment_cancel,
+          cond_credito: sharedValues.cond_credito,
+          plazo: sharedValues.plazo,
+          cuenta_bancaria_2: sharedValues.cuenta_bancaria_2,
+          banco_2: sharedValues.banco_2,
+          moneda_2: sharedValues.moneda_2,
+          cuenta_bancaria_3: sharedValues.cuenta_bancaria_3,
+          banco_3: sharedValues.banco_3,
+          moneda_3: sharedValues.moneda_3,
+        }
+      : null;
+
     onApprove({
       sharedFields,
       rows,
       catalogPrefill: finalCatalogPrefill,
+      manualFields: finalManualFields,
     });
   };
 
-  // ---- Stats ----
+  const filledRowCells = useMemo(() => {
+    let count = 0;
+    const rowCols = ALL_COLUMNS.filter((c) => c.scope.kind === "row");
+    for (const r of rows) {
+      for (const c of rowCols) {
+        const v = r[c.key as ExtractedRowFieldKey];
+        if (typeof v === "string" && v.trim() !== "") count++;
+      }
+    }
+    return count;
+  }, [rows]);
+
   const rowCount = rows.length;
-  const filledRowCellsCount = rows.reduce((sum, r) => {
-    return (
-      sum +
-      ROW_FIELDS.filter((f) => {
-        const v = r[f.key];
-        return typeof v === "string" && v.trim() !== "";
-      }).length
-    );
-  }, 0);
-  const totalRowCells = rowCount * ROW_FIELDS.length;
+  const totalRowCells = rowCount * ALL_COLUMNS.filter((c) => c.scope.kind === "row").length;
   const completionPct =
-    totalRowCells === 0
-      ? 0
-      : Math.round((filledRowCellsCount / totalRowCells) * 100);
+    totalRowCells === 0 ? 0 : Math.round((filledRowCells / totalRowCells) * 100);
 
   return (
     <div className="px-5 sm:px-8 py-7 space-y-5">
@@ -1625,8 +1250,7 @@ function ReviewStep({
               </span>
               <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-[10.5px] font-semibold uppercase tracking-wider text-emerald-300">
                 <CheckCircle2 className="w-3 h-3" />
-                {rowCount} {rowCount === 1 ? "fila" : "filas"} extraída
-                {rowCount === 1 ? "" : "s"}
+                {rowCount} {rowCount === 1 ? "fila" : "filas"}
               </span>
             </div>
             <p className="text-[12.5px] text-muted-foreground mt-1 truncate">
@@ -1643,7 +1267,9 @@ function ReviewStep({
             />
           </div>
           <p className="text-[10.5px] text-muted-foreground tabular-nums">
-            {completionPct}% de las celdas de la tabla con valor
+            {completionPct}% celdas variables con valor — {rowCount} ×{" "}
+            {ALL_COLUMNS.filter((c) => c.scope.kind === "row").length} ={" "}
+            {totalRowCells} celdas
           </p>
         </div>
       </div>
@@ -1666,21 +1292,15 @@ function ReviewStep({
         </div>
       )}
 
-      <SharedFieldsCard
-        values={sharedValues}
-        onChange={setSharedField}
-        paginasOrigen={data.paginas_origen_shared}
-        filename={meta.filename}
-        camposFaltantes={data.campos_faltantes}
-        hasCatalogPrefill={catalogPrefill !== null}
-      />
-
-      <RowsTable
+      <FullTable
         rows={rows}
-        tipoServicio={sharedValues.tipo_servicio}
+        sharedValues={sharedValues}
+        paginasOrigenShared={data.paginas_origen_shared}
         paginasOrigenRows={data.paginas_origen_rows}
+        camposFaltantes={data.campos_faltantes}
         filename={meta.filename}
-        onChange={setRowField}
+        onSharedChange={setSharedField}
+        onRowChange={setRowField}
         onAddRow={addRow}
         onRemoveRow={removeRow}
       />
@@ -1693,7 +1313,6 @@ function ReviewStep({
         >
           <Download className="w-4 h-4" />
           Generar y descargar xlsx
-          <ArrowRight className="w-4 h-4 opacity-80" />
         </button>
       </div>
     </div>
@@ -1701,330 +1320,29 @@ function ReviewStep({
 }
 
 /* ============================================================================
-   Shared Fields Card (header)
+   Full 52-col table
    ========================================================================== */
 
-function SharedFieldsCard({
-  values,
-  onChange,
-  paginasOrigen,
-  filename,
-  camposFaltantes,
-  hasCatalogPrefill,
-}: {
-  values: Record<SharedDisplayKey, string | null>;
-  onChange: (key: SharedDisplayKey, value: string | null) => void;
-  paginasOrigen: Record<string, ExtractionSourcePage>;
-  filename: string;
-  camposFaltantes: string[];
-  hasCatalogPrefill: boolean;
-}) {
-  const [collapsed, setCollapsed] = useState(false);
-
-  const visibleSections = SHARED_SECTIONS.filter(
-    (s) => s.id !== "catalog" || hasCatalogPrefill,
-  );
-
-  const totalFields = visibleSections.reduce((sum, s) => sum + s.fields.length, 0);
-  const filledCount = visibleSections.reduce(
-    (sum, s) =>
-      sum +
-      s.fields.filter((f) => {
-        const v = values[f.key];
-        return typeof v === "string" && v.trim() !== "";
-      }).length,
-    0,
-  );
-
-  return (
-    <section className="rounded-xl border border-primary/20 bg-card/60 overflow-hidden">
-      <button
-        type="button"
-        onClick={() => setCollapsed((c) => !c)}
-        aria-expanded={!collapsed}
-        className="w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-secondary/30 transition-colors"
-      >
-        <div className="w-10 h-10 rounded-lg bg-primary/15 border border-primary/30 flex items-center justify-center shrink-0">
-          <Info className="w-5 h-5 text-primary" />
-        </div>
-        <div className="flex-1 min-w-0">
-          <p className="text-[14.5px] font-semibold text-foreground">
-            Información compartida del proveedor
-          </p>
-          <p className="text-[12.5px] text-muted-foreground">
-            Estos datos se replican en cada fila del xlsx.
-          </p>
-        </div>
-        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full border text-[11.5px] font-semibold tabular-nums shrink-0 border-primary/30 bg-primary/10 text-primary">
-          {filledCount}/{totalFields}
-        </span>
-        <ChevronDown
-          className={`w-4 h-4 text-muted-foreground transition-transform shrink-0 ${
-            collapsed ? "" : "rotate-180"
-          }`}
-        />
-      </button>
-      {!collapsed && (
-        <div className="border-t border-border/60 bg-card/40 divide-y divide-border/40">
-          {visibleSections.map((section) => (
-            <SharedSubsection
-              key={section.id}
-              section={section}
-              values={values}
-              onChange={onChange}
-              paginasOrigen={paginasOrigen}
-              filename={filename}
-              camposFaltantes={camposFaltantes}
-            />
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function SharedSubsection({
-  section,
-  values,
-  onChange,
-  paginasOrigen,
-  filename,
-  camposFaltantes,
-}: {
-  section: SharedSectionDef;
-  values: Record<SharedDisplayKey, string | null>;
-  onChange: (key: SharedDisplayKey, value: string | null) => void;
-  paginasOrigen: Record<string, ExtractionSourcePage>;
-  filename: string;
-  camposFaltantes: string[];
-}) {
-  const SectionIcon = section.icon;
-  return (
-    <div className="px-4 py-3.5">
-      <div className="flex items-center gap-2 mb-3">
-        <SectionIcon className="w-4 h-4 text-muted-foreground" />
-        <p className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground">
-          {section.title}
-        </p>
-      </div>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-5 gap-y-3">
-        {section.fields.map((f) => (
-          <SharedFieldRow
-            key={f.key}
-            field={f}
-            value={values[f.key]}
-            options={f.options ? f.options(values) : undefined}
-            // Source page comes from paginas_origen_shared keyed by the AI
-            // field name. Catalog fields don't have a source page.
-            source={f.fromCatalog ? undefined : paginasOrigen[f.key]}
-            isMarkedMissing={
-              !f.fromCatalog && camposFaltantes.includes(f.key)
-            }
-            needsReview={SHARED_FIELDS_NEEDING_REVIEW.has(f.key)}
-            filename={filename}
-            onSave={(v) => onChange(f.key, v)}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function SharedFieldRow({
-  field,
-  value,
-  options,
-  source,
-  isMarkedMissing,
-  needsReview,
-  filename,
-  onSave,
-}: {
-  field: SharedFieldDef;
-  value: string | null;
-  options?: ReadonlyArray<SelectOption>;
-  source: ExtractionSourcePage | undefined;
-  isMarkedMissing: boolean;
-  needsReview: boolean;
-  filename: string;
-  onSave: (next: string | null) => void;
-}) {
-  const { icon: Icon, label, placeholder, inputType, multiline } = field;
-  const isSelect = !!options && options.length > 0;
-  const missing = value === null || value === "";
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState("");
-  const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
-
-  const startEdit = () => {
-    setDraft(value ?? "");
-    setEditing(true);
-  };
-
-  useEffect(() => {
-    if (editing) inputRef.current?.focus();
-  }, [editing]);
-
-  const commit = () => {
-    const trimmed = draft.trim();
-    onSave(trimmed === "" ? null : trimmed);
-    setEditing(false);
-    setDraft("");
-  };
-  const cancel = () => {
-    setEditing(false);
-    setDraft("");
-  };
-  const handleKeyDown = (
-    e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>,
-  ) => {
-    if (e.key === "Enter" && !e.shiftKey && !multiline) {
-      e.preventDefault();
-      commit();
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      cancel();
-    }
-  };
-
-  return (
-    <div className={field.multiline ? "md:col-span-2" : undefined}>
-      <div className="flex items-center gap-1.5 text-muted-foreground min-w-0 mb-1">
-        <span
-          className="inline-flex items-center justify-center min-w-[24px] h-4 px-1 rounded border border-border/70 bg-secondary/60 text-[10px] font-mono font-semibold text-muted-foreground/90 tabular-nums shrink-0"
-          title={`Columna ${field.excelCol}`}
-        >
-          {field.excelCol}
-        </span>
-        <Icon className="w-3.5 h-3.5 shrink-0" />
-        <p className="text-[11.5px] uppercase tracking-wider font-semibold truncate">
-          {label}
-        </p>
-        {needsReview && (
-          <span
-            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-[9.5px] font-semibold uppercase tracking-wider text-amber-300 shrink-0"
-            title="La información puede ser incorrecta — revisa antes de aprobar."
-          >
-            <AlertTriangle className="w-2.5 h-2.5" />
-            Revisar
-          </span>
-        )}
-        {source !== undefined && (
-          <SourceChip source={source} filename={filename} />
-        )}
-      </div>
-
-      {isSelect ? (
-        <div className="flex items-center gap-1.5">
-          <select
-            value={value ?? ""}
-            onChange={(e) => onSave(e.target.value === "" ? null : e.target.value)}
-            aria-label={label}
-            className="flex-1 min-w-0 h-9 rounded-md border border-border bg-secondary/40 px-2.5 text-[13px] text-foreground outline-none focus:border-primary/60 focus:bg-secondary/60 cursor-pointer"
-          >
-            <option value="">— {placeholder ?? "Selecciona…"} —</option>
-            {options!.map((opt) => (
-              <option key={opt.codigo} value={opt.codigo}>
-                {opt.codigo} · {opt.descripcion}
-              </option>
-            ))}
-          </select>
-          {value && (
-            <button
-              type="button"
-              onClick={() => onSave(null)}
-              aria-label={`Limpiar ${label}`}
-              className="inline-flex items-center justify-center h-9 w-9 rounded-md border border-border bg-secondary/60 text-muted-foreground hover:text-destructive transition-colors shrink-0"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          )}
-        </div>
-      ) : editing ? (
-        <div className="flex items-start gap-1.5">
-          {multiline ? (
-            <textarea
-              ref={inputRef as React.RefObject<HTMLTextAreaElement>}
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder={placeholder}
-              rows={2}
-              className="flex-1 min-w-0 resize-y rounded-md border border-primary/40 bg-secondary/40 px-2.5 py-1.5 text-[13px] leading-relaxed text-foreground outline-none focus:border-primary focus:bg-secondary/60"
-            />
-          ) : (
-            <input
-              ref={inputRef as React.RefObject<HTMLInputElement>}
-              type={inputType ?? "text"}
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder={placeholder}
-              className="flex-1 min-w-0 h-9 rounded-md border border-primary/40 bg-secondary/40 px-2.5 text-[13px] text-foreground outline-none focus:border-primary focus:bg-secondary/60"
-            />
-          )}
-          <button
-            type="button"
-            onClick={commit}
-            aria-label={`Guardar ${label}`}
-            className="inline-flex items-center justify-center h-9 w-9 rounded-md bg-primary text-primary-foreground hover:opacity-90 transition-opacity shrink-0"
-          >
-            <Check className="w-3.5 h-3.5" />
-          </button>
-          <button
-            type="button"
-            onClick={cancel}
-            aria-label="Cancelar"
-            className="inline-flex items-center justify-center h-9 w-9 rounded-md border border-border bg-secondary/60 text-muted-foreground hover:text-foreground transition-colors shrink-0"
-          >
-            <X className="w-3.5 h-3.5" />
-          </button>
-        </div>
-      ) : (
-        <div className="group flex items-start gap-2">
-          <p
-            className={`flex-1 min-w-0 text-[13.5px] leading-relaxed break-words ${
-              missing ? "text-muted-foreground/60 italic" : "text-foreground"
-            }`}
-          >
-            {missing
-              ? isMarkedMissing
-                ? "No encontrado en el documento"
-                : "Vacío — clic en ✎ para agregar"
-              : value}
-          </p>
-          <button
-            type="button"
-            onClick={startEdit}
-            aria-label={missing ? `Agregar ${label}` : `Editar ${label}`}
-            className="inline-flex items-center justify-center h-7 w-7 rounded border border-transparent text-muted-foreground hover:text-primary hover:border-primary/30 hover:bg-primary/10 group-hover:text-primary/70 transition-colors shrink-0"
-          >
-            <Pencil className="w-3.5 h-3.5" />
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ============================================================================
-   Rows Table — spreadsheet-style editable grid
-   ========================================================================== */
-
-function RowsTable({
+function FullTable({
   rows,
-  tipoServicio,
+  sharedValues,
+  paginasOrigenShared,
   paginasOrigenRows,
+  camposFaltantes,
   filename,
-  onChange,
+  onSharedChange,
+  onRowChange,
   onAddRow,
   onRemoveRow,
 }: {
   rows: ExtractedContractRow[];
-  tipoServicio: string | null;
+  sharedValues: Record<SharedKey, string | null>;
+  paginasOrigenShared: Record<string, ExtractionSourcePage>;
   paginasOrigenRows: Record<string, ExtractionSourcePage>[];
+  camposFaltantes: string[];
   filename: string;
-  onChange: (
+  onSharedChange: (key: SharedKey, value: string | null) => void;
+  onRowChange: (
     rowIdx: number,
     key: ExtractedRowFieldKey,
     value: string | null,
@@ -2032,20 +1350,24 @@ function RowsTable({
   onAddRow: () => void;
   onRemoveRow: (rowIdx: number) => void;
 }) {
+  const tipoServicio = sharedValues.tipo_servicio;
+
   return (
     <section className="rounded-xl border border-border bg-card/60 overflow-hidden">
-      <header className="flex items-center justify-between px-4 py-3 border-b border-border/60">
+      <header className="flex items-center justify-between px-4 py-3 border-b border-border/60 gap-3">
         <div className="flex items-center gap-2.5 min-w-0">
           <div className="w-9 h-9 rounded-lg bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center shrink-0">
-            <FileSpreadsheet className="w-4.5 h-4.5 text-emerald-300" />
+            <FileSpreadsheet className="w-4 h-4 text-emerald-300" />
           </div>
           <div className="min-w-0">
             <p className="text-[14px] font-semibold text-foreground">
-              Filas del xlsx ({rows.length})
+              Datos del xlsx · {rows.length} {rows.length === 1 ? "fila" : "filas"}{" "}
+              · 52 columnas
             </p>
             <p className="text-[11.5px] text-muted-foreground">
-              Una fila por cada combinación product × season. Clic en una celda
-              para editarla.
+              Clic en una celda para editarla. Las columnas con fondo sutil son{" "}
+              <em className="italic">compartidas</em>: editar una propaga a todas
+              las filas.
             </p>
           </div>
         </div>
@@ -2060,73 +1382,136 @@ function RowsTable({
       </header>
 
       <div className="overflow-x-auto">
-        <table className="w-full border-collapse text-[12.5px]">
+        <table className="w-full border-collapse text-[12px]">
           <thead className="bg-secondary/40 border-b border-border/60 sticky top-0 z-10">
             <tr>
               <th
                 scope="col"
-                className="sticky left-0 z-20 bg-secondary/80 backdrop-blur px-2 py-2 text-left text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground/90 border-r border-border/60"
-                style={{ minWidth: 48 }}
+                rowSpan={2}
+                className="sticky left-0 z-20 bg-secondary/80 backdrop-blur px-2 py-1 text-left text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground/90 border-r border-border/60 align-middle"
+                style={{ minWidth: 44 }}
               >
                 #
               </th>
-              {ROW_FIELDS.map((f) => (
-                <th
-                  key={f.key}
-                  scope="col"
-                  className="px-2 py-2 text-left font-semibold border-r border-border/40 last:border-r-0 whitespace-nowrap"
-                  style={{ minWidth: f.minWidth }}
-                >
-                  <div className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-muted-foreground/90">
-                    <span
-                      className="inline-flex items-center justify-center min-w-[22px] h-3.5 px-0.5 rounded border border-border/70 bg-secondary/60 text-[9px] font-mono font-semibold text-muted-foreground/90"
-                      title={`Columna ${f.excelCol}`}
-                    >
-                      {f.excelCol}
-                    </span>
-                    {f.icon && <f.icon className="w-3 h-3" />}
-                    <span className="text-foreground/90">
-                      {f.shortLabel ?? f.label}
-                    </span>
-                  </div>
-                </th>
-              ))}
+              {ALL_COLUMNS.map((col) => {
+                const isShared = col.scope.kind === "shared";
+                const needsReview = COLS_NEEDING_REVIEW.has(col.key);
+                return (
+                  <th
+                    key={col.excelCol}
+                    scope="col"
+                    className={`px-1.5 py-1 text-left border-r border-border/40 whitespace-nowrap align-bottom ${
+                      isShared ? "bg-secondary/50" : ""
+                    }`}
+                    style={{ minWidth: col.minWidth }}
+                  >
+                    <div className="flex items-center gap-1">
+                      <span
+                        className="inline-flex items-center justify-center min-w-[26px] h-4 px-1 rounded border border-border/70 bg-card text-[10px] font-mono font-bold text-foreground/80 tabular-nums shrink-0"
+                        title={`Columna ${col.excelCol}`}
+                      >
+                        {col.excelCol}
+                      </span>
+                      {needsReview && (
+                        <span
+                          title="Revisar — viene del catálogo lista-proveedores y el match es fuzzy."
+                          className="text-amber-300 shrink-0"
+                        >
+                          <AlertTriangle className="w-3 h-3" />
+                        </span>
+                      )}
+                    </div>
+                  </th>
+                );
+              })}
               <th
                 scope="col"
-                className="px-2 py-2 text-right text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground/90"
-                style={{ minWidth: 44 }}
+                rowSpan={2}
+                className="px-1.5 py-1 text-right align-middle"
+                style={{ minWidth: 40 }}
               >
                 <span className="sr-only">Acciones</span>
               </th>
+            </tr>
+            <tr>
+              {ALL_COLUMNS.map((col) => {
+                const isShared = col.scope.kind === "shared";
+                return (
+                  <th
+                    key={col.excelCol + "_label"}
+                    scope="col"
+                    className={`px-1.5 pb-1.5 text-left border-r border-border/40 whitespace-nowrap font-semibold align-top ${
+                      isShared ? "bg-secondary/50" : ""
+                    }`}
+                  >
+                    <span className="text-[10.5px] uppercase tracking-wider text-foreground/90">
+                      {col.shortLabel ?? col.label}
+                    </span>
+                  </th>
+                );
+              })}
             </tr>
           </thead>
           <tbody>
             {rows.map((row, rowIdx) => (
               <tr
                 key={rowIdx}
-                className="border-b border-border/30 last:border-b-0 hover:bg-secondary/15 transition-colors"
+                className="border-b border-border/30 last:border-b-0 hover:bg-secondary/10 transition-colors"
               >
                 <td
-                  className="sticky left-0 z-10 bg-card/95 backdrop-blur px-2 py-1 text-[11px] font-mono tabular-nums text-muted-foreground border-r border-border/40"
-                  style={{ minWidth: 48 }}
+                  className="sticky left-0 z-10 bg-card/95 backdrop-blur px-2 py-1 text-[11px] font-mono tabular-nums text-muted-foreground border-r border-border/40 align-top"
+                  style={{ minWidth: 44 }}
                 >
                   {rowIdx + 1}
                 </td>
-                {ROW_FIELDS.map((f) => {
-                  const opts = f.options ? f.options(tipoServicio) : undefined;
+                {ALL_COLUMNS.map((col) => {
+                  const isShared = col.scope.kind === "shared";
+                  const value = isShared
+                    ? sharedValues[col.key as SharedKey]
+                    : row[col.key as ExtractedRowFieldKey];
+                  // Source page
+                  let source: ExtractionSourcePage | undefined;
+                  if (isShared) {
+                    source = paginasOrigenShared[col.key];
+                  } else {
+                    source = paginasOrigenRows[rowIdx]?.[col.key];
+                  }
+                  // Mark missing if backend listed this AI shared field as faltante
+                  const isMarkedMissing =
+                    isShared &&
+                    col.scope.kind === "shared" &&
+                    col.scope.source === "ai" &&
+                    camposFaltantes.includes(col.key);
+
+                  const opts = col.options
+                    ? col.options({ tipoServicio })
+                    : undefined;
                   return (
                     <td
-                      key={f.key}
-                      className="px-1 py-0.5 align-top border-r border-border/30 last:border-r-0"
-                      style={{ minWidth: f.minWidth }}
+                      key={col.excelCol}
+                      className={`p-0 align-top border-r border-border/30 ${
+                        isShared ? "bg-secondary/15" : ""
+                      }`}
+                      style={{ minWidth: col.minWidth }}
                     >
-                      <TableCell
-                        field={f}
-                        value={row[f.key]}
+                      <CellEditor
+                        col={col}
+                        value={value}
                         options={opts}
-                        source={paginasOrigenRows[rowIdx]?.[f.key]}
+                        source={source}
                         filename={filename}
-                        onSave={(v) => onChange(rowIdx, f.key, v)}
+                        isMarkedMissing={isMarkedMissing}
+                        onSave={(v) => {
+                          if (isShared) {
+                            onSharedChange(col.key as SharedKey, v);
+                          } else {
+                            onRowChange(
+                              rowIdx,
+                              col.key as ExtractedRowFieldKey,
+                              v,
+                            );
+                          }
+                        }}
                       />
                     </td>
                   );
@@ -2157,23 +1542,24 @@ function RowsTable({
 }
 
 /**
- * Celda editable de la tabla. Click → modo edit (input/textarea/select).
- * Enter / blur commit. Escape cancel. El source page se muestra como
- * tooltip al hover sobre la celda completa.
+ * Editor de celda. Click → modo edit (input/textarea/select). Enter / blur
+ * commit. Escape cancel. Source-page se muestra como tooltip al hover.
  */
-function TableCell({
-  field,
+function CellEditor({
+  col,
   value,
   options,
   source,
   filename,
+  isMarkedMissing,
   onSave,
 }: {
-  field: RowFieldDef;
+  col: ColumnDef;
   value: string | null;
   options: ReadonlyArray<SelectOption> | undefined;
   source: ExtractionSourcePage | undefined;
   filename: string;
+  isMarkedMissing: boolean;
   onSave: (v: string | null) => void;
 }) {
   const isSelect = !!options;
@@ -2189,7 +1575,6 @@ function TableCell({
     setDraft(value ?? "");
     setEditing(true);
   };
-
   const commit = () => {
     const trimmed = draft.trim();
     onSave(trimmed === "" ? null : trimmed);
@@ -2200,11 +1585,10 @@ function TableCell({
     setEditing(false);
     setDraft("");
   };
-
   const handleKeyDown = (
     e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>,
   ) => {
-    if (e.key === "Enter" && !e.shiftKey && !field.multiline) {
+    if (e.key === "Enter" && !e.shiftKey && !col.multiline) {
       e.preventDefault();
       commit();
     } else if (e.key === "Escape") {
@@ -2213,7 +1597,6 @@ function TableCell({
     }
   };
 
-  // Tooltip combina la página de origen + filename (igual que en shared)
   const tooltip = useMemo(() => {
     if (source === undefined) return undefined;
     const base =
@@ -2228,52 +1611,53 @@ function TableCell({
   }, [source, filename]);
 
   if (isSelect) {
+    const valueInOpts =
+      value !== null && options!.some((o) => o.codigo === value);
     return (
-      <div className="relative" title={tooltip}>
-        <select
-          value={value ?? ""}
-          onChange={(e) => onSave(e.target.value === "" ? null : e.target.value)}
-          className="w-full h-8 rounded border border-transparent bg-transparent px-1.5 text-[12.5px] text-foreground outline-none hover:border-border focus:border-primary/60 focus:bg-secondary/40 cursor-pointer"
-          aria-label={field.label}
-        >
-          <option value="">—</option>
-          {options.map((opt) => (
-            <option key={opt.codigo} value={opt.codigo}>
-              {opt.codigo} · {opt.descripcion}
-            </option>
-          ))}
-          {value && !options.some((o) => o.codigo === value) && (
-            <option value={value} className="italic">
-              {value} (fuera de catálogo)
-            </option>
-          )}
-        </select>
-      </div>
+      <select
+        value={value ?? ""}
+        onChange={(e) => onSave(e.target.value === "" ? null : e.target.value)}
+        title={tooltip}
+        aria-label={col.label}
+        className="w-full h-7 rounded border border-transparent bg-transparent px-1 text-[12px] text-foreground outline-none hover:border-border focus:border-primary/60 focus:bg-secondary/40 cursor-pointer"
+      >
+        <option value="">—</option>
+        {options!.map((opt) => (
+          <option key={opt.codigo} value={opt.codigo}>
+            {opt.codigo} · {opt.descripcion}
+          </option>
+        ))}
+        {value && !valueInOpts && (
+          <option value={value} className="italic">
+            {value} (fuera de catálogo)
+          </option>
+        )}
+      </select>
     );
   }
 
   if (editing) {
-    return field.multiline ? (
+    return col.multiline ? (
       <textarea
         ref={inputRef as React.RefObject<HTMLTextAreaElement>}
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={handleKeyDown}
         onBlur={commit}
-        placeholder={field.placeholder}
+        placeholder={col.placeholder}
         rows={3}
-        className="w-full resize-y rounded border border-primary/60 bg-secondary/40 px-1.5 py-1 text-[12.5px] leading-relaxed text-foreground outline-none focus:border-primary"
+        className="w-full resize-y rounded border border-primary/60 bg-secondary/40 px-1.5 py-1 text-[12px] leading-relaxed text-foreground outline-none focus:border-primary"
       />
     ) : (
       <input
         ref={inputRef as React.RefObject<HTMLInputElement>}
-        type={field.inputType ?? "text"}
+        type={col.inputType ?? "text"}
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={handleKeyDown}
         onBlur={commit}
-        placeholder={field.placeholder}
-        className="w-full h-8 rounded border border-primary/60 bg-secondary/40 px-1.5 text-[12.5px] text-foreground outline-none focus:border-primary"
+        placeholder={col.placeholder}
+        className="w-full h-7 rounded border border-primary/60 bg-secondary/40 px-1.5 text-[12px] text-foreground outline-none focus:border-primary"
       />
     );
   }
@@ -2284,46 +1668,19 @@ function TableCell({
       type="button"
       onClick={startEdit}
       title={tooltip}
-      aria-label={`${field.label} — ${missing ? "vacío" : value}. Clic para editar.`}
-      className={`w-full min-h-[2rem] text-left rounded border border-transparent px-1.5 py-1 text-[12.5px] leading-snug transition-colors hover:border-border hover:bg-secondary/30 focus:outline-none focus:border-primary/60 focus:bg-secondary/40 ${
+      aria-label={`${col.label} — ${missing ? "vacío" : value}. Clic para editar.`}
+      className={`w-full min-h-[1.75rem] text-left rounded border border-transparent px-1.5 py-1 text-[12px] leading-snug transition-colors hover:border-border hover:bg-secondary/30 focus:outline-none focus:border-primary/60 focus:bg-secondary/40 ${
         missing
           ? "text-muted-foreground/50 italic"
           : "text-foreground"
-      } ${field.multiline ? "whitespace-pre-wrap break-words" : "truncate"}`}
+      } ${col.multiline ? "whitespace-pre-wrap break-words" : "truncate"}`}
     >
-      {missing ? "—" : value}
+      {missing
+        ? isMarkedMissing
+          ? "no encontrado"
+          : "—"
+        : value}
     </button>
-  );
-}
-
-/* ============================================================================
-   Source chip (used in shared header)
-   ========================================================================== */
-
-function SourceChip({
-  source,
-  filename,
-}: {
-  source: ExtractionSourcePage;
-  filename: string;
-}) {
-  const base =
-    typeof source === "number"
-      ? `Pág ${source}`
-      : source === "inferido"
-        ? "Inferido"
-        : source === "multiple"
-          ? "Múltiples págs"
-          : `Pág ${source}`;
-  const tooltip = `${base} · ${filename}`;
-
-  return (
-    <span
-      title={tooltip}
-      className="inline-flex max-w-[140px] items-center gap-1 px-1.5 py-0 rounded border border-border bg-secondary/40 text-[9.5px] font-medium text-muted-foreground whitespace-nowrap shrink-0"
-    >
-      <span className="shrink-0">{base}</span>
-    </span>
   );
 }
 
@@ -2346,8 +1703,6 @@ function DownloadStep({
     filename: string;
     sizeBytes: number;
   } | null>(null);
-  // Track started state to avoid the StrictMode double-mount firing two
-  // fetches in dev.
   const startedRef = useRef(false);
 
   useEffect(() => {
@@ -2361,21 +1716,19 @@ function DownloadStep({
           shared_fields: payload.sharedFields,
           rows: payload.rows,
           catalog_prefill: payload.catalogPrefill,
+          manual_fields: payload.manualFields,
         });
         if (cancelled) return;
 
-        // Trigger browser download via an in-memory anchor click.
         const url = URL.createObjectURL(blob);
         try {
           const a = document.createElement("a");
           a.href = url;
           a.download = filename;
-          // Append to body for Firefox compatibility, click, then remove.
           document.body.appendChild(a);
           a.click();
           a.remove();
         } finally {
-          // Defer revoke so the click has a chance to dispatch first.
           setTimeout(() => URL.revokeObjectURL(url), 500);
         }
 
@@ -2463,7 +1816,11 @@ function DownloadInProgressCard({
           <Loader2 className="w-4 h-4 text-primary animate-spin shrink-0" />
         </div>
         <p className="text-[11px] text-muted-foreground">
-          Procesando — esto suele tardar 1-3 segundos.
+          Si tarda más de 10s, verifica que el backend esté corriendo y reinicia{" "}
+          <code className="px-1 rounded bg-secondary/60 text-foreground/80">
+            npm run dev
+          </code>{" "}
+          si recién agregaste rutas nuevas.
         </p>
       </div>
     </div>

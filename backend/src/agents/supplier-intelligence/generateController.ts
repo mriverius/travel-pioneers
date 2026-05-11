@@ -8,6 +8,7 @@ import {
 } from "./xlsxGenerator.js";
 import type {
   ContractRow,
+  ManualFields,
   SharedFields,
   TipoUnidad,
 } from "./types.js";
@@ -99,6 +100,30 @@ function coerceRow(input: unknown, index: number): ContractRow {
   };
 }
 
+function coerceManualFields(input: unknown): ManualFields | null {
+  if (input === null || input === undefined) return null;
+  if (typeof input !== "object") {
+    throw ApiError.badRequest("`manual_fields` debe ser un objeto o null.");
+  }
+  const r = input as Record<string, unknown>;
+  return {
+    tipo_tarifa_neta: stringOrNull(r.tipo_tarifa_neta),
+    tipo_tarifa_mayorista: stringOrNull(r.tipo_tarifa_mayorista),
+    tipo_tarifa_fds: stringOrNull(r.tipo_tarifa_fds),
+    t_tar_neta_fds: stringOrNull(r.t_tar_neta_fds),
+    tipo_tarifa_mayorista_fds: stringOrNull(r.tipo_tarifa_mayorista_fds),
+    others_payment_cancel: stringOrNull(r.others_payment_cancel),
+    cond_credito: stringOrNull(r.cond_credito),
+    plazo: stringOrNull(r.plazo),
+    cuenta_bancaria_2: stringOrNull(r.cuenta_bancaria_2),
+    banco_2: stringOrNull(r.banco_2),
+    moneda_2: stringOrNull(r.moneda_2),
+    cuenta_bancaria_3: stringOrNull(r.cuenta_bancaria_3),
+    banco_3: stringOrNull(r.banco_3),
+    moneda_3: stringOrNull(r.moneda_3),
+  };
+}
+
 function coerceCatalogPrefill(input: unknown): CatalogPrefillInput | null {
   if (input === null || input === undefined) return null;
   if (typeof input !== "object") {
@@ -139,41 +164,49 @@ function parseGenerateInput(body: unknown): GenerateXlsxInput {
   const rows = b.rows.map(coerceRow);
 
   const catalog_prefill = coerceCatalogPrefill(b.catalog_prefill);
+  const manual_fields = coerceManualFields(b.manual_fields);
 
-  return { shared_fields, rows, catalog_prefill };
+  return { shared_fields, rows, catalog_prefill, manual_fields };
 }
 
 export async function generateXlsxHandler(
   req: Request,
   res: Response,
 ): Promise<void> {
+  logger.info("Supplier Intelligence xlsx generation: request received", {
+    requestId: req.id,
+    bodyBytes: req.headers["content-length"] ?? "?",
+  });
+
   const input = parseGenerateInput(req.body);
 
-  logger.info("Supplier Intelligence xlsx generation started", {
+  logger.info("Supplier Intelligence xlsx generation: parsed input", {
     requestId: req.id,
     rowCount: input.rows.length,
     proveedor: input.shared_fields.proveedor,
+    hasCatalog: input.catalog_prefill !== null && input.catalog_prefill !== undefined,
+    hasManual: input.manual_fields !== null && input.manual_fields !== undefined,
   });
 
+  const t0 = Date.now();
   const { buffer, filename } = generateContractXlsx(input);
+  const elapsed = Date.now() - t0;
 
-  logger.info("Supplier Intelligence xlsx generation finished", {
+  logger.info("Supplier Intelligence xlsx generation: completed", {
     requestId: req.id,
     rowCount: input.rows.length,
     sizeBytes: buffer.byteLength,
     filename,
+    elapsedMs: elapsed,
   });
 
-  res
-    .status(200)
-    .setHeader(
-      "Content-Type",
+  // Usar res.set + res.send sin chaining para evitar cualquier ambigüedad de
+  // tipos entre setHeader (Node ServerResponse) y res.send (Express). El
+  // Content-Length lo calcula Express automáticamente desde el buffer.
+  res.set({
+    "Content-Type":
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-    .setHeader(
-      "Content-Disposition",
-      `attachment; filename="${filename}"`,
-    )
-    .setHeader("Content-Length", String(buffer.byteLength))
-    .send(buffer);
+    "Content-Disposition": `attachment; filename="${filename}"`,
+  });
+  res.status(200).send(buffer);
 }

@@ -13,7 +13,7 @@
  * la extracción IA: o son campos de catálogo (vienen del prefill de
  * lista-proveedores), o son manuales/template y se dejan en blanco.
  */
-import type { SharedFieldKey, RowFieldKey } from "./types.js";
+import type { ManualFieldKey, RowFieldKey, SharedFieldKey } from "./types.js";
 
 /** Fila 1-indexed donde empiezan los datos en la plantilla. */
 export const TEMPLATE_DATA_START_ROW = 7;
@@ -53,6 +53,28 @@ export const SHARED_COL: Partial<Record<SharedFieldKey, string>> = {
   banco: "AS",
   tipo_moneda: "AT",
   // telefono: sin columna — se extrae para validación pero no se escribe.
+};
+
+/**
+ * Columnas para los campos "manual" que no extrae la IA pero existen en la
+ * plantilla. Se replican en cada fila del xlsx — el usuario los llena en
+ * step 2 una sola vez.
+ */
+export const MANUAL_COL: Record<ManualFieldKey, string> = {
+  tipo_tarifa_neta: "X",
+  tipo_tarifa_mayorista: "AA",
+  tipo_tarifa_fds: "AC",
+  t_tar_neta_fds: "AD",
+  tipo_tarifa_mayorista_fds: "AG",
+  others_payment_cancel: "AK",
+  cond_credito: "AP",
+  plazo: "AQ",
+  cuenta_bancaria_2: "AU",
+  banco_2: "AV",
+  moneda_2: "AW",
+  cuenta_bancaria_3: "AX",
+  banco_3: "AY",
+  moneda_3: "AZ",
 };
 
 /** Columnas para los campos por fila. */

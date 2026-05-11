@@ -457,10 +457,33 @@ export interface GenerateXlsxCatalogPrefill {
   codigo_servicio: string | null;
 }
 
+/**
+ * Campos "manuales" — columnas que existen en la plantilla pero NO extrae la
+ * IA. El usuario los llena en step 2 (X, AA, AC, AD, AG, AK, AP, AQ, AU..AZ).
+ * Se replican en cada fila del xlsx igual que shared_fields.
+ */
+export interface GenerateXlsxManualFields {
+  tipo_tarifa_neta: string | null;
+  tipo_tarifa_mayorista: string | null;
+  tipo_tarifa_fds: string | null;
+  t_tar_neta_fds: string | null;
+  tipo_tarifa_mayorista_fds: string | null;
+  others_payment_cancel: string | null;
+  cond_credito: string | null;
+  plazo: string | null;
+  cuenta_bancaria_2: string | null;
+  banco_2: string | null;
+  moneda_2: string | null;
+  cuenta_bancaria_3: string | null;
+  banco_3: string | null;
+  moneda_3: string | null;
+}
+
 export interface GenerateXlsxInput {
   shared_fields: ExtractedSharedFields;
   rows: ExtractedContractRow[];
   catalog_prefill?: GenerateXlsxCatalogPrefill | null;
+  manual_fields?: GenerateXlsxManualFields | null;
 }
 
 /* --- match-supplier (fallback IA del lookup contra el catálogo) --- */

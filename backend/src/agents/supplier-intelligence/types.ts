@@ -84,8 +84,35 @@ export interface ContractRow {
   feeds_adicionales: string | null;
 }
 
+/**
+ * Campos que NO extrae la IA (no salen del contrato) y NO vienen del catálogo
+ * lista-proveedores, pero existen como columnas en la plantilla xlsx y el
+ * usuario puede llenarlos en step 2. Se replican en cada fila del xlsx igual
+ * que los shared_fields.
+ *
+ * Columnas correspondientes: X, AA, AC, AD, AG, AK, AP, AQ, AU, AV, AW, AX,
+ * AY, AZ (14 columnas).
+ */
+export interface ManualFields {
+  tipo_tarifa_neta: string | null;
+  tipo_tarifa_mayorista: string | null;
+  tipo_tarifa_fds: string | null;
+  t_tar_neta_fds: string | null;
+  tipo_tarifa_mayorista_fds: string | null;
+  others_payment_cancel: string | null;
+  cond_credito: string | null;
+  plazo: string | null;
+  cuenta_bancaria_2: string | null;
+  banco_2: string | null;
+  moneda_2: string | null;
+  cuenta_bancaria_3: string | null;
+  banco_3: string | null;
+  moneda_3: string | null;
+}
+
 export type SharedFieldKey = keyof SharedFields;
 export type RowFieldKey = keyof ContractRow;
+export type ManualFieldKey = keyof ManualFields;
 
 /**
  * Resultado final de la extracción — lo que devuelve la API.
