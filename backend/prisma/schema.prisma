@@ -5,7 +5,7 @@
 // holds connection strings — those are configured in `prisma.config.ts`.
 
 generator client {
-  provider = "prisma-client-js"
+  provider = "prisma-client"
   output   = "../src/generated/prisma-js"
 }
 
