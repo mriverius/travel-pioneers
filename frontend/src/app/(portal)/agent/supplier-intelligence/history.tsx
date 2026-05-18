@@ -2,6 +2,7 @@
 
 import {
   AlertCircle,
+  AlertTriangle,
   CheckCircle2,
   Clock,
   Eye,
@@ -13,13 +14,14 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import {
-  ALL_FIELDS,
-  SECTIONS,
-  type DisplayFieldKey,
-  type SectionDef,
-} from "./historyTypes";
-import { type FileKind } from "./workflow";
+  ALL_COLUMNS,
+  COLS_NEEDING_REVIEW,
+  formatCellDisplay,
+  type ColumnDef,
+  type FileKind,
+} from "./workflow";
 import {
   api,
   ApiError,
@@ -34,14 +36,12 @@ import {
 /* ---------------------------------- Types --------------------------------- */
 
 /**
- * One processed-contract record. `values` carries the same display-field
- * schema as Step 2 so the detail modal can render exactly the same field
- * structure without conversion.
- *
- * Fed by `GET /api/supplier-intelligence/contracts` via `useContractRuns`
- * (see below). The flattening from `{shared_fields, rows, catalog, manual}`
- * into a single `Partial<Record<DisplayFieldKey, string>>` happens here so
- * the detail modal stays identical to Step 2's read-only sections.
+ * One processed-contract record. Holds the raw structured payload from the
+ * backend (sharedFields + catalog + manual + rows) plus a couple of derived
+ * convenience fields used by the table row and search. The detail modal
+ * walks the same `ALL_COLUMNS` schema as Step 2 and reads values directly
+ * out of these buckets — no flattening, so multi-row contracts render with
+ * one table row per `rows[i]` exactly like the editable Step 2 table.
  */
 export interface HistoryEntry {
   id: string;
@@ -49,107 +49,23 @@ export interface HistoryEntry {
   fileKind: FileKind;
   /** ISO timestamp of when the contract finished processing. */
   processedAt: string;
-  /**
-   * Sparse value map keyed by display field. Anything missing is treated as
-   * `null` ("vacío") in the detail modal — same convention as Step 2.
-   */
-  values: Partial<Record<DisplayFieldKey, string>>;
+
+  // Derived display/search-friendly fields (computed once at fetch time).
+  /** Razón social — `sharedFields.proveedor`. */
+  supplierName: string | null;
+  /** Nombre comercial — typically the brand the customer recognizes. */
+  commercialName: string | null;
+  /** Código de proveedor del maestro — `catalogPrefill.proveedor_codigo`. */
+  supplierCode: string | null;
+
+  // Raw payload — the modal renders the 52-col table directly off these.
+  sharedFields: ExtractedSharedFields;
+  catalogPrefill: GenerateXlsxCatalogPrefill | null;
+  manualFields: GenerateXlsxManualFields | null;
+  rows: ExtractedContractRow[];
 }
 
 /* ---------------------------------- Data ---------------------------------- */
-
-/**
- * Convierte un `ContractRun` del backend al schema plano que usa el modal
- * de detalle (heredado de Step 2). Los campos por-fila vienen del primer
- * row — un contrato típico tiene N filas (product × season) y la UI actual
- * solo muestra la primera como representativa. Si más adelante añadimos un
- * selector de fila en el modal, aquí mapearíamos una fila distinta.
- *
- * Convención de nombres: `proveedor` en `DisplayFieldKey` representa el
- * **código del catálogo** (ej. "TORTUGA-001"), no la razón social. La
- * razón social vive en `razon_social` (que mapea a `sharedFields.proveedor`,
- * el nombre que la IA extrae). Esta asimetría existe porque el xlsx maestro
- * separa "código de proveedor" (col C) de "razón social" (col D).
- */
-function flattenContractRun(
-  run: ContractRun,
-): Partial<Record<DisplayFieldKey, string>> {
-  const s: ExtractedSharedFields = run.sharedFields;
-  const m: GenerateXlsxManualFields | null = run.manualFields;
-  const c: GenerateXlsxCatalogPrefill | null = run.catalogPrefill;
-  const r: ExtractedContractRow | undefined = run.rows[0];
-
-  const out: Partial<Record<DisplayFieldKey, string>> = {};
-  const set = (key: DisplayFieldKey, v: string | null | undefined) => {
-    if (typeof v === "string" && v.trim() !== "") out[key] = v;
-  };
-
-  // Catalog (lista-proveedores) — columnas A, B, C, N del xlsx.
-  set("tipo_actividad", c?.tipo_actividad);
-  set("zona_turismo", c?.zona_turismo);
-  set("proveedor", c?.proveedor_codigo);
-  set("codigo_servicio", c?.codigo_servicio);
-
-  // Shared (extraídos por la IA del contrato).
-  set("razon_social", s.proveedor);
-  set("cedula_juridica", s.cedula);
-  set("contract_date", s.fecha);
-  set("nombre_comercial", s.nombre_comercial);
-  set("pais", s.pais);
-  set("state_province", s.state_province);
-  set("location", s.direccion);
-  set("type_of_business", s.type_of_business);
-  set("contract_starts", s.contract_starts);
-  set("contract_ends", s.contract_ends);
-  set("tipo_unidad", s.tipo_unidad);
-  set("tipo_servicio", s.tipo_servicio);
-  set("reservations_email", s.reservations_email);
-  set("cuenta_bancaria_1", s.numero_cuenta);
-  set("banco_1", s.banco);
-  set("moneda_1", s.tipo_moneda);
-
-  // Row (primera combinación product × season).
-  if (r) {
-    set("product_name", r.product_name);
-    set("categoria", r.categoria);
-    set("ocupacion", r.ocupacion);
-    set("season_name", r.season_name);
-    set("season_starts", r.season_starts);
-    set("season_ends", r.season_ends);
-    set("meals_included", r.meals_included);
-    set("precios_neto_iva", r.precios_neto_iva);
-    set("precio_rack_iva", r.precio_rack_iva);
-    set("porcentaje_comision", r.porcentaje_comision);
-    set("precios_neto_iva_fds", r.precios_neto_iva_fds);
-    set("precio_rack_iva_fds", r.precio_rack_iva_fds);
-    set("porcentaje_comision_fds", r.porcentaje_comision_fds);
-    set("cancellation_policy", r.cancellation_policy);
-    set("range_payment_policy", r.range_payment_policy);
-    set("kids_policy", r.kids_policy);
-    set("other_included", r.other_included);
-    set("feeds_adicionales", r.feeds_adicionales);
-  }
-
-  // Manual (lo que el usuario llenó en step 2 que no extrae la IA).
-  if (m) {
-    set("tipo_tarifa_neta", m.tipo_tarifa_neta);
-    set("tipo_tarifa_mayorista", m.tipo_tarifa_mayorista);
-    set("tipo_tarifa_fds", m.tipo_tarifa_fds);
-    set("t_tar_neta_fds", m.t_tar_neta_fds);
-    set("tipo_tarifa_mayorista_fds", m.tipo_tarifa_mayorista_fds);
-    set("others_payment_cancel", m.others_payment_cancel);
-    set("cond_credito", m.cond_credito);
-    set("plazo", m.plazo);
-    set("cuenta_bancaria_2", m.cuenta_bancaria_2);
-    set("banco_2", m.banco_2);
-    set("moneda_2", m.moneda_2);
-    set("cuenta_bancaria_3", m.cuenta_bancaria_3);
-    set("banco_3", m.banco_3);
-    set("moneda_3", m.moneda_3);
-  }
-
-  return out;
-}
 
 function toHistoryEntry(run: ContractRun): HistoryEntry {
   // `fileKind` viene del backend como ContractFileKind ("pdf"|"docx"|"xlsx"),
@@ -161,7 +77,13 @@ function toHistoryEntry(run: ContractRun): HistoryEntry {
     filename: run.filename,
     fileKind: kind,
     processedAt: run.processedAt,
-    values: flattenContractRun(run),
+    supplierName: run.sharedFields.proveedor ?? null,
+    commercialName: run.sharedFields.nombre_comercial ?? null,
+    supplierCode: run.catalogPrefill?.proveedor_codigo ?? null,
+    sharedFields: run.sharedFields,
+    catalogPrefill: run.catalogPrefill,
+    manualFields: run.manualFields,
+    rows: run.rows,
   };
 }
 
@@ -335,9 +257,9 @@ export function HistoryTable() {
         if (!dateMatches(e, dateFilter)) return false;
         if (normSearch) {
           const haystack = [
-            e.values.razon_social ?? "",
-            e.values.nombre_comercial ?? "",
-            e.values.proveedor ?? "",
+            e.supplierName ?? "",
+            e.commercialName ?? "",
+            e.supplierCode ?? "",
             e.filename,
           ]
             .join(" ")
@@ -564,10 +486,14 @@ function HistoryTableRow({
   const FileKindIcon = HISTORY_FILE_ICONS[entry.fileKind];
   const tone = FILE_KIND_TONES[entry.fileKind];
   const supplier =
-    entry.values.razon_social ??
-    entry.values.nombre_comercial ??
-    "Proveedor sin nombre";
-  const subtitle = entry.values.nombre_comercial ?? entry.values.proveedor;
+    entry.supplierName ?? entry.commercialName ?? "Proveedor sin nombre";
+  // El subtítulo prefiere "nombre comercial" cuando ya tenemos razón social
+  // arriba; en su defecto usa el código del maestro para que la fila siga
+  // teniendo dos líneas de identidad.
+  const subtitle =
+    entry.supplierName && entry.commercialName
+      ? entry.commercialName
+      : entry.supplierCode;
   const processedDate = new Date(entry.processedAt);
 
   return (
@@ -629,12 +555,57 @@ function HistoryTableRow({
 }
 
 /**
- * Read-only modal showing all 52 fields of a processed contract. The body
- * walks the same `SECTIONS` schema used by Step 2 so the layout is familiar.
- * Fields without a value render as muted "vacío" placeholders.
+ * Lee el valor read-only para una columna `col` en la fila `rowIdx` del
+ * contrato. Centraliza la dispatch por scope (shared/row + ai/catalog/manual)
+ * para que el render de celdas sea un look-up trivial.
  *
- * Closes on Esc, click on the backdrop, or the X button. We `e.stopPropagation`
- * on the modal card so clicking inside doesn't bubble to the backdrop close.
+ * - shared+ai     → `sharedFields[col.key]`
+ * - shared+catalog→ `catalogPrefill[col.key]` (puede ser null si no hubo match)
+ * - shared+manual → `manualFields[col.key]` (puede ser null si el usuario no llenó nada)
+ * - row           → `rows[rowIdx][col.key]`
+ *
+ * Devolvemos `null` cuando el campo no existe / está vacío para que la celda
+ * pinte un "—" mudo (placeholder consistente con celdas no-completadas).
+ */
+function readCellValue(
+  col: ColumnDef,
+  rowIdx: number,
+  entry: HistoryEntry,
+): string | null {
+  if (col.scope.kind === "row") {
+    const row = entry.rows[rowIdx];
+    if (!row) return null;
+    const raw = (row as unknown as Record<string, string | null>)[col.key];
+    return typeof raw === "string" && raw.trim() !== "" ? raw : null;
+  }
+  // shared
+  let bag: Record<string, string | null> | null = null;
+  if (col.scope.source === "ai") {
+    bag = entry.sharedFields as unknown as Record<string, string | null>;
+  } else if (col.scope.source === "catalog") {
+    bag = entry.catalogPrefill
+      ? (entry.catalogPrefill as unknown as Record<string, string | null>)
+      : null;
+  } else if (col.scope.source === "manual") {
+    bag = entry.manualFields
+      ? (entry.manualFields as unknown as Record<string, string | null>)
+      : null;
+  }
+  const raw = bag ? bag[col.key] : null;
+  return typeof raw === "string" && raw.trim() !== "" ? raw : null;
+}
+
+/**
+ * Read-only modal showing the contract's data using **the same flat 52-col
+ * table as Step 2**. Renders N table rows (one per `entry.rows[i]`) so
+ * multi-product · multi-season contracts show every combination, not just
+ * the first one.
+ *
+ * The cell display reuses `formatCellDisplay` from `workflow.tsx`, so dates
+ * appear as mm/dd/yyyy and `currency` columns get the dynamic currency code
+ * (`sharedFields.tipo_moneda`) — identical formatting to Step 2.
+ *
+ * Closes on Esc, backdrop click, or the X button.
  */
 function HistoryDetailModal({
   entry,
@@ -643,6 +614,21 @@ function HistoryDetailModal({
   entry: HistoryEntry;
   onClose: () => void;
 }) {
+  // El modal se renderiza vía portal a document.body para escapar el
+  // contenedor `.animate-page-enter` del PortalLayout — esa clase tiene
+  // `will-change: transform`, que en CSS crea un containing block para
+  // posiciones `fixed`. Sin el portal, `fixed inset-0` cubría solo el área
+  // principal a la derecha del sidebar en lugar del viewport completo, y
+  // el modal se veía descentrado / cortado.
+  //
+  // `mounted` evita un mismatch de hydration: en SSR `document` no existe,
+  // así que en el primer render devolvemos null y solo creamos el portal
+  // después del mount del cliente.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
   // Esc-to-close + body scroll lock while open.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -657,28 +643,30 @@ function HistoryDetailModal({
     };
   }, [onClose]);
 
-  const supplier =
-    entry.values.razon_social ??
-    entry.values.nombre_comercial ??
-    "Proveedor sin nombre";
-  const processedDate = new Date(entry.processedAt);
-  const filledCount = ALL_FIELDS.filter((f) => {
-    const v = entry.values[f.key];
-    return typeof v === "string" && v.trim() !== "";
-  }).length;
-  const tone = FILE_KIND_TONES[entry.fileKind];
+  if (!mounted) return null;
 
-  return (
+  const supplier =
+    entry.supplierName ?? entry.commercialName ?? "Proveedor sin nombre";
+  const processedDate = new Date(entry.processedAt);
+  const tone = FILE_KIND_TONES[entry.fileKind];
+  const tipoMoneda = entry.sharedFields.tipo_moneda ?? null;
+  // Garantizamos al menos una fila para que la tabla nunca quede vacía
+  // (sería raro pero defensivo): un contrato persistido siempre tiene ≥1.
+  const rowCount = Math.max(entry.rows.length, 1);
+
+  return createPortal(
     <div
       role="dialog"
       aria-modal="true"
       aria-labelledby="history-detail-title"
       onClick={onClose}
-      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/60 backdrop-blur-sm animate-page-enter"
+      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/60 backdrop-blur-sm"
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="relative w-full max-w-3xl max-h-[92vh] flex flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-2xl"
+        // El ancho ahora va a 96vw para que la tabla de 52 columnas tenga
+        // espacio real; el overflow horizontal interno se encarga del scroll.
+        className="relative w-full max-w-[96vw] max-h-[92vh] flex flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-2xl"
       >
         {/* Sticky header */}
         <header className="flex items-start gap-3 px-5 sm:px-7 py-4 border-b border-border bg-card/95 backdrop-blur-sm">
@@ -715,7 +703,7 @@ function HistoryDetailModal({
             <div className="mt-2 flex items-center flex-wrap gap-2">
               <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-[10.5px] font-semibold uppercase tracking-wider text-emerald-300">
                 <CheckCircle2 className="w-3 h-3" />
-                {filledCount}/{ALL_FIELDS.length} con valor
+                {rowCount} {rowCount === 1 ? "fila" : "filas"} · 52 columnas
               </span>
             </div>
           </div>
@@ -729,15 +717,121 @@ function HistoryDetailModal({
           </button>
         </header>
 
-        {/* Scrollable body — read-only sections in single column */}
-        <div className="flex-1 overflow-y-auto px-5 sm:px-7 py-5 space-y-3">
-          {SECTIONS.map((section) => (
-            <ReadOnlySectionCard
-              key={section.id}
-              section={section}
-              values={entry.values}
-            />
-          ))}
+        {/* Read-only flat table — mirrors workflow.tsx FullTable structure. */}
+        <div className="flex-1 overflow-auto">
+          <table className="w-full border-collapse text-[12px]">
+            <thead className="bg-secondary/40 border-b border-border/60 sticky top-0 z-10">
+              <tr>
+                <th
+                  scope="col"
+                  rowSpan={2}
+                  className="sticky left-0 z-20 bg-secondary/80 backdrop-blur px-2 py-1 text-left text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground/90 border-r border-border/60 align-middle"
+                  style={{ minWidth: 44 }}
+                >
+                  #
+                </th>
+                {ALL_COLUMNS.map((col) => {
+                  const isShared = col.scope.kind === "shared";
+                  const needsReview = COLS_NEEDING_REVIEW.has(col.key);
+                  return (
+                    <th
+                      key={col.excelCol}
+                      scope="col"
+                      className={`px-1.5 py-1 text-left border-r border-border/40 whitespace-nowrap align-bottom ${
+                        isShared ? "bg-secondary/50" : ""
+                      }`}
+                      style={{ minWidth: col.minWidth }}
+                    >
+                      <div className="flex items-center gap-1">
+                        <span
+                          className="inline-flex items-center justify-center min-w-[26px] h-4 px-1 rounded border border-border/70 bg-card text-[10px] font-mono font-bold text-foreground/80 tabular-nums shrink-0"
+                          title={`Columna ${col.excelCol}`}
+                        >
+                          {col.excelCol}
+                        </span>
+                        {needsReview && (
+                          <span
+                            title="Campo del catálogo lista-proveedores — revisar."
+                            className="text-amber-300 shrink-0"
+                          >
+                            <AlertTriangle className="w-3 h-3" />
+                          </span>
+                        )}
+                      </div>
+                    </th>
+                  );
+                })}
+              </tr>
+              <tr>
+                {ALL_COLUMNS.map((col) => {
+                  const isShared = col.scope.kind === "shared";
+                  return (
+                    <th
+                      key={col.excelCol + "_label"}
+                      scope="col"
+                      className={`px-1.5 pb-1.5 text-left border-r border-border/40 whitespace-nowrap font-semibold align-top ${
+                        isShared ? "bg-secondary/50" : ""
+                      }`}
+                    >
+                      <span className="text-[10.5px] uppercase tracking-wider text-foreground/90">
+                        {col.label}
+                      </span>
+                    </th>
+                  );
+                })}
+              </tr>
+            </thead>
+            <tbody>
+              {Array.from({ length: rowCount }, (_, rowIdx) => (
+                <tr
+                  key={rowIdx}
+                  className="border-b border-border/30 last:border-b-0 hover:bg-secondary/10 transition-colors"
+                >
+                  <td
+                    className="sticky left-0 z-10 bg-card/95 backdrop-blur px-2 py-1 text-[11px] font-mono tabular-nums text-muted-foreground border-r border-border/40 align-top"
+                    style={{ minWidth: 44 }}
+                  >
+                    {rowIdx + 1}
+                  </td>
+                  {ALL_COLUMNS.map((col) => {
+                    const isShared = col.scope.kind === "shared";
+                    const raw = readCellValue(col, rowIdx, entry);
+                    const display = raw
+                      ? formatCellDisplay(col, raw, tipoMoneda)
+                      : null;
+                    return (
+                      <td
+                        key={col.excelCol}
+                        className={`px-2 py-1.5 align-top border-r border-border/30 ${
+                          isShared ? "bg-secondary/15" : ""
+                        }`}
+                        style={{ minWidth: col.minWidth }}
+                      >
+                        {display ? (
+                          <span
+                            className={`text-[12px] text-foreground ${
+                              col.multiline
+                                ? "whitespace-pre-wrap break-words"
+                                : "whitespace-nowrap"
+                            }`}
+                          >
+                            {display}
+                          </span>
+                        ) : (
+                          <span
+                            className="text-[12px] text-muted-foreground/50"
+                            aria-label="Vacío"
+                          >
+                            —
+                          </span>
+                        )}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
 
         <footer className="px-5 sm:px-7 py-3 border-t border-border bg-card/95 backdrop-blur-sm flex items-center justify-end">
@@ -750,76 +844,7 @@ function HistoryDetailModal({
           </button>
         </footer>
       </div>
-    </div>
-  );
-}
-
-/**
- * Read-only mirror of `SectionCard` from workflow.tsx, used inside the
- * history detail modal. Same accent colors / completion pill, but the body
- * is a plain stack of label/value rows without any pencils.
- */
-function ReadOnlySectionCard({
-  section,
-  values,
-}: {
-  section: SectionDef;
-  values: Partial<Record<DisplayFieldKey, string>>;
-}) {
-  const accent = section.accent;
-  const SectionIcon = section.icon;
-  const filled = section.fields.filter((f) => {
-    const v = values[f.key];
-    return typeof v === "string" && v.trim() !== "";
-  }).length;
-  const total = section.fields.length;
-
-  return (
-    <section
-      className={`rounded-xl border bg-card/60 overflow-hidden ${accent.ring}`}
-    >
-      <header className="flex items-center gap-3 px-4 py-3 border-b border-border/60">
-        <div
-          className={`w-9 h-9 rounded-lg ${accent.iconBg} ${accent.ring} border flex items-center justify-center shrink-0`}
-        >
-          <SectionIcon className={`w-4 h-4 ${accent.iconText}`} />
-        </div>
-        <div className="flex-1 min-w-0">
-          <p className="text-[13.5px] font-semibold text-foreground truncate">
-            {section.title}
-          </p>
-        </div>
-        <span
-          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] font-semibold tabular-nums shrink-0 ${accent.pillBg} ${accent.pillBorder} ${accent.pillText}`}
-        >
-          {filled}/{total}
-        </span>
-      </header>
-      <ul className="divide-y divide-border/50">
-        {section.fields.map((f) => {
-          const raw = values[f.key];
-          const v = typeof raw === "string" ? raw : null;
-          const empty = v === null || v === "";
-          const FieldIcon = f.icon;
-          return (
-            <li key={f.key} className="px-4 py-3">
-              <div className="flex items-center gap-2 text-muted-foreground min-w-0">
-                <FieldIcon className="w-3.5 h-3.5 shrink-0" />
-                <p className="text-[11.5px] uppercase tracking-wider font-semibold truncate">
-                  {f.label}
-                </p>
-              </div>
-              <p
-                className={`mt-1 text-[14.5px] leading-relaxed break-words ${
-                  empty ? "text-muted-foreground/60 italic" : "text-foreground"
-                }`}
-              >
-                {empty ? "Vacío" : v}
-              </p>
-            </li>
-          );
-        })}
-      </ul>
-    </section>
+    </div>,
+    document.body,
   );
 }

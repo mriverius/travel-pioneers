@@ -962,7 +962,7 @@ type ColumnScope =
   | { kind: "shared"; source: "ai" | "catalog" | "manual" }
   | { kind: "row" };
 
-interface ColumnDef {
+export interface ColumnDef {
   excelCol: string;
   key: string;
   label: string;
@@ -1013,7 +1013,7 @@ function formatDateDisplay(value: string): string {
  *     empieza con el código (porque la IA lo extrajo literal, ej. "USD 295"),
  *     no lo duplicamos.
  */
-function formatCellDisplay(
+export function formatCellDisplay(
   col: ColumnDef,
   value: string,
   tipoMoneda: string | null,
@@ -1033,7 +1033,7 @@ function formatCellDisplay(
  * Las 52 columnas A..AZ de la plantilla xlsx en orden. Fuente de verdad para
  * el render de la tabla y para construir el payload del backend.
  */
-const ALL_COLUMNS: ColumnDef[] = [
+export const ALL_COLUMNS: ColumnDef[] = [
   { excelCol: "A",  key: "tipo_actividad",    label: "Tipo Actividad",     scope: { kind: "shared", source: "catalog" }, minWidth: 130, placeholder: "Ej: Hospedaje" },
   { excelCol: "B",  key: "zona_turismo",      label: "Zona Turismo",       scope: { kind: "shared", source: "catalog" }, minWidth: 140, placeholder: "Ej: Pacífico Central" },
   { excelCol: "C",  key: "proveedor_codigo",  label: "Proveedor (código)", scope: { kind: "shared", source: "catalog" }, minWidth: 130, placeholder: "Ej: PARADOR" },
@@ -1113,7 +1113,7 @@ type ManualKey = (typeof MANUAL_KEYS)[number];
 
 type SharedKey = CatalogKey | ExtractedSharedFieldKey | ManualKey;
 
-const COLS_NEEDING_REVIEW = new Set<string>([
+export const COLS_NEEDING_REVIEW = new Set<string>([
   "tipo_actividad",
   "zona_turismo",
   "proveedor_codigo",
