@@ -1,9 +1,18 @@
 import { Router, json } from "express";
 import rateLimit from "express-rate-limit";
 import asyncHandler from "../utils/asyncHandler.js";
+import { requireAuth } from "../middleware/auth.js";
 import { extractContractHandler } from "../agents/supplier-intelligence/controller.js";
-import { matchSupplierHandler } from "../agents/supplier-intelligence/matchController.js";
+import {
+  matchSupplierHandler,
+  matchServiceHandler,
+} from "../agents/supplier-intelligence/matchController.js";
 import { generateXlsxHandler } from "../agents/supplier-intelligence/generateController.js";
+import {
+  contractRunStatsHandler,
+  listContractRunsHandler,
+  saveContractRunHandler,
+} from "../agents/supplier-intelligence/contractsController.js";
 import { supplierIntelligenceErrorHandler } from "../agents/supplier-intelligence/errorHandler.js";
 import { handleContractUpload } from "../agents/supplier-intelligence/uploadMiddleware.js";
 
@@ -71,6 +80,41 @@ const matchJsonParser = json({ limit: "1mb" });
 const generateJsonParser = json({ limit: "4mb" });
 
 /**
+ * Persistencia: misma envolvente que generate-xlsx (mismo payload + meta),
+ * así que reutilizamos el mismo límite de 4 MB.
+ */
+const contractsJsonParser = json({ limit: "4mb" });
+
+/**
+ * Rate limit para escritura de runs: cada step 3 exitoso del usuario emite
+ * exactamente uno; 60/min es holgado pero protege contra retries en bucle
+ * si el frontend pierde la respuesta.
+ */
+const contractsWriteLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: { message: "Demasiadas escrituras de contratos. Intenta de nuevo en un minuto." },
+  },
+});
+
+/**
+ * Rate limit para lecturas (lista + stats): la pantalla de historial y los
+ * widgets de la home pueden refrescar varias veces al minuto sin abusar.
+ */
+const contractsReadLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 240,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: { message: "Demasiadas lecturas. Intenta de nuevo en un minuto." },
+  },
+});
+
+/**
  * POST /api/supplier-intelligence/extract
  *
  * Order matters:
@@ -99,6 +143,21 @@ router.post(
 );
 
 /**
+ * POST /api/supplier-intelligence/match-service
+ *
+ * Fallback de IA para elegir el `codigo_servicio` de un proveedor cuando el
+ * matcher local del frontend (`findServiceForSupplier`) no resuelve por
+ * ambigüedad. Reusa el mismo limiter y parser que `match-supplier` — son
+ * llamadas equivalentes en costo y tamaño de payload.
+ */
+router.post(
+  "/match-service",
+  matchLimiter,
+  matchJsonParser,
+  asyncHandler(matchServiceHandler),
+);
+
+/**
  * POST /api/supplier-intelligence/generate-xlsx
  *
  * Recibe { shared_fields, rows[], catalog_prefill? } editados desde step 2 y
@@ -110,6 +169,43 @@ router.post(
   generateLimiter,
   generateJsonParser,
   asyncHandler(generateXlsxHandler),
+);
+
+/**
+ * POST /api/supplier-intelligence/contracts
+ *
+ * Persiste un run completo (tras una generación de xlsx exitosa). Auth
+ * requerida — guardamos `processedById` para auditoría aunque la lectura
+ * sea global. Idempotencia es responsabilidad del cliente: el frontend
+ * dispara este POST una sola vez cuando el step 3 entra a phase="ready".
+ *
+ * GET  /api/supplier-intelligence/contracts
+ * GET  /api/supplier-intelligence/contracts/stats
+ *
+ * Lectura global — cualquier usuario autenticado ve todos los runs y todos
+ * los counters. El producto eligió este modelo explícitamente; revisar
+ * antes de cambiarlo.
+ */
+router.post(
+  "/contracts",
+  requireAuth,
+  contractsWriteLimiter,
+  contractsJsonParser,
+  asyncHandler(saveContractRunHandler),
+);
+
+router.get(
+  "/contracts",
+  requireAuth,
+  contractsReadLimiter,
+  asyncHandler(listContractRunsHandler),
+);
+
+router.get(
+  "/contracts/stats",
+  requireAuth,
+  contractsReadLimiter,
+  asyncHandler(contractRunStatsHandler),
 );
 
 // Scoped error middleware — emits the `{ success: false, error: { code, message } }`

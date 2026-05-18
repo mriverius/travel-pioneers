@@ -46,3 +46,19 @@ export { Prisma }
  * 
  */
 export type User = Prisma.UserModel
+/**
+ * Model ContractRun
+ * *
+ *  * Persisted record of a Supplier Intelligence agent run that successfully
+ *  * generated an xlsx in step 3. One row per generated contract — global
+ *  * scope (every authenticated user can read every run; `processedById`
+ *  * is kept for audit only, not for filtering).
+ *  *
+ *  * The 52 product fields are stored as JSONB rather than as columns to keep
+ *  * the schema agile while the agent is still calibrating: shared/manual/
+ *  * catalog values come from three different shapes that each evolve at
+ *  * their own pace, and the per-row data is naturally a list of variable
+ *  * length (~1..21 product×season combinations). Querying individual fields
+ *  * isn't required for the current product surface (history list + counts).
+ */
+export type ContractRun = Prisma.ContractRunModel

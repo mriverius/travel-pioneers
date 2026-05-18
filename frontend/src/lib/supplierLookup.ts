@@ -228,3 +228,109 @@ export function findServiceForSupplier(
 
   return null;
 }
+
+/**
+ * Resultado del matcher de servicios. `matchedBy` discrimina la fuente para
+ * que la UI pueda mostrar señales distintas (ej. confianza más baja cuando
+ * fue por IA — siempre vamos a marcar `codigo_servicio` como
+ * "needs review" pero el motivo se diferencia).
+ */
+export interface ServiceMatch {
+  service: CatalogService;
+  matchedBy: "single" | "code" | "desc_exact" | "desc_partial" | "ai";
+  /** Confianza reportada por la IA. null para matchers locales (alta implícita). */
+  aiConfidence?: "alta" | "media" | "baja";
+  aiReasoning?: string;
+}
+
+/**
+ * Variante con fallback IA. Orden de intentos:
+ *   1. `findServiceForSupplier` (matchers locales — gratis e instantáneos).
+ *   2. Si nada matchea Y el proveedor tiene >1 servicio (= ambigüedad real)
+ *      Y `enableAIFallback` está activo: pide al backend que Claude elija.
+ *
+ * Si el proveedor tiene 0 servicios o el matcher local ya encontró exactamente
+ * 1, devolvemos sin llamar al backend. Eso evita gastar tokens en casos
+ * triviales y mantiene el comportamiento del flujo cuando el AI está caído.
+ *
+ * Errores de red/IA se loggean y devuelven `null` — el lookup no debe romper
+ * el flujo de extracción. El usuario verá el campo vacío con el warning sign
+ * y lo puede llenar manualmente en step 2.
+ */
+export async function findServiceForSupplierWithAI(
+  supplier: CatalogSupplier,
+  hint: string | null | undefined,
+  options: { enableAIFallback?: boolean } = { enableAIFallback: true },
+): Promise<ServiceMatch | null> {
+  // 1) Local — barato y rápido. Cubre proveedor-con-1-servicio y matches
+  //    exactos por código o descripción.
+  const local = findServiceForSupplier(supplier, hint);
+  if (local) {
+    // Inferimos cuál de los 4 caminos locales nos dio el match para que la
+    // UI pueda diferenciar (no es crítico para el comportamiento, pero
+    // mantiene la simetría con `SupplierMatch.matchedBy`).
+    let matchedBy: ServiceMatch["matchedBy"] = "single";
+    if (supplier.servicios.length > 1) {
+      const k = normalizeKey((hint ?? "").trim());
+      if (k) {
+        if (normalizeKey(local.codigo) === k) matchedBy = "code";
+        else if (local.descripcion && normalizeKey(local.descripcion) === k)
+          matchedBy = "desc_exact";
+        else matchedBy = "desc_partial";
+      }
+    }
+    return { service: local, matchedBy };
+  }
+
+  // 2) Sin AI fallback: nada que hacer.
+  if (!options.enableAIFallback) return null;
+
+  // Si el proveedor no tiene servicios o tiene exactamente 1 (caso ya cubierto
+  // por el matcher local), no llamamos a la IA.
+  if (supplier.servicios.length <= 1) return null;
+
+  const trimmedHint = (hint ?? "").trim();
+  if (!trimmedHint) return null;
+
+  const candidates = supplier.servicios.map((s) => ({
+    codigo: s.codigo,
+    descripcion: s.descripcion,
+  }));
+
+  let response;
+  try {
+    response = await api.supplierIntelligence.matchService({
+      contractContext: trimmedHint,
+      candidates,
+    });
+  } catch (err) {
+    if (err instanceof ApiError) {
+      console.warn(
+        `[supplierLookup] AI service match falló (${err.status}): ${err.message}`,
+      );
+    } else {
+      console.warn("[supplierLookup] AI service match error inesperado", err);
+    }
+    return null;
+  }
+
+  const { codigo, confidence, reasoning } = response.data;
+  if (!codigo) return null;
+
+  // Defensa: el backend ya valida que el código pertenece a los candidatos,
+  // pero verificamos contra el supplier local antes de confiar.
+  const service = supplier.servicios.find((s) => s.codigo === codigo);
+  if (!service) {
+    console.warn(
+      `[supplierLookup] AI devolvió service code desconocido: ${codigo}`,
+    );
+    return null;
+  }
+
+  return {
+    service,
+    matchedBy: "ai",
+    aiConfidence: confidence,
+    aiReasoning: reasoning,
+  };
+}

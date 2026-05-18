@@ -29,6 +29,52 @@ model User {
   createdAt    DateTime  @default(now())      @map("created_at") @db.Timestamptz(6)
   updatedAt    DateTime  @updatedAt           @map("updated_at") @db.Timestamptz(6)
 
+  contractRuns ContractRun[]
+
   @@index([email])
   @@map("users")
+}
+
+/**
+ * Persisted record of a Supplier Intelligence agent run that successfully
+ * generated an xlsx in step 3. One row per generated contract — global
+ * scope (every authenticated user can read every run; `processedById`
+ * is kept for audit only, not for filtering).
+ *
+ * The 52 product fields are stored as JSONB rather than as columns to keep
+ * the schema agile while the agent is still calibrating: shared/manual/
+ * catalog values come from three different shapes that each evolve at
+ * their own pace, and the per-row data is naturally a list of variable
+ * length (~1..21 product×season combinations). Querying individual fields
+ * isn't required for the current product surface (history list + counts).
+ */
+model ContractRun {
+  id              String   @id @default(uuid()) @db.Uuid
+  /** User who hit "Descargar xlsx". Kept for audit; not used to filter. */
+  processedById   String   @map("processed_by_id") @db.Uuid
+  processedBy     User     @relation(fields: [processedById], references: [id], onDelete: Restrict)
+  processedAt     DateTime @default(now()) @map("processed_at") @db.Timestamptz(6)
+
+  /** Original uploaded filename (no path), e.g. `parador_2026.pdf`. */
+  filename        String
+  /** One of "pdf" | "docx" | "xlsx" — kept loose to avoid an enum migration the day a new format is added. */
+  fileKind        String   @map("file_kind")
+  /** Size in bytes of the uploaded contract. */
+  fileSize        Int      @map("file_size")
+
+  /** Echo of `SharedFields` — the ~17 fields that appear once per contract. */
+  sharedFields    Json     @map("shared_fields")
+  /** Array of `ContractRow` JSON objects — one per product × season combination. */
+  rows            Json
+  /** Catalog prefill from `lista-proveedores` when the supplier already existed. Null for new suppliers. */
+  catalogPrefill  Json?    @map("catalog_prefill")
+  /** User-entered fields from step 2 that the AI doesn't extract. Nullable. */
+  manualFields    Json?    @map("manual_fields")
+
+  /** AI model used for the extraction (e.g. `claude-opus-4-6-20251109`). */
+  aiModel         String   @map("ai_model")
+
+  @@index([processedAt(sort: Desc)])
+  @@index([processedById])
+  @@map("contract_runs")
 }

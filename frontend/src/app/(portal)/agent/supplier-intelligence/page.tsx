@@ -4,14 +4,30 @@ import {
   CalendarRange,
   Clock3,
   FileCheck2,
-  Gauge,
-  Sparkles,
   TrendingUp,
   type LucideIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAuth } from "@/lib/useAuth";
+import {
+  api,
+  ApiError,
+  type ContractStats,
+  type ContractStatsBuckets,
+} from "@/lib/api";
 import { SupplierWorkflow } from "./workflow";
+
+/**
+ * Cuántos minutos de trabajo manual ahorra cada **fila** que el agente
+ * genera en el xlsx (no por contrato). Un contrato con 20 product×season
+ * = 20 filas → 100 minutos. Es mejor proxy del ROI real que un multiplicador
+ * por contrato porque la carga manual escala con filas, no con contratos.
+ *
+ * Vive en el frontend para poder ajustarlo sin redeploy. Si más adelante
+ * tenemos telemetría real (tiempo promedio manual vs IA por fila), lo
+ * recalibramos aquí.
+ */
+const MINUTES_SAVED_PER_LINE = 5;
 
 /**
  * Supplier Intelligence landing page.
@@ -25,204 +41,74 @@ import { SupplierWorkflow } from "./workflow";
  *   debajo del workflow se removió porque duplicaba la navegación.
  */
 
-type MetricTone = "primary" | "blue" | "amber" | "violet";
+type MetricTone = "primary" | "blue";
 
 type Metric = {
   icon: LucideIcon;
   label: string;
   value: string;
   caption: string;
-  trend?: string;
   tone: MetricTone;
 };
 
-type RangeKey = "today" | "week" | "month" | "quarter" | "all";
+type RangeKey = keyof ContractStatsBuckets;
 
 const RANGES: { key: RangeKey; label: string; summary: string }[] = [
-  { key: "today", label: "Hoy", summary: "22 abr 2026" },
-  { key: "week", label: "Esta semana", summary: "20 – 26 abr" },
-  { key: "month", label: "Este mes", summary: "abril 2026" },
-  { key: "quarter", label: "Trimestre", summary: "Q2 · abr – jun" },
+  { key: "today", label: "Hoy", summary: "hoy" },
+  { key: "week", label: "Esta semana", summary: "últimos 7 días" },
+  { key: "month", label: "Este mes", summary: "últimos 30 días" },
+  { key: "quarter", label: "Trimestre", summary: "últimos 90 días" },
   { key: "all", label: "Todo el tiempo", summary: "desde el lanzamiento" },
 ];
 
 /**
- * Mock metrics per time window. The `trend` copy is tailored to the
- * window so the comparison frame always makes sense ("vs. ayer" for
- * today, "vs. trimestre anterior" for the quarter view, etc.).
+ * Construye los dos widgets de métricas a partir del rango activo y los
+ * counters reales del backend. Mantenemos solamente "Contratos procesados"
+ * y "Minutos ahorrados" — las métricas de plantillas y tasa de éxito que
+ * existían antes (mock) se eliminaron porque no tenían una señal real.
+ *
+ * - Contratos = `stats.contracts[range]`
+ * - Minutos   = `stats.lines[range] * MINUTES_SAVED_PER_LINE`
+ *
+ * Si `stats` es null (loading o error), devolvemos placeholders con `—`.
  */
-const METRICS_BY_RANGE: Record<RangeKey, Metric[]> = {
-  today: [
+function buildMetrics(
+  range: RangeKey,
+  stats: ContractStats | null,
+): Metric[] {
+  const contracts = stats?.contracts[range] ?? null;
+  const lines = stats?.lines[range] ?? null;
+  const minutes = lines !== null ? lines * MINUTES_SAVED_PER_LINE : null;
+  const minutesCaption =
+    minutes === null
+      ? "Tiempo de trabajo manual ahorrado"
+      : lines === 0
+        ? "Sin filas procesadas en este rango"
+        : minutes >= 60
+          ? `${lines} fila${lines === 1 ? "" : "s"} · ≈ ${(minutes / 60).toFixed(1)} h de trabajo manual`
+          : `${lines} fila${lines === 1 ? "" : "s"} · trabajo manual ahorrado`;
+  const formatted = (n: number) =>
+    n >= 1000 ? n.toLocaleString("es-CR") : String(n);
+  return [
     {
       icon: FileCheck2,
       label: "Contratos procesados",
-      value: "3",
-      caption: "Hoy",
-      trend: "+1 vs. ayer",
+      value: contracts === null ? "—" : formatted(contracts),
+      caption:
+        contracts === null
+          ? "Cargando…"
+          : RANGES.find((r) => r.key === range)?.summary ?? "",
       tone: "primary",
     },
     {
       icon: Clock3,
       label: "Minutos ahorrados",
-      value: "92",
-      caption: "≈ 1.5 h de trabajo manual",
-      trend: "+28 min vs. ayer",
+      value: minutes === null ? "—" : formatted(minutes),
+      caption: minutesCaption,
       tone: "blue",
     },
-    {
-      icon: Sparkles,
-      label: "Plantillas generadas",
-      value: "6",
-      caption: "Proveedor + Tarifas",
-      trend: "1 en borrador",
-      tone: "violet",
-    },
-    {
-      icon: Gauge,
-      label: "Tasa de éxito",
-      value: "100%",
-      caption: "Cargas aprobadas a la primera",
-      trend: "sin rechazos",
-      tone: "amber",
-    },
-  ],
-  week: [
-    {
-      icon: FileCheck2,
-      label: "Contratos procesados",
-      value: "14",
-      caption: "Esta semana",
-      trend: "+22% vs. semana anterior",
-      tone: "primary",
-    },
-    {
-      icon: Clock3,
-      label: "Minutos ahorrados",
-      value: "420",
-      caption: "≈ 7 h de trabajo manual",
-      trend: "+76 min vs. semana anterior",
-      tone: "blue",
-    },
-    {
-      icon: Sparkles,
-      label: "Plantillas generadas",
-      value: "28",
-      caption: "Proveedor + Tarifas",
-      trend: "3 en borrador",
-      tone: "violet",
-    },
-    {
-      icon: Gauge,
-      label: "Tasa de éxito",
-      value: "98%",
-      caption: "Cargas aprobadas a la primera",
-      trend: "+2 pts vs. semana anterior",
-      tone: "amber",
-    },
-  ],
-  month: [
-    {
-      icon: FileCheck2,
-      label: "Contratos procesados",
-      value: "47",
-      caption: "Este mes",
-      trend: "+18% vs. mes anterior",
-      tone: "primary",
-    },
-    {
-      icon: Clock3,
-      label: "Minutos ahorrados",
-      value: "1,420",
-      caption: "≈ 23 h de trabajo manual",
-      trend: "+312 min vs. mes anterior",
-      tone: "blue",
-    },
-    {
-      icon: Sparkles,
-      label: "Plantillas generadas",
-      value: "94",
-      caption: "Proveedor + Tarifas",
-      trend: "2 formatos en borrador",
-      tone: "violet",
-    },
-    {
-      icon: Gauge,
-      label: "Tasa de éxito",
-      value: "96%",
-      caption: "Cargas aprobadas a la primera",
-      trend: "+4 pts vs. mes anterior",
-      tone: "amber",
-    },
-  ],
-  quarter: [
-    {
-      icon: FileCheck2,
-      label: "Contratos procesados",
-      value: "138",
-      caption: "Q2 · abr – jun",
-      trend: "+24% vs. Q1",
-      tone: "primary",
-    },
-    {
-      icon: Clock3,
-      label: "Minutos ahorrados",
-      value: "4,180",
-      caption: "≈ 70 h de trabajo manual",
-      trend: "+910 min vs. Q1",
-      tone: "blue",
-    },
-    {
-      icon: Sparkles,
-      label: "Plantillas generadas",
-      value: "276",
-      caption: "Proveedor + Tarifas",
-      trend: "+58 vs. Q1",
-      tone: "violet",
-    },
-    {
-      icon: Gauge,
-      label: "Tasa de éxito",
-      value: "95%",
-      caption: "Cargas aprobadas a la primera",
-      trend: "+3 pts vs. Q1",
-      tone: "amber",
-    },
-  ],
-  all: [
-    {
-      icon: FileCheck2,
-      label: "Contratos procesados",
-      value: "612",
-      caption: "Desde el lanzamiento",
-      trend: "8 meses activo",
-      tone: "primary",
-    },
-    {
-      icon: Clock3,
-      label: "Minutos ahorrados",
-      value: "18,940",
-      caption: "≈ 315 h · 39 días-persona",
-      trend: "ROI consolidado",
-      tone: "blue",
-    },
-    {
-      icon: Sparkles,
-      label: "Plantillas generadas",
-      value: "1,224",
-      caption: "Proveedor + Tarifas",
-      trend: "promedio 2 por contrato",
-      tone: "violet",
-    },
-    {
-      icon: Gauge,
-      label: "Tasa de éxito",
-      value: "94%",
-      caption: "Cargas aprobadas a la primera",
-      trend: "estable",
-      tone: "amber",
-    },
-  ],
-};
+  ];
+}
 
 const toneStyles: Record<
   MetricTone,
@@ -238,18 +124,6 @@ const toneStyles: Record<
     bg: "bg-sky-500/10",
     border: "border-sky-500/30",
     icon: "text-sky-300",
-    value: "text-foreground",
-  },
-  amber: {
-    bg: "bg-amber-500/10",
-    border: "border-amber-500/30",
-    icon: "text-amber-300",
-    value: "text-foreground",
-  },
-  violet: {
-    bg: "bg-violet-500/10",
-    border: "border-violet-500/30",
-    icon: "text-violet-300",
     value: "text-foreground",
   },
 };
@@ -282,7 +156,42 @@ export default function SupplierIntelligencePage() {
 function AdminMetrics() {
   const [range, setRange] = useState<RangeKey>("month");
   const active = RANGES.find((r) => r.key === range) ?? RANGES[2];
-  const metrics = METRICS_BY_RANGE[range];
+  const [stats, setStats] = useState<ContractStats | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  // Refrescamos los counters al montar y cada vez que el componente vuelve
+  // a foreground (el usuario procesa un contrato y vuelve aquí). Para el
+  // refresh-on-visibility usamos `visibilitychange` que es ~gratis.
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const { stats: next } = await api.supplierIntelligence.stats();
+        if (!cancelled) {
+          setStats(next);
+          setLoadError(null);
+        }
+      } catch (err) {
+        if (cancelled) return;
+        setLoadError(
+          err instanceof ApiError
+            ? err.message
+            : "No pudimos cargar las métricas.",
+        );
+      }
+    };
+    void load();
+    const onVis = () => {
+      if (document.visibilityState === "visible") void load();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, []);
+
+  const metrics = buildMetrics(range, stats);
 
   return (
     <section aria-label="Métricas del agente" className="space-y-3">
@@ -301,10 +210,16 @@ function AdminMetrics() {
         <RangeFilter value={range} onChange={setRange} />
       </div>
 
+      {loadError && (
+        <p className="text-[12px] text-rose-300" role="alert">
+          {loadError}
+        </p>
+      )}
+
       {/* Keyed on the range so values animate in when the filter changes */}
       <div
         key={range}
-        className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 animate-page-enter"
+        className="grid grid-cols-1 sm:grid-cols-2 gap-3 animate-page-enter"
       >
         {metrics.map((m) => (
           <MetricCard key={m.label} metric={m} />
@@ -365,11 +280,6 @@ function MetricCard({ metric }: { metric: Metric }) {
         >
           <Icon className={`w-4 h-4 ${tone.icon}`} />
         </div>
-        {metric.trend && (
-          <span className="text-[10.5px] font-medium text-primary/90 bg-primary/10 border border-primary/20 rounded px-1.5 py-0.5 whitespace-nowrap">
-            {metric.trend}
-          </span>
-        )}
       </div>
       <p
         className={`relative mt-3 text-[26px] font-bold leading-none ${tone.value}`}

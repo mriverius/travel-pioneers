@@ -514,6 +514,101 @@ export interface MatchSupplierResponse {
   data: MatchSupplierData;
 }
 
+/* --- match-service (fallback IA para codigo_servicio dentro de un proveedor) --- */
+
+export interface MatchServiceCandidate {
+  codigo: string;
+  /** Descripción libre del servicio. Puede ser null. */
+  descripcion: string | null;
+}
+
+export interface MatchServiceInput {
+  /**
+   * Contexto del contrato — texto corto que incluye tipo_servicio,
+   * nombre_comercial, tipo_unidad, comentarios del usuario, etc.
+   * El backend lo usa como prompt para que la IA elija el mejor servicio.
+   */
+  contractContext: string;
+  /** Servicios disponibles para el proveedor matcheado. Cap ~200. */
+  candidates: MatchServiceCandidate[];
+}
+
+export interface MatchServiceData {
+  /** Código del servicio elegido por la IA, o null si nada matcheó. */
+  codigo: string | null;
+  /** Misma escala que `MatchSupplierConfidence` (alta/media/baja). */
+  confidence: MatchSupplierConfidence;
+  reasoning: string;
+}
+
+export interface MatchServiceResponse {
+  success: true;
+  data: MatchServiceData;
+}
+
+/* --- contract runs (persistencia de step 3) --- */
+
+export type ContractFileKind = "pdf" | "docx" | "xlsx";
+
+/**
+ * Lo que el frontend envía a `POST /contracts` cuando un run llega a
+ * `phase = "ready"`. Mismas tres estructuras que generate-xlsx + meta.
+ */
+export interface SaveContractRunInput {
+  filename: string;
+  file_kind: ContractFileKind;
+  file_size: number;
+  ai_model: string;
+  shared_fields: ExtractedSharedFields;
+  rows: ExtractedContractRow[];
+  catalog_prefill?: GenerateXlsxCatalogPrefill | null;
+  manual_fields?: GenerateXlsxManualFields | null;
+}
+
+export interface ContractRunUserRef {
+  id: string;
+  name: string;
+  email: string;
+}
+
+export interface ContractRun {
+  id: string;
+  /** ISO timestamp. */
+  processedAt: string;
+  processedBy: ContractRunUserRef;
+  filename: string;
+  fileKind: ContractFileKind;
+  fileSize: number;
+  sharedFields: ExtractedSharedFields;
+  rows: ExtractedContractRow[];
+  catalogPrefill: GenerateXlsxCatalogPrefill | null;
+  manualFields: GenerateXlsxManualFields | null;
+  aiModel: string;
+}
+
+/**
+ * Per-range counters. Drives:
+ *   - "Contratos procesados" → `stats.contracts[range]`
+ *   - "Minutos ahorrados"    → `stats.lines[range] * MINUTES_SAVED_PER_LINE`
+ *
+ * `lines` cuenta filas xlsx (sum de `rows.length` por contrato del rango).
+ * Es mejor proxy que el conteo de contratos: un contrato con 20 filas
+ * ahorra mucho más trabajo manual que uno con 1. El multiplicador vive en
+ * el frontend para poder ajustarlo sin redeploy.
+ */
+export interface ContractStatsBuckets {
+  today: number;
+  week: number;
+  month: number;
+  quarter: number;
+  all: number;
+}
+
+export interface ContractStats {
+  contracts: ContractStatsBuckets;
+  lines: ContractStatsBuckets;
+}
+
 export const api = {
   register(payload: RegisterPayload) {
     return request<AuthResponse>("/auth/register", {
@@ -608,6 +703,22 @@ export const api = {
       );
     },
     /**
+     * Fallback IA para elegir el `codigo_servicio` de un proveedor cuando
+     * el matcher local (`findServiceForSupplier`) no resuelve por ambigüedad
+     * (el proveedor tiene >1 servicio y el hint no apunta a uno solo). Mismo
+     * tradeoff de costo que `matchSupplier` — solo llamarlo cuando ya
+     * agotamos las opciones locales.
+     */
+    matchService(input: MatchServiceInput) {
+      return request<MatchServiceResponse>(
+        "/api/supplier-intelligence/match-service",
+        {
+          method: "POST",
+          body: input,
+        },
+      );
+    },
+    /**
      * Genera y descarga el xlsx final con los datos editados de step 2.
      * Devuelve `{ blob, filename }` — el caller hace el download con
      * `URL.createObjectURL(blob)` + un `<a download>` programático.
@@ -621,6 +732,34 @@ export const api = {
         "/api/supplier-intelligence/generate-xlsx",
         { method: "POST", body: input },
         "contrato.xlsx",
+      );
+    },
+    /**
+     * Persiste un run completo después de que generateXlsx devolvió OK.
+     * Fire-and-forget desde el caller — un fallo aquí no debe bloquear la
+     * descarga del usuario.
+     */
+    saveRun(input: SaveContractRunInput) {
+      return request<{ run: ContractRun }>(
+        "/api/supplier-intelligence/contracts",
+        {
+          method: "POST",
+          body: input,
+          auth: true,
+        },
+      );
+    },
+    listRuns(limit?: number) {
+      const qs = limit ? `?limit=${encodeURIComponent(String(limit))}` : "";
+      return request<{ runs: ContractRun[] }>(
+        `/api/supplier-intelligence/contracts${qs}`,
+        { method: "GET", auth: true },
+      );
+    },
+    stats() {
+      return request<{ stats: ContractStats }>(
+        "/api/supplier-intelligence/contracts/stats",
+        { method: "GET", auth: true },
       );
     },
   },

@@ -44,7 +44,7 @@ import {
 } from "@/lib/api";
 import {
   findSupplierByNameWithAI,
-  findServiceForSupplier,
+  findServiceForSupplierWithAI,
   type SupplierMatch,
 } from "@/lib/supplierLookup";
 import {
@@ -285,21 +285,76 @@ export function SupplierWorkflow() {
             });
           }
           if (match) {
-            const serviceHint =
-              comments?.trim() || selectedFile.name || "";
-            const service = findServiceForSupplier(match.supplier, serviceHint);
+            // Construimos un contexto rico para el matcher de servicios.
+            // CRÍTICO: `product_name`, `categoria` y `meals_included` son
+            // ROW-level (no shared), pero son la señal más fuerte para elegir
+            // entre servicios del mismo proveedor (ej: PARADOR tiene
+            // GARDENEU vs GARDENUS vs VISTASEU vs MASUITEU — sin
+            // "Garden"/"Vista Suites"/"Master Suites" la IA tiene que
+            // adivinar entre 50+ códigos).
+            //
+            // `tipo_moneda` se incluye como proxy de mercado:
+            // USD/CAD → US & CA, EUR → Europe, CRC → mercado local.
+            const shared = response.data.shared_fields;
+            const rows = response.data.rows ?? [];
+            // Dedupe + cap para no inflar tokens si el contrato tiene 50
+            // filas con product_names únicos.
+            const dedupe = (xs: Array<string | null>, cap: number): string[] =>
+              Array.from(
+                new Set(xs.filter((s): s is string => !!s && s.trim() !== "")),
+              ).slice(0, cap);
+            const productNames = dedupe(rows.map((r) => r.product_name), 8);
+            const categorias = dedupe(rows.map((r) => r.categoria), 6);
+            const meals = dedupe(rows.map((r) => r.meals_included), 4);
+
+            const hintParts = [
+              shared.tipo_servicio
+                ? `Tipo servicio: ${shared.tipo_servicio}`
+                : null,
+              shared.tipo_unidad
+                ? `Tipo unidad: ${shared.tipo_unidad}`
+                : null,
+              shared.nombre_comercial
+                ? `Proveedor: ${shared.nombre_comercial}`
+                : null,
+              productNames.length > 0
+                ? `Productos: ${productNames.join(", ")}`
+                : null,
+              categorias.length > 0
+                ? `Categorías: ${categorias.join(", ")}`
+                : null,
+              meals.length > 0 ? `Meals: ${meals.join(", ")}` : null,
+              shared.tipo_moneda ? `Moneda: ${shared.tipo_moneda}` : null,
+              shared.pais ? `País proveedor: ${shared.pais}` : null,
+              comments?.trim() ? `Notas: ${comments.trim()}` : null,
+              selectedFile.name ? `Archivo: ${selectedFile.name}` : null,
+            ].filter((s): s is string => s !== null);
+            const serviceHint = hintParts.join(" · ");
+
+            // Fallback IA si el proveedor tiene varios servicios y el matcher
+            // local no resuelve. La llamada es fire-and-await: si falla
+            // (red, backend caído, rate limit) el hook devuelve null y el
+            // campo queda vacío — el usuario lo llena en step 2.
+            setMatchingPhase("ai");
+            const serviceMatch = await findServiceForSupplierWithAI(
+              match.supplier,
+              serviceHint,
+              { enableAIFallback: true },
+            );
+            setMatchingPhase(null);
+
             prefill = {
               tipo_actividad: match.supplier.actividad,
               zona_turismo: match.supplier.zona,
               proveedor_codigo: match.supplier.codigo,
-              codigo_servicio: service?.codigo ?? null,
+              codigo_servicio: serviceMatch?.service.codigo ?? null,
             };
             matchInfo = {
               status: "matched",
               supplierName: match.supplier.nombre ?? match.supplier.codigo,
               supplierCode: match.supplier.codigo,
               matchedBy: match.matchedBy,
-              serviceMatched: service !== null,
+              serviceMatched: serviceMatch !== null,
               aiConfidence: match.aiConfidence,
               aiReasoning: match.aiReasoning,
             };
@@ -911,12 +966,23 @@ interface ColumnDef {
   excelCol: string;
   key: string;
   label: string;
-  shortLabel?: string;
   scope: ColumnScope;
   inputType?: "text" | "date" | "email" | "number";
   multiline?: boolean;
   minWidth: number;
   placeholder?: string;
+  /**
+   * Marca la columna como monetaria. El render read-only antepone el código
+   * de moneda del contrato (`sharedFields.tipo_moneda` — ej. "USD", "CRC",
+   * "CAD") al valor; si `tipo_moneda` está vacío, no mostramos prefijo para
+   * no inventar una moneda incorrecta (un proveedor de Costa Rica facturando
+   * en colones no debería ver "$ 295" por defecto).
+   *
+   * El valor almacenado y el editor permanecen como número plano — el código
+   * de moneda vive solo en el render para no contaminar el payload del
+   * backend ni la lógica de comparación de strings.
+   */
+  currency?: true;
   options?: (ctx: {
     tipoServicio: string | null;
   }) => ReadonlyArray<SelectOption>;
@@ -928,62 +994,98 @@ const TIPO_UNIDAD_OPTIONS: ReadonlyArray<SelectOption> = [
 ];
 
 /**
+ * Formatea una fecha ISO (`yyyy-mm-dd`) al formato US `mm/dd/yyyy` que el
+ * negocio prefiere ver en la grilla. Si el valor no calza con ISO (por
+ * ejemplo porque la IA extrajo "31/12/2026" tal cual), lo devolvemos sin
+ * tocar — preferimos mostrar algo legible a "Invalid Date".
+ */
+function formatDateDisplay(value: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  return m ? `${m[2]}/${m[3]}/${m[1]}` : value;
+}
+
+/**
+ * Devuelve el valor formateado para mostrar en la celda read-only:
+ *   - Fechas ISO → mm/dd/yyyy
+ *   - Columnas con `currency` → "<código> <valor>" (ej. "USD 295", "CRC 150000").
+ *     `tipoMoneda` viene del contrato. Si está vacío, NO mostramos prefijo —
+ *     preferimos un valor sin prefijo a inventar una moneda. Si el valor ya
+ *     empieza con el código (porque la IA lo extrajo literal, ej. "USD 295"),
+ *     no lo duplicamos.
+ */
+function formatCellDisplay(
+  col: ColumnDef,
+  value: string,
+  tipoMoneda: string | null,
+): string {
+  const formatted = col.inputType === "date" ? formatDateDisplay(value) : value;
+  if (col.currency) {
+    const code = tipoMoneda?.trim();
+    if (!code) return formatted;
+    const trimmed = formatted.trimStart();
+    if (trimmed.toUpperCase().startsWith(code.toUpperCase())) return formatted;
+    return `${code} ${formatted}`;
+  }
+  return formatted;
+}
+
+/**
  * Las 52 columnas A..AZ de la plantilla xlsx en orden. Fuente de verdad para
  * el render de la tabla y para construir el payload del backend.
  */
 const ALL_COLUMNS: ColumnDef[] = [
-  { excelCol: "A",  key: "tipo_actividad",    label: "Tipo Actividad",     shortLabel: "Tipo Act.",    scope: { kind: "shared", source: "catalog" }, minWidth: 130, placeholder: "Ej: Hospedaje" },
-  { excelCol: "B",  key: "zona_turismo",      label: "Zona Turismo",       shortLabel: "Zona",         scope: { kind: "shared", source: "catalog" }, minWidth: 140, placeholder: "Ej: Pacífico Central" },
-  { excelCol: "C",  key: "proveedor_codigo",  label: "Proveedor (código)", shortLabel: "Proveedor",    scope: { kind: "shared", source: "catalog" }, minWidth: 130, placeholder: "Ej: PARADOR" },
-  { excelCol: "D",  key: "proveedor",         label: "Razón Social",       shortLabel: "Razón Social", scope: { kind: "shared", source: "ai" },      minWidth: 200, placeholder: "Ej: ACME S.A." },
-  { excelCol: "E",  key: "cedula",            label: "Cédula Jurídica",    shortLabel: "Cédula",       scope: { kind: "shared", source: "ai" },      minWidth: 140, placeholder: "3-101-123456" },
-  { excelCol: "F",  key: "fecha",             label: "Contract Date",      shortLabel: "Fecha",        scope: { kind: "shared", source: "ai" },      minWidth: 130, inputType: "date" },
-  { excelCol: "G",  key: "nombre_comercial",  label: "Nombre Comercial",   shortLabel: "Nombre Com.",  scope: { kind: "shared", source: "ai" },      minWidth: 180, placeholder: "Ej: ACME" },
-  { excelCol: "H",  key: "pais",              label: "País",               shortLabel: "País",         scope: { kind: "shared", source: "ai" },      minWidth: 110, placeholder: "Costa Rica" },
-  { excelCol: "I",  key: "state_province",    label: "State / Province",   shortLabel: "Provincia",    scope: { kind: "shared", source: "ai" },      minWidth: 130, placeholder: "Puntarenas" },
-  { excelCol: "J",  key: "direccion",         label: "Location",           shortLabel: "Dirección",    scope: { kind: "shared", source: "ai" },      minWidth: 240, placeholder: "Calle, ciudad…", multiline: true },
-  { excelCol: "K",  key: "type_of_business",  label: "Type of Business",   shortLabel: "Type Bus.",    scope: { kind: "shared", source: "ai" },      minWidth: 150, placeholder: "Ej: Hotel" },
-  { excelCol: "L",  key: "contract_starts",   label: "Contract Starts",    shortLabel: "Vigencia In.", scope: { kind: "shared", source: "ai" },      minWidth: 140, inputType: "date" },
-  { excelCol: "M",  key: "contract_ends",     label: "Contract Ends",      shortLabel: "Vigencia Fin", scope: { kind: "shared", source: "ai" },      minWidth: 140, inputType: "date" },
-  { excelCol: "N",  key: "codigo_servicio",   label: "Cod. Servicio",      shortLabel: "Cod. Serv.",   scope: { kind: "shared", source: "catalog" }, minWidth: 130, placeholder: "Ej: PARADOR-HO" },
-  { excelCol: "O",  key: "product_name",      label: "Product Name",       shortLabel: "Producto",     scope: { kind: "row" },                       minWidth: 170, placeholder: "Garden, Suites…" },
-  { excelCol: "P",  key: "tipo_unidad",       label: "Tipo Unidad",        shortLabel: "Tipo Unid.",   scope: { kind: "shared", source: "ai" },      minWidth: 130, options: () => TIPO_UNIDAD_OPTIONS },
-  { excelCol: "Q",  key: "tipo_servicio",     label: "Tipo Servicio",      shortLabel: "Tipo Serv.",   scope: { kind: "shared", source: "ai" },      minWidth: 140, options: () => TIPOS_SERVICIO },
-  { excelCol: "R",  key: "categoria",         label: "Categoría",          shortLabel: "Categ.",       scope: { kind: "row" },                       minWidth: 140, options: ({ tipoServicio }) => tipoServicio ? (CATEGORIAS_BY_TIPO_SERVICIO[tipoServicio] ?? []) : [] },
-  { excelCol: "S",  key: "ocupacion",         label: "Ocupación",          shortLabel: "Ocup.",        scope: { kind: "row" },                       minWidth: 100, placeholder: "DBL, SGL…" },
-  { excelCol: "T",  key: "season_name",       label: "Season Name",        shortLabel: "Temporada",    scope: { kind: "row" },                       minWidth: 120, placeholder: "ALTA, BAJA…" },
-  { excelCol: "U",  key: "season_starts",     label: "Season Starts",      shortLabel: "Temp. In.",    scope: { kind: "row" },                       minWidth: 140, inputType: "date" },
-  { excelCol: "V",  key: "season_ends",       label: "Season Ends",        shortLabel: "Temp. Fin",    scope: { kind: "row" },                       minWidth: 140, inputType: "date" },
-  { excelCol: "W",  key: "meals_included",    label: "Meals Included",     shortLabel: "Meals",        scope: { kind: "row" },                       minWidth: 140, placeholder: "BREAKFAST…" },
-  { excelCol: "X",  key: "tipo_tarifa_neta",  label: "Tipo Tarifa Neta",   shortLabel: "T.Tar Neta",   scope: { kind: "shared", source: "manual" },  minWidth: 140, placeholder: "Ej: Por persona" },
-  { excelCol: "Y",  key: "precios_neto_iva",  label: "Precios Neto c/IVA", shortLabel: "Neto c/IVA",   scope: { kind: "row" },                       minWidth: 110, placeholder: "295" },
-  { excelCol: "Z",  key: "precio_rack_iva",   label: "Precio Rack c/IVA",  shortLabel: "Rack c/IVA",   scope: { kind: "row" },                       minWidth: 110, placeholder: "295" },
-  { excelCol: "AA", key: "tipo_tarifa_mayorista",     label: "Tipo Tarifa Mayorista",     shortLabel: "T.Mayor.",       scope: { kind: "shared", source: "manual" }, minWidth: 150, placeholder: "Ej: Wholesale" },
-  { excelCol: "AB", key: "porcentaje_comision",       label: "% Comisión",                shortLabel: "%Com",           scope: { kind: "row" },                      minWidth: 90,  placeholder: "0 / 25" },
-  { excelCol: "AC", key: "tipo_tarifa_fds",           label: "Tipo Tarifa Fin Semana",    shortLabel: "T.Tarifa FdS",   scope: { kind: "shared", source: "manual" }, minWidth: 150, placeholder: "Ej: Weekend" },
-  { excelCol: "AD", key: "t_tar_neta_fds",            label: "T.Tar Neta Fin Semana",     shortLabel: "T.Neta FdS",     scope: { kind: "shared", source: "manual" }, minWidth: 150 },
-  { excelCol: "AE", key: "precios_neto_iva_fds",      label: "Precios Neto FdS",          shortLabel: "Neto FdS",       scope: { kind: "row" },                      minWidth: 110, placeholder: "295" },
-  { excelCol: "AF", key: "precio_rack_iva_fds",       label: "Precio Rack FdS",           shortLabel: "Rack FdS",       scope: { kind: "row" },                      minWidth: 110, placeholder: "295" },
-  { excelCol: "AG", key: "tipo_tarifa_mayorista_fds", label: "Tipo Tarifa Mayor. FdS",    shortLabel: "T.Mayor FdS",    scope: { kind: "shared", source: "manual" }, minWidth: 150 },
-  { excelCol: "AH", key: "porcentaje_comision_fds",   label: "% Comisión FdS",            shortLabel: "%Com FdS",       scope: { kind: "row" },                      minWidth: 100, placeholder: "0 / 25" },
-  { excelCol: "AI", key: "cancellation_policy",       label: "Cancelation Policy",        shortLabel: "Cancelación",    scope: { kind: "row" },                      minWidth: 280, multiline: true },
-  { excelCol: "AJ", key: "range_payment_policy",      label: "Range Payment Policy",      shortLabel: "Pago",           scope: { kind: "row" },                      minWidth: 220, multiline: true },
-  { excelCol: "AK", key: "others_payment_cancel",     label: "Others in Payment / Cancel",shortLabel: "Others P/C",     scope: { kind: "shared", source: "manual" }, minWidth: 180, multiline: true },
-  { excelCol: "AL", key: "kids_policy",               label: "Kids Policy",               shortLabel: "Niños",          scope: { kind: "row" },                      minWidth: 220, multiline: true },
-  { excelCol: "AM", key: "other_included",            label: "Other Included",            shortLabel: "Other Incl.",    scope: { kind: "row" },                      minWidth: 200, multiline: true },
-  { excelCol: "AN", key: "feeds_adicionales",         label: "Fees Adicionales",          shortLabel: "Fees",           scope: { kind: "row" },                      minWidth: 180, multiline: true },
-  { excelCol: "AO", key: "reservations_email",        label: "Reservations Email",        shortLabel: "Email Res.",     scope: { kind: "shared", source: "ai" },     minWidth: 200, inputType: "email" },
-  { excelCol: "AP", key: "cond_credito",              label: "Condiciones Crédito",       shortLabel: "Cond. Créd.",    scope: { kind: "shared", source: "manual" }, minWidth: 150, placeholder: "30 días neto" },
-  { excelCol: "AQ", key: "plazo",                     label: "Plazo",                     shortLabel: "Plazo",          scope: { kind: "shared", source: "manual" }, minWidth: 120, placeholder: "30 días" },
-  { excelCol: "AR", key: "numero_cuenta",             label: "Cuenta Bancaria 1",         shortLabel: "Cuenta 1",       scope: { kind: "shared", source: "ai" },     minWidth: 200, placeholder: "IBAN preferido" },
-  { excelCol: "AS", key: "banco",                     label: "Banco 1",                   shortLabel: "Banco 1",        scope: { kind: "shared", source: "ai" },     minWidth: 150, placeholder: "Ej: BAC" },
-  { excelCol: "AT", key: "tipo_moneda",               label: "Moneda 1",                  shortLabel: "Moneda 1",       scope: { kind: "shared", source: "ai" },     minWidth: 100, placeholder: "USD" },
-  { excelCol: "AU", key: "cuenta_bancaria_2",         label: "Cuenta Bancaria 2",         shortLabel: "Cuenta 2",       scope: { kind: "shared", source: "manual" }, minWidth: 200 },
-  { excelCol: "AV", key: "banco_2",                   label: "Banco 2",                   shortLabel: "Banco 2",        scope: { kind: "shared", source: "manual" }, minWidth: 150 },
-  { excelCol: "AW", key: "moneda_2",                  label: "Moneda 2",                  shortLabel: "Moneda 2",       scope: { kind: "shared", source: "manual" }, minWidth: 100 },
-  { excelCol: "AX", key: "cuenta_bancaria_3",         label: "Cuenta Bancaria 3",         shortLabel: "Cuenta 3",       scope: { kind: "shared", source: "manual" }, minWidth: 200 },
-  { excelCol: "AY", key: "banco_3",                   label: "Banco 3",                   shortLabel: "Banco 3",        scope: { kind: "shared", source: "manual" }, minWidth: 150 },
-  { excelCol: "AZ", key: "moneda_3",                  label: "Moneda 3",                  shortLabel: "Moneda 3",       scope: { kind: "shared", source: "manual" }, minWidth: 100 },
+  { excelCol: "A",  key: "tipo_actividad",    label: "Tipo Actividad",     scope: { kind: "shared", source: "catalog" }, minWidth: 130, placeholder: "Ej: Hospedaje" },
+  { excelCol: "B",  key: "zona_turismo",      label: "Zona Turismo",       scope: { kind: "shared", source: "catalog" }, minWidth: 140, placeholder: "Ej: Pacífico Central" },
+  { excelCol: "C",  key: "proveedor_codigo",  label: "Proveedor (código)", scope: { kind: "shared", source: "catalog" }, minWidth: 130, placeholder: "Ej: PARADOR" },
+  { excelCol: "D",  key: "proveedor",         label: "Razón Social",       scope: { kind: "shared", source: "ai" },      minWidth: 200, placeholder: "Ej: ACME S.A." },
+  { excelCol: "E",  key: "cedula",            label: "Cédula Jurídica",    scope: { kind: "shared", source: "ai" },      minWidth: 140, placeholder: "3-101-123456" },
+  { excelCol: "F",  key: "fecha",             label: "Contract Date",      scope: { kind: "shared", source: "ai" },      minWidth: 130, inputType: "date" },
+  { excelCol: "G",  key: "nombre_comercial",  label: "Nombre Comercial",   scope: { kind: "shared", source: "ai" },      minWidth: 180, placeholder: "Ej: ACME" },
+  { excelCol: "H",  key: "pais",              label: "País",               scope: { kind: "shared", source: "ai" },      minWidth: 110, placeholder: "Costa Rica" },
+  { excelCol: "I",  key: "state_province",    label: "State / Province",   scope: { kind: "shared", source: "ai" },      minWidth: 130, placeholder: "Puntarenas" },
+  { excelCol: "J",  key: "direccion",         label: "Location",           scope: { kind: "shared", source: "ai" },      minWidth: 240, placeholder: "Calle, ciudad…", multiline: true },
+  { excelCol: "K",  key: "type_of_business",  label: "Type of Business",   scope: { kind: "shared", source: "ai" },      minWidth: 150, placeholder: "Ej: Hotel" },
+  { excelCol: "L",  key: "contract_starts",   label: "Contract Starts",    scope: { kind: "shared", source: "ai" },      minWidth: 140, inputType: "date" },
+  { excelCol: "M",  key: "contract_ends",     label: "Contract Ends",      scope: { kind: "shared", source: "ai" },      minWidth: 140, inputType: "date" },
+  { excelCol: "N",  key: "codigo_servicio",   label: "Cod. Servicio",      scope: { kind: "shared", source: "catalog" }, minWidth: 130, placeholder: "Ej: PARADOR-HO" },
+  { excelCol: "O",  key: "product_name",      label: "Product Name",       scope: { kind: "row" },                       minWidth: 170, placeholder: "Garden, Suites…" },
+  { excelCol: "P",  key: "tipo_unidad",       label: "Tipo Unidad",        scope: { kind: "shared", source: "ai" },      minWidth: 130, options: () => TIPO_UNIDAD_OPTIONS },
+  { excelCol: "Q",  key: "tipo_servicio",     label: "Tipo Servicio",      scope: { kind: "shared", source: "ai" },      minWidth: 140, options: () => TIPOS_SERVICIO },
+  { excelCol: "R",  key: "categoria",         label: "Categoría",          scope: { kind: "row" },                       minWidth: 140, options: ({ tipoServicio }) => tipoServicio ? (CATEGORIAS_BY_TIPO_SERVICIO[tipoServicio] ?? []) : [] },
+  { excelCol: "S",  key: "ocupacion",         label: "Ocupación",          scope: { kind: "row" },                       minWidth: 100, placeholder: "DBL, SGL…" },
+  { excelCol: "T",  key: "season_name",       label: "Season Name",        scope: { kind: "row" },                       minWidth: 120, placeholder: "ALTA, BAJA…" },
+  { excelCol: "U",  key: "season_starts",     label: "Season Starts",      scope: { kind: "row" },                       minWidth: 140, inputType: "date" },
+  { excelCol: "V",  key: "season_ends",       label: "Season Ends",        scope: { kind: "row" },                       minWidth: 140, inputType: "date" },
+  { excelCol: "W",  key: "meals_included",    label: "Meals Included",     scope: { kind: "row" },                       minWidth: 140, placeholder: "BREAKFAST…" },
+  { excelCol: "X",  key: "tipo_tarifa_neta",  label: "Tipo Tarifa Neta",   scope: { kind: "shared", source: "manual" },  minWidth: 140, placeholder: "Ej: Por persona" },
+  { excelCol: "Y",  key: "precios_neto_iva",  label: "Precios Neto c/IVA", scope: { kind: "row" },                       minWidth: 110, placeholder: "295", currency: true },
+  { excelCol: "Z",  key: "precio_rack_iva",   label: "Precio Rack c/IVA",  scope: { kind: "row" },                       minWidth: 110, placeholder: "295", currency: true },
+  { excelCol: "AA", key: "tipo_tarifa_mayorista",     label: "Tipo Tarifa Mayorista",     scope: { kind: "shared", source: "manual" }, minWidth: 150, placeholder: "Ej: Wholesale" },
+  { excelCol: "AB", key: "porcentaje_comision",       label: "% Comisión",                scope: { kind: "row" },                      minWidth: 90,  placeholder: "0 / 25" },
+  { excelCol: "AC", key: "tipo_tarifa_fds",           label: "Tipo Tarifa Fin Semana",    scope: { kind: "shared", source: "manual" }, minWidth: 150, placeholder: "Ej: Weekend" },
+  { excelCol: "AD", key: "t_tar_neta_fds",            label: "T.Tar Neta Fin Semana",     scope: { kind: "shared", source: "manual" }, minWidth: 150 },
+  { excelCol: "AE", key: "precios_neto_iva_fds",      label: "Precios Neto FdS",          scope: { kind: "row" },                      minWidth: 110, placeholder: "295", currency: true },
+  { excelCol: "AF", key: "precio_rack_iva_fds",       label: "Precio Rack FdS",           scope: { kind: "row" },                      minWidth: 110, placeholder: "295", currency: true },
+  { excelCol: "AG", key: "tipo_tarifa_mayorista_fds", label: "Tipo Tarifa Mayor. FdS",    scope: { kind: "shared", source: "manual" }, minWidth: 150 },
+  { excelCol: "AH", key: "porcentaje_comision_fds",   label: "% Comisión FdS",            scope: { kind: "row" },                      minWidth: 100, placeholder: "0 / 25" },
+  { excelCol: "AI", key: "cancellation_policy",       label: "Cancelation Policy",        scope: { kind: "row" },                      minWidth: 280, multiline: true },
+  { excelCol: "AJ", key: "range_payment_policy",      label: "Range Payment Policy",      scope: { kind: "row" },                      minWidth: 220, multiline: true },
+  { excelCol: "AK", key: "others_payment_cancel",     label: "Others in Payment / Cancel",scope: { kind: "shared", source: "manual" }, minWidth: 180, multiline: true },
+  { excelCol: "AL", key: "kids_policy",               label: "Kids Policy",               scope: { kind: "row" },                      minWidth: 220, multiline: true },
+  { excelCol: "AM", key: "other_included",            label: "Other Included",            scope: { kind: "row" },                      minWidth: 200, multiline: true },
+  { excelCol: "AN", key: "feeds_adicionales",         label: "Fees Adicionales",          scope: { kind: "row" },                      minWidth: 180, multiline: true },
+  { excelCol: "AO", key: "reservations_email",        label: "Reservations Email",        scope: { kind: "shared", source: "ai" },     minWidth: 200, inputType: "email" },
+  { excelCol: "AP", key: "cond_credito",              label: "Condiciones Crédito",       scope: { kind: "shared", source: "manual" }, minWidth: 150, placeholder: "30 días neto" },
+  { excelCol: "AQ", key: "plazo",                     label: "Plazo",                     scope: { kind: "shared", source: "manual" }, minWidth: 120, placeholder: "30 días" },
+  { excelCol: "AR", key: "numero_cuenta",             label: "Cuenta Bancaria 1",         scope: { kind: "shared", source: "ai" },     minWidth: 200, placeholder: "IBAN preferido" },
+  { excelCol: "AS", key: "banco",                     label: "Banco 1",                   scope: { kind: "shared", source: "ai" },     minWidth: 150, placeholder: "Ej: BAC" },
+  { excelCol: "AT", key: "tipo_moneda",               label: "Moneda 1",                  scope: { kind: "shared", source: "ai" },     minWidth: 100, placeholder: "USD" },
+  { excelCol: "AU", key: "cuenta_bancaria_2",         label: "Cuenta Bancaria 2",         scope: { kind: "shared", source: "manual" }, minWidth: 200 },
+  { excelCol: "AV", key: "banco_2",                   label: "Banco 2",                   scope: { kind: "shared", source: "manual" }, minWidth: 150 },
+  { excelCol: "AW", key: "moneda_2",                  label: "Moneda 2",                  scope: { kind: "shared", source: "manual" }, minWidth: 100 },
+  { excelCol: "AX", key: "cuenta_bancaria_3",         label: "Cuenta Bancaria 3",         scope: { kind: "shared", source: "manual" }, minWidth: 200 },
+  { excelCol: "AY", key: "banco_3",                   label: "Banco 3",                   scope: { kind: "shared", source: "manual" }, minWidth: 150 },
+  { excelCol: "AZ", key: "moneda_3",                  label: "Moneda 3",                  scope: { kind: "shared", source: "manual" }, minWidth: 100 },
 ];
 
 /** Keys del backend ExtractedSharedFields que tienen columna en el xlsx
@@ -1015,6 +1117,11 @@ const COLS_NEEDING_REVIEW = new Set<string>([
   "tipo_actividad",
   "zona_turismo",
   "proveedor_codigo",
+  // codigo_servicio se rellena con el matcher local + fallback IA
+  // (findServiceForSupplierWithAI). Igual que los otros 3 campos del
+  // catálogo, siempre puede estar incorrecto si el proveedor tiene varios
+  // servicios — el warning sign le recuerda al usuario que verifique.
+  "codigo_servicio",
 ]);
 
 /* ============================================================================
@@ -1444,7 +1551,7 @@ function FullTable({
                     }`}
                   >
                     <span className="text-[10.5px] uppercase tracking-wider text-foreground/90">
-                      {col.shortLabel ?? col.label}
+                      {col.label}
                     </span>
                   </th>
                 );
@@ -1500,6 +1607,7 @@ function FullTable({
                         source={source}
                         filename={filename}
                         isMarkedMissing={isMarkedMissing}
+                        tipoMoneda={sharedValues.tipo_moneda}
                         onSave={(v) => {
                           if (isShared) {
                             onSharedChange(col.key as SharedKey, v);
@@ -1551,6 +1659,7 @@ function CellEditor({
   source,
   filename,
   isMarkedMissing,
+  tipoMoneda,
   onSave,
 }: {
   col: ColumnDef;
@@ -1559,6 +1668,12 @@ function CellEditor({
   source: ExtractionSourcePage | undefined;
   filename: string;
   isMarkedMissing: boolean;
+  /**
+   * Código de moneda del contrato (`sharedFields.tipo_moneda`). Solo lo
+   * usamos cuando `col.currency` está activo — vive a nivel de contrato,
+   * no de fila, así que se prefija a *todas* las columnas monetarias.
+   */
+  tipoMoneda: string | null;
   onSave: (v: string | null) => void;
 }) {
   const isSelect = !!options;
@@ -1662,12 +1777,18 @@ function CellEditor({
   }
 
   const missing = value === null || value === "";
+  // Aplicamos formato solo cuando hay valor: las fechas ISO se reformatean
+  // a mm/dd/yyyy y las columnas con `currency` muestran el código de moneda
+  // del contrato (ej. "USD 295", "CRC 150000"). El aria-label usa el valor
+  // formateado para que un lector de pantalla dicte la misma cifra que ve
+  // el usuario.
+  const displayValue = missing ? "" : formatCellDisplay(col, value, tipoMoneda);
   return (
     <button
       type="button"
       onClick={startEdit}
       title={tooltip}
-      aria-label={`${col.label} — ${missing ? "vacío" : value}. Clic para editar.`}
+      aria-label={`${col.label} — ${missing ? "vacío" : displayValue}. Clic para editar.`}
       className={`w-full min-h-[1.75rem] text-left rounded border border-transparent px-1.5 py-1 text-[12px] leading-snug transition-colors hover:border-border hover:bg-secondary/30 focus:outline-none focus:border-primary/60 focus:bg-secondary/40 ${
         missing
           ? "text-muted-foreground/50 italic"
@@ -1678,7 +1799,7 @@ function CellEditor({
         ? isMarkedMissing
           ? "no encontrado"
           : "—"
-        : value}
+        : displayValue}
     </button>
   );
 }
@@ -1714,10 +1835,16 @@ function DownloadStep({
   const startedRef = useRef(false);
 
   useEffect(() => {
+    // `startedRef` ya garantiza una sola llamada al backend incluso bajo
+    // StrictMode (que monta-desmonta-monta el componente). No usamos un flag
+    // `cancelled` capturado en el closure porque, al combinarse con el
+    // early-return de `startedRef`, dejaba la promesa original cancelada
+    // permanentemente: el cleanup del primer mount ponía `cancelled = true`
+    // y el segundo mount no relanzaba la fetch — resultado: phase se quedaba
+    // en "generating" para siempre y el botón de descarga no aparecía.
     if (startedRef.current) return;
     startedRef.current = true;
 
-    let cancelled = false;
     (async () => {
       try {
         const { blob, filename } = await api.supplierIntelligence.generateXlsx({
@@ -1726,7 +1853,6 @@ function DownloadStep({
           catalog_prefill: payload.catalogPrefill,
           manual_fields: payload.manualFields,
         });
-        if (cancelled) return;
 
         const objectUrl = URL.createObjectURL(blob);
 
@@ -1747,8 +1873,31 @@ function DownloadStep({
 
         setReady({ objectUrl, filename, sizeBytes: blob.size });
         setPhase("ready");
+
+        // Fire-and-forget: persistimos el run para Historial + métricas.
+        // Un fallo aquí NO debe bloquear al usuario — ya tiene el xlsx
+        // descargado. Si el guardado falla, se pierde solo la entrada
+        // de Historial (el usuario puede re-procesar el contrato).
+        const fileKind = inferKind("", meta.filename);
+        if (fileKind) {
+          void api.supplierIntelligence
+            .saveRun({
+              filename: meta.filename,
+              file_kind: fileKind,
+              file_size: meta.size_bytes,
+              ai_model: meta.model,
+              shared_fields: payload.sharedFields,
+              rows: payload.rows,
+              catalog_prefill: payload.catalogPrefill,
+              manual_fields: payload.manualFields,
+            })
+            .catch((err) => {
+              // Logueamos a console para que sea visible en dev / Sentry,
+              // pero no afectamos la UX. Tracking real cuando exista.
+              console.warn("saveRun failed (non-blocking):", err);
+            });
+        }
       } catch (err) {
-        if (cancelled) return;
         if (err instanceof ApiError) {
           setErrorMsg(err.message);
         } else {
@@ -1759,11 +1908,7 @@ function DownloadStep({
         setPhase("error");
       }
     })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [payload]);
+  }, [payload, meta]);
 
   // Revoca el blob URL al desmontar el componente (ej. cuando el usuario
   // hace clic en "Procesar otro contrato"). Hasta entonces lo mantenemos

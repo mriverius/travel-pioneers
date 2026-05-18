@@ -1,12 +1,13 @@
 "use client";
 
 import {
-  Check,
+  AlertCircle,
   CheckCircle2,
   Clock,
   Eye,
   FileSpreadsheet,
   FileText,
+  Loader2,
   Search,
   X,
   type LucideIcon,
@@ -19,6 +20,16 @@ import {
   type SectionDef,
 } from "./historyTypes";
 import { type FileKind } from "./workflow";
+import {
+  api,
+  ApiError,
+  type ContractRun,
+  type ContractFileKind,
+  type ExtractedContractRow,
+  type ExtractedSharedFields,
+  type GenerateXlsxCatalogPrefill,
+  type GenerateXlsxManualFields,
+} from "@/lib/api";
 
 /* ---------------------------------- Types --------------------------------- */
 
@@ -27,8 +38,10 @@ import { type FileKind } from "./workflow";
  * schema as Step 2 so the detail modal can render exactly the same field
  * structure without conversion.
  *
- * Today this is fed by a mock generator below — the real source will be a
- * `GET /api/supplier-intelligence/history` endpoint when it lands.
+ * Fed by `GET /api/supplier-intelligence/contracts` via `useContractRuns`
+ * (see below). The flattening from `{shared_fields, rows, catalog, manual}`
+ * into a single `Partial<Record<DisplayFieldKey, string>>` happens here so
+ * the detail modal stays identical to Step 2's read-only sections.
  */
 export interface HistoryEntry {
   id: string;
@@ -36,8 +49,6 @@ export interface HistoryEntry {
   fileKind: FileKind;
   /** ISO timestamp of when the contract finished processing. */
   processedAt: string;
-  /** Whether the user already approved the entry into the cloud xlsx. */
-  syncedToMaestro: boolean;
   /**
    * Sparse value map keyed by display field. Anything missing is treated as
    * `null` ("vacío") in the detail modal — same convention as Step 2.
@@ -48,346 +59,160 @@ export interface HistoryEntry {
 /* ---------------------------------- Data ---------------------------------- */
 
 /**
- * Fake history seed. `processedAt` is computed at mount time as an offset
- * from `Date.now()` (see `useFakeHistory`) so the relative-time labels stay
- * correct regardless of when the page is opened.
+ * Convierte un `ContractRun` del backend al schema plano que usa el modal
+ * de detalle (heredado de Step 2). Los campos por-fila vienen del primer
+ * row — un contrato típico tiene N filas (product × season) y la UI actual
+ * solo muestra la primera como representativa. Si más adelante añadimos un
+ * selector de fila en el modal, aquí mapearíamos una fila distinta.
+ *
+ * Convención de nombres: `proveedor` en `DisplayFieldKey` representa el
+ * **código del catálogo** (ej. "TORTUGA-001"), no la razón social. La
+ * razón social vive en `razon_social` (que mapea a `sharedFields.proveedor`,
+ * el nombre que la IA extrae). Esta asimetría existe porque el xlsx maestro
+ * separa "código de proveedor" (col C) de "razón social" (col D).
  */
-const FAKE_HISTORY_SEED: (Omit<HistoryEntry, "processedAt"> & {
-  /** Minutes ago, used to compute `processedAt` against `Date.now()`. */
-  minutesAgo: number;
-})[] = [
-  {
-    id: "h-001",
-    filename: "contrato_tortuga_lodge_2026.pdf",
-    fileKind: "pdf",
-    minutesAgo: 23,
-    syncedToMaestro: true,
-    values: {
-      tipo_actividad: "Hospedaje",
-      zona_turismo: "Caribe Norte",
-      proveedor: "TORTUGA-001",
-      razon_social: "Hotel Tortuga Lodge S.A.",
-      cedula_juridica: "3-101-022456",
-      contract_date: "2026-01-15",
-      nombre_comercial: "Tortuga Lodge & Gardens",
-      pais: "Costa Rica",
-      state_province: "Limón",
-      location: "Tortuguero, sector Pacuare, frente al canal principal",
-      type_of_business: "Eco Lodge · Hotel boutique",
-      contract_starts: "2026-02-01",
-      contract_ends: "2027-01-31",
-      codigo_servicio: "TORT-HAB-STD",
-      product_name: "Habitación Standard Vista Canal",
-      tipo_unidad: "Habitación · 2 personas",
-      tipo_servicio: "Alojamiento con desayuno",
-      categoria: "4 estrellas",
-      ocupacion: "Doble · 2 adultos",
-      season_name: "Alta",
-      season_starts: "2026-12-15",
-      season_ends: "2027-04-30",
-      meals_included: "Desayuno tipo buffet",
-      tipo_tarifa_neta: "Por habitación / por noche",
-      precios_neto_iva: "USD 165.00",
-      precio_rack_iva: "USD 245.00",
-      tipo_tarifa_mayorista: "Wholesale FIT",
-      porcentaje_comision: "20%",
-      tipo_tarifa_fds: "Weekend rate",
-      t_tar_neta_fds: "Por habitación / por noche",
-      precios_neto_iva_fds: "USD 195.00",
-      precio_rack_iva_fds: "USD 285.00",
-      tipo_tarifa_mayorista_fds: "Wholesale FIT FdS",
-      porcentaje_comision_fds: "18%",
-      cancellation_policy:
-        "Cancelación gratuita hasta 30 días antes. Después: 50% del valor total.",
-      range_payment_policy: "50% al confirmar, 50% 15 días antes del check-in",
-      kids_policy: "Niños 0-5 gratis. 6-11 al 50%. 12+ tarifa adulto.",
-      other_included: "WiFi, parking, traslados desde el muelle",
-      reservations_email: "reservas@tortugalodge.cr",
-      cond_credito: "30 días neto",
-      plazo: "30 días",
-      cuenta_bancaria_1: "CR05 0152 0001 0260 1234 56",
-      banco_1: "BAC Credomatic",
-      moneda_1: "USD",
-      cuenta_bancaria_2: "CR21 0152 0001 0260 7890 12",
-      banco_2: "BAC Credomatic",
-      moneda_2: "CRC",
-    },
-  },
-  {
-    id: "h-002",
-    filename: "tarifario_aguas_bravas_q2.xlsx",
-    fileKind: "xlsx",
-    minutesAgo: 165, // ~2.75h
-    syncedToMaestro: true,
-    values: {
-      tipo_actividad: "Tour de aventura",
-      zona_turismo: "Pacífico Central",
-      proveedor: "AGUASBR-014",
-      razon_social: "Aguas Bravas Rafting S.A.",
-      cedula_juridica: "3-101-447781",
-      contract_date: "2026-03-04",
-      nombre_comercial: "Aguas Bravas",
-      pais: "Costa Rica",
-      state_province: "Alajuela",
-      location: "La Virgen de Sarapiquí, costado este de la plaza",
-      type_of_business: "Operador de tours",
-      contract_starts: "2026-04-01",
-      contract_ends: "2027-03-31",
-      codigo_servicio: "AB-RAFT-CL3",
-      product_name: "Rafting Río Sarapiquí · Clase III",
-      tipo_unidad: "Tour por persona",
-      tipo_servicio: "Aventura · Rafting",
-      categoria: "Estándar",
-      ocupacion: "Mínimo 4 personas",
-      season_name: "Toda temporada",
-      meals_included: "Almuerzo típico tras el tour",
-      tipo_tarifa_neta: "Por persona",
-      precios_neto_iva: "USD 79.00",
-      precio_rack_iva: "USD 105.00",
-      tipo_tarifa_mayorista: "Net rate",
-      porcentaje_comision: "15%",
-      cancellation_policy:
-        "Cancelación 48h antes sin costo. Menos de 48h: 100%.",
-      range_payment_policy: "Pago 7 días antes del tour",
-      kids_policy: "Edad mínima 12 años por seguridad",
-      other_included: "Equipo de seguridad, guía bilingüe, transporte local",
-      reservations_email: "reservas@aguasbravascr.com",
-      cond_credito: "Contado",
-      plazo: "Inmediato",
-      cuenta_bancaria_1: "CR81 0151 0010 0245 6678 90",
-      banco_1: "Banco Nacional",
-      moneda_1: "USD",
-    },
-  },
-  {
-    id: "h-003",
-    filename: "contrato_arenal_volcano_hotel.docx",
-    fileKind: "docx",
-    minutesAgo: 60 * 26, // hace 26h (= ayer)
-    syncedToMaestro: true,
-    values: {
-      tipo_actividad: "Hospedaje",
-      zona_turismo: "Volcán Arenal",
-      proveedor: "ARENAL-007",
-      razon_social: "Arenal Volcano Resort S.A.",
-      cedula_juridica: "3-101-098765",
-      contract_date: "2026-02-22",
-      nombre_comercial: "Arenal Volcano Hotel & Spa",
-      pais: "Costa Rica",
-      state_province: "Alajuela",
-      location: "La Fortuna, ruta 142 km 8",
-      type_of_business: "Hotel resort · Spa",
-      contract_starts: "2026-03-01",
-      contract_ends: "2027-02-28",
-      codigo_servicio: "AVH-JR-SUITE",
-      product_name: "Junior Suite con vista al volcán",
-      tipo_unidad: "Habitación · 2 adultos",
-      tipo_servicio: "Alojamiento + spa",
-      categoria: "4 estrellas",
-      ocupacion: "Doble · 2 adultos",
-      season_name: "Alta",
-      season_starts: "2026-12-20",
-      season_ends: "2027-04-15",
-      meals_included: "Desayuno · Cena tipo buffet",
-      tipo_tarifa_neta: "Por habitación / por noche",
-      precios_neto_iva: "USD 220.00",
-      precio_rack_iva: "USD 330.00",
-      tipo_tarifa_mayorista: "Wholesale FIT",
-      porcentaje_comision: "22%",
-      tipo_tarifa_fds: "Weekend premium",
-      t_tar_neta_fds: "Por habitación / por noche",
-      precios_neto_iva_fds: "USD 260.00",
-      precio_rack_iva_fds: "USD 390.00",
-      porcentaje_comision_fds: "20%",
-      cancellation_policy:
-        "Cancelación gratuita hasta 21 días antes. Luego: 1ra noche.",
-      range_payment_policy: "30% al confirmar, saldo 14 días antes",
-      kids_policy: "Niños 0-3 gratis. 4-11 al 40%. 12+ tarifa adulto.",
-      other_included: "Acceso a aguas termales, WiFi, gimnasio",
-      feeds_adicionales: "Tour spa con cargo extra",
-      reservations_email: "reservas@arenalvolcano.cr",
-      cond_credito: "30 días neto",
-      plazo: "30 días",
-      cuenta_bancaria_1: "CR67 0152 0001 0260 4455 66",
-      banco_1: "BAC Credomatic",
-      moneda_1: "USD",
-      cuenta_bancaria_2: "CR43 0151 0010 0245 1122 33",
-      banco_2: "Banco Nacional",
-      moneda_2: "CRC",
-    },
-  },
-  {
-    id: "h-004",
-    filename: "pacific_surf_tarifas_2026.pdf",
-    fileKind: "pdf",
-    minutesAgo: 60 * 24 * 4 + 35, // ~4 días
-    syncedToMaestro: false,
-    values: {
-      tipo_actividad: "Tour · Surf",
-      zona_turismo: "Pacífico Norte",
-      proveedor: "PACSURF-022",
-      razon_social: "Pacific Coast Surf Inc.",
-      contract_date: "2026-04-10",
-      nombre_comercial: "Pacific Surf School",
-      pais: "Costa Rica",
-      state_province: "Guanacaste",
-      location: "Tamarindo, frente a la entrada principal de la playa",
-      type_of_business: "Escuela de surf",
-      contract_starts: "2026-05-01",
-      contract_ends: "2027-04-30",
-      codigo_servicio: "PS-LECC-GROUP",
-      product_name: "Lección grupal de surf · 2 horas",
-      tipo_unidad: "Tour por persona",
-      tipo_servicio: "Aventura · Surf",
-      ocupacion: "Mínimo 2 personas",
-      season_name: "Toda temporada",
-      tipo_tarifa_neta: "Por persona",
-      precios_neto_iva: "USD 55.00",
-      precio_rack_iva: "USD 75.00",
-      porcentaje_comision: "15%",
-      cancellation_policy: "24h antes sin costo, después 100%",
-      reservations_email: "info@pacificsurfcr.com",
-      cond_credito: "Contado",
-      plazo: "Inmediato",
-      cuenta_bancaria_1: "CR12 0151 0010 0245 7788 99",
-      banco_1: "Banco Nacional",
-      moneda_1: "USD",
-    },
-  },
-  {
-    id: "h-005",
-    filename: "contrato_punta_islita_2026.xlsx",
-    fileKind: "xlsx",
-    minutesAgo: 60 * 24 * 12 + 200, // ~12 días
-    syncedToMaestro: false,
-    values: {
-      tipo_actividad: "Hospedaje",
-      zona_turismo: "Pacífico Norte",
-      proveedor: "ISLITA-018",
-      razon_social: "Hotel Punta Islita S.A.",
-      cedula_juridica: "3-101-339977",
-      contract_date: "2026-03-30",
-      nombre_comercial: "Hotel Punta Islita",
-      pais: "Costa Rica",
-      state_province: "Guanacaste",
-      location: "Punta Islita, Nandayure",
-      type_of_business: "Boutique resort",
-      contract_starts: "2026-05-01",
-      contract_ends: "2027-04-30",
-      codigo_servicio: "ISL-CASITA-OF",
-      product_name: "Casita Ocean Front",
-      tipo_unidad: "Casita · 2 adultos",
-      categoria: "5 estrellas",
-      season_name: "Alta",
-      tipo_tarifa_neta: "Por habitación / por noche",
-      precios_neto_iva: "USD 380.00",
-      precio_rack_iva: "USD 540.00",
-      porcentaje_comision: "20%",
-      cancellation_policy: "Cancelación 14 días antes sin costo",
-      reservations_email: "reservas@hotelpuntaislita.com",
-      cond_credito: "Contado",
-      cuenta_bancaria_1: "CR45 0152 0001 0260 8899 00",
-      banco_1: "BAC Credomatic",
-      moneda_1: "USD",
-    },
-  },
-  {
-    id: "h-006",
-    filename: "costa_rica_sun_tours_2026.docx",
-    fileKind: "docx",
-    minutesAgo: 60 * 24 * 21 + 480, // ~21 días
-    syncedToMaestro: true,
-    values: {
-      tipo_actividad: "Tour · City",
-      zona_turismo: "Valle Central",
-      proveedor: "CRSUN-009",
-      razon_social: "Costa Rica Sun Tours S.A.",
-      cedula_juridica: "3-101-552233",
-      contract_date: "2026-03-12",
-      nombre_comercial: "Costa Rica Sun Tours",
-      pais: "Costa Rica",
-      state_province: "San José",
-      location: "Sabana Norte, edificio Plaza Roble, oficina 304",
-      type_of_business: "Operador receptivo",
-      contract_starts: "2026-04-01",
-      contract_ends: "2027-03-31",
-      codigo_servicio: "CRS-SJO-CITY",
-      product_name: "Tour San José histórico · medio día",
-      tipo_unidad: "Tour por persona",
-      tipo_servicio: "Cultural · City tour",
-      ocupacion: "Mínimo 3 personas",
-      season_name: "Toda temporada",
-      tipo_tarifa_neta: "Por persona",
-      precios_neto_iva: "USD 45.00",
-      precio_rack_iva: "USD 65.00",
-      tipo_tarifa_mayorista: "Net rate",
-      porcentaje_comision: "18%",
-      cancellation_policy: "24h antes sin costo",
-      range_payment_policy: "Pago al final del tour",
-      reservations_email: "ops@crsuntours.cr",
-      cond_credito: "30 días neto",
-      plazo: "30 días",
-      cuenta_bancaria_1: "CR98 0151 0010 0245 4400 11",
-      banco_1: "Banco Nacional",
-      moneda_1: "USD",
-    },
-  },
-  {
-    id: "h-007",
-    filename: "manuel_antonio_resort_v3.pdf",
-    fileKind: "pdf",
-    minutesAgo: 60 * 24 * 36 + 90, // ~36 días (mes anterior)
-    syncedToMaestro: true,
-    values: {
-      tipo_actividad: "Hospedaje",
-      zona_turismo: "Pacífico Central",
-      proveedor: "MANTONIO-003",
-      razon_social: "Manuel Antonio Resort S.A.",
-      cedula_juridica: "3-101-771122",
-      contract_date: "2026-01-20",
-      nombre_comercial: "Manuel Antonio Resort & Spa",
-      pais: "Costa Rica",
-      state_province: "Puntarenas",
-      location: "Quepos, ruta del Parque Nacional Manuel Antonio",
-      type_of_business: "Resort · Spa",
-      contract_starts: "2026-02-15",
-      contract_ends: "2027-02-14",
-      codigo_servicio: "MA-DELUXE-OV",
-      product_name: "Deluxe Ocean View Suite",
-      tipo_unidad: "Suite · 2 adultos",
-      categoria: "4 estrellas",
-      season_name: "Alta",
-      tipo_tarifa_neta: "Por habitación / por noche",
-      precios_neto_iva: "USD 198.00",
-      precio_rack_iva: "USD 280.00",
-      porcentaje_comision: "20%",
-      cancellation_policy: "Cancelación 21 días antes sin costo",
-      reservations_email: "reservas@manuelantonioresort.com",
-      cond_credito: "30 días neto",
-      cuenta_bancaria_1: "CR33 0152 0001 0260 6677 88",
-      banco_1: "BAC Credomatic",
-      moneda_1: "USD",
-    },
-  },
-];
+function flattenContractRun(
+  run: ContractRun,
+): Partial<Record<DisplayFieldKey, string>> {
+  const s: ExtractedSharedFields = run.sharedFields;
+  const m: GenerateXlsxManualFields | null = run.manualFields;
+  const c: GenerateXlsxCatalogPrefill | null = run.catalogPrefill;
+  const r: ExtractedContractRow | undefined = run.rows[0];
+
+  const out: Partial<Record<DisplayFieldKey, string>> = {};
+  const set = (key: DisplayFieldKey, v: string | null | undefined) => {
+    if (typeof v === "string" && v.trim() !== "") out[key] = v;
+  };
+
+  // Catalog (lista-proveedores) — columnas A, B, C, N del xlsx.
+  set("tipo_actividad", c?.tipo_actividad);
+  set("zona_turismo", c?.zona_turismo);
+  set("proveedor", c?.proveedor_codigo);
+  set("codigo_servicio", c?.codigo_servicio);
+
+  // Shared (extraídos por la IA del contrato).
+  set("razon_social", s.proveedor);
+  set("cedula_juridica", s.cedula);
+  set("contract_date", s.fecha);
+  set("nombre_comercial", s.nombre_comercial);
+  set("pais", s.pais);
+  set("state_province", s.state_province);
+  set("location", s.direccion);
+  set("type_of_business", s.type_of_business);
+  set("contract_starts", s.contract_starts);
+  set("contract_ends", s.contract_ends);
+  set("tipo_unidad", s.tipo_unidad);
+  set("tipo_servicio", s.tipo_servicio);
+  set("reservations_email", s.reservations_email);
+  set("cuenta_bancaria_1", s.numero_cuenta);
+  set("banco_1", s.banco);
+  set("moneda_1", s.tipo_moneda);
+
+  // Row (primera combinación product × season).
+  if (r) {
+    set("product_name", r.product_name);
+    set("categoria", r.categoria);
+    set("ocupacion", r.ocupacion);
+    set("season_name", r.season_name);
+    set("season_starts", r.season_starts);
+    set("season_ends", r.season_ends);
+    set("meals_included", r.meals_included);
+    set("precios_neto_iva", r.precios_neto_iva);
+    set("precio_rack_iva", r.precio_rack_iva);
+    set("porcentaje_comision", r.porcentaje_comision);
+    set("precios_neto_iva_fds", r.precios_neto_iva_fds);
+    set("precio_rack_iva_fds", r.precio_rack_iva_fds);
+    set("porcentaje_comision_fds", r.porcentaje_comision_fds);
+    set("cancellation_policy", r.cancellation_policy);
+    set("range_payment_policy", r.range_payment_policy);
+    set("kids_policy", r.kids_policy);
+    set("other_included", r.other_included);
+    set("feeds_adicionales", r.feeds_adicionales);
+  }
+
+  // Manual (lo que el usuario llenó en step 2 que no extrae la IA).
+  if (m) {
+    set("tipo_tarifa_neta", m.tipo_tarifa_neta);
+    set("tipo_tarifa_mayorista", m.tipo_tarifa_mayorista);
+    set("tipo_tarifa_fds", m.tipo_tarifa_fds);
+    set("t_tar_neta_fds", m.t_tar_neta_fds);
+    set("tipo_tarifa_mayorista_fds", m.tipo_tarifa_mayorista_fds);
+    set("others_payment_cancel", m.others_payment_cancel);
+    set("cond_credito", m.cond_credito);
+    set("plazo", m.plazo);
+    set("cuenta_bancaria_2", m.cuenta_bancaria_2);
+    set("banco_2", m.banco_2);
+    set("moneda_2", m.moneda_2);
+    set("cuenta_bancaria_3", m.cuenta_bancaria_3);
+    set("banco_3", m.banco_3);
+    set("moneda_3", m.moneda_3);
+  }
+
+  return out;
+}
+
+function toHistoryEntry(run: ContractRun): HistoryEntry {
+  // `fileKind` viene del backend como ContractFileKind ("pdf"|"docx"|"xlsx"),
+  // que coincide 1:1 con FileKind en este módulo. Cast explícito para que
+  // TypeScript no infiera `string` aunque sean estructuralmente iguales.
+  const kind: FileKind = run.fileKind as ContractFileKind;
+  return {
+    id: run.id,
+    filename: run.filename,
+    fileKind: kind,
+    processedAt: run.processedAt,
+    values: flattenContractRun(run),
+  };
+}
 
 /**
- * Returns the seed list with `processedAt` materialized against the current
- * clock. We use `useState`'s lazy initializer (which is permitted to be
- * impure — it runs once on mount) rather than `useMemo` (which the
- * react-hooks/purity rule expects to be pure). Effect: timestamps are
- * stamped once at first mount and stay stable while the page is open, then
- * re-stamped fresh next time the user navigates back.
+ * Fetch + cache de los runs persistidos. Carga al montar y refresca cuando
+ * la pestaña vuelve a foreground (escenario común: el usuario procesa un
+ * contrato en otra ruta y luego vuelve a Historial). Estados:
+ *   - loading inicial: `entries === null`, `error === null`
+ *   - error:           `entries === null`, `error !== null`
+ *   - listo:           `entries === HistoryEntry[]`, `error === null`
  */
-export function useFakeHistory(): HistoryEntry[] {
-  const [entries] = useState<HistoryEntry[]>(() => {
-    const now = Date.now();
-    return FAKE_HISTORY_SEED.map(({ minutesAgo, ...rest }) => ({
-      ...rest,
-      processedAt: new Date(now - minutesAgo * 60_000).toISOString(),
-    }));
-  });
-  return entries;
+function useContractRuns(): {
+  entries: HistoryEntry[] | null;
+  error: string | null;
+  reload: () => void;
+} {
+  const [entries, setEntries] = useState<HistoryEntry[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [reloadToken, setReloadToken] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { runs } = await api.supplierIntelligence.listRuns();
+        if (cancelled) return;
+        setEntries(runs.map(toHistoryEntry));
+        setError(null);
+      } catch (err) {
+        if (cancelled) return;
+        setError(
+          err instanceof ApiError
+            ? err.message
+            : "No pudimos cargar el historial. Intenta de nuevo en un momento.",
+        );
+      }
+    })();
+
+    const onVis = () => {
+      if (document.visibilityState === "visible") {
+        setReloadToken((t) => t + 1);
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [reloadToken]);
+
+  return { entries, error, reload: () => setReloadToken((t) => t + 1) };
 }
 
 /* ----------------------------- Format helpers ----------------------------- */
@@ -454,15 +279,8 @@ const FILE_KIND_TONES: Record<
 
 /* --------------------------------- Filters -------------------------------- */
 
-type StatusFilter = "all" | "synced" | "pending";
 type FileFilter = "all" | FileKind;
 type DateFilter = "all" | "today" | "week" | "month";
-
-const STATUS_FILTERS: { id: StatusFilter; label: string }[] = [
-  { id: "all", label: "Todos" },
-  { id: "synced", label: "Sincronizados" },
-  { id: "pending", label: "Pendientes" },
-];
 
 const FILE_FILTERS: { id: FileFilter; label: string }[] = [
   { id: "all", label: "Todos" },
@@ -498,20 +316,21 @@ function dateMatches(entry: HistoryEntry, filter: DateFilter): boolean {
  * opens the read-only 52-field modal.
  */
 export function HistoryTable() {
-  const entries = useFakeHistory();
+  const { entries, error: loadError } = useContractRuns();
   const [active, setActive] = useState<HistoryEntry | null>(null);
 
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [fileFilter, setFileFilter] = useState<FileFilter>("all");
   const [dateFilter, setDateFilter] = useState<DateFilter>("all");
 
   const normSearch = search.trim().toLowerCase();
+  // Trabajamos con `entries ?? []` para que el filtrado/sort no estalle
+  // mientras estamos en estado loading. La UI de loading se renderiza
+  // más abajo en el cuerpo de la tabla.
+  const safeEntries = entries ?? [];
   const filtered = useMemo(() => {
-    return entries
+    return safeEntries
       .filter((e) => {
-        if (statusFilter === "synced" && !e.syncedToMaestro) return false;
-        if (statusFilter === "pending" && e.syncedToMaestro) return false;
         if (fileFilter !== "all" && e.fileKind !== fileFilter) return false;
         if (!dateMatches(e, dateFilter)) return false;
         if (normSearch) {
@@ -532,20 +351,18 @@ export function HistoryTable() {
           new Date(b.processedAt).getTime() -
           new Date(a.processedAt).getTime(),
       );
-  }, [entries, normSearch, statusFilter, fileFilter, dateFilter]);
+  }, [safeEntries, normSearch, fileFilter, dateFilter]);
 
   const filtersActive =
-    statusFilter !== "all" ||
-    fileFilter !== "all" ||
-    dateFilter !== "all" ||
-    normSearch !== "";
+    fileFilter !== "all" || dateFilter !== "all" || normSearch !== "";
 
   const clearFilters = () => {
-    setStatusFilter("all");
     setFileFilter("all");
     setDateFilter("all");
     setSearch("");
   };
+
+  const isLoading = entries === null && loadError === null;
 
   return (
     <>
@@ -578,12 +395,6 @@ export function HistoryTable() {
 
           <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:gap-4">
             <FilterGroup
-              label="Estado"
-              options={STATUS_FILTERS}
-              value={statusFilter}
-              onChange={setStatusFilter}
-            />
-            <FilterGroup
               label="Tipo"
               options={FILE_FILTERS}
               value={fileFilter}
@@ -601,9 +412,13 @@ export function HistoryTable() {
         {/* Results meta */}
         <div className="px-5 sm:px-6 py-2.5 border-b border-border/60 bg-secondary/10 flex items-center justify-between">
           <p className="text-[12px] text-muted-foreground">
-            {filtered.length === entries.length
-              ? `${entries.length} contrato${entries.length === 1 ? "" : "s"}`
-              : `${filtered.length} de ${entries.length} contratos`}
+            {isLoading
+              ? "Cargando…"
+              : loadError
+                ? "Error al cargar"
+                : filtered.length === safeEntries.length
+                  ? `${safeEntries.length} contrato${safeEntries.length === 1 ? "" : "s"}`
+                  : `${filtered.length} de ${safeEntries.length} contratos`}
           </p>
           <p className="text-[11.5px] text-muted-foreground/80">
             Ordenado por más reciente
@@ -611,10 +426,33 @@ export function HistoryTable() {
         </div>
 
         {/* Table */}
-        {filtered.length === 0 ? (
+        {isLoading ? (
+          <div className="px-5 sm:px-8 py-14 text-center">
+            <Loader2
+              className="mx-auto h-6 w-6 text-muted-foreground/70 animate-spin"
+              aria-hidden
+            />
+            <p className="mt-3 text-[13px] text-muted-foreground">
+              Cargando historial…
+            </p>
+          </div>
+        ) : loadError ? (
+          <div
+            role="alert"
+            className="px-5 sm:px-8 py-14 text-center"
+          >
+            <AlertCircle
+              className="mx-auto h-6 w-6 text-rose-300"
+              aria-hidden
+            />
+            <p className="mt-3 text-[13.5px] text-foreground">{loadError}</p>
+          </div>
+        ) : filtered.length === 0 ? (
           <div className="px-5 sm:px-8 py-14 text-center">
             <p className="text-[14px] text-muted-foreground">
-              Ningún contrato coincide con los filtros actuales.
+              {safeEntries.length === 0
+                ? "Aún no hay contratos procesados. Procesa uno desde el agente para verlo aquí."
+                : "Ningún contrato coincide con los filtros actuales."}
             </p>
             {filtersActive && (
               <button
@@ -634,7 +472,6 @@ export function HistoryTable() {
                 <tr className="border-b border-border/60 bg-secondary/20">
                   <Th>Proveedor</Th>
                   <Th className="hidden md:table-cell">Archivo</Th>
-                  <Th className="w-[140px]">Estado</Th>
                   <Th className="w-[180px]">Procesado</Th>
                   <Th className="w-[140px] text-right">Acciones</Th>
                 </tr>
@@ -766,19 +603,6 @@ function HistoryTableRow({
           </span>
         </div>
       </td>
-      <td className="px-4 sm:px-5 py-3">
-        {entry.syncedToMaestro ? (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-[11px] font-semibold uppercase tracking-wider text-emerald-300 whitespace-nowrap">
-            <Check className="w-3 h-3" />
-            Sincronizado
-          </span>
-        ) : (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-amber-500/30 bg-amber-500/10 text-[11px] font-semibold uppercase tracking-wider text-amber-300 whitespace-nowrap">
-            <Clock className="w-3 h-3" />
-            Pendiente
-          </span>
-        )}
-      </td>
       <td className="px-4 sm:px-5 py-3 text-[12.5px] text-muted-foreground">
         <div className="flex flex-col">
           <span className="text-foreground/90 tabular-nums">
@@ -893,17 +717,6 @@ function HistoryDetailModal({
                 <CheckCircle2 className="w-3 h-3" />
                 {filledCount}/{ALL_FIELDS.length} con valor
               </span>
-              {entry.syncedToMaestro ? (
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-[10.5px] font-semibold uppercase tracking-wider text-emerald-300">
-                  <Check className="w-3 h-3" />
-                  Sincronizado al maestro
-                </span>
-              ) : (
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-amber-500/30 bg-amber-500/10 text-[10.5px] font-semibold uppercase tracking-wider text-amber-300">
-                  <Clock className="w-3 h-3" />
-                  Pendiente de sincronizar
-                </span>
-              )}
             </div>
           </div>
           <button
