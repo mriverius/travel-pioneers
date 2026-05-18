@@ -5,8 +5,9 @@
 // holds connection strings — those are configured in `prisma.config.ts`.
 
 generator client {
-  provider = "prisma-client"
-  output   = "../src/generated/prisma-js"
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma-js"
+  importFileExtension = "js"
 }
 
 datasource db {
