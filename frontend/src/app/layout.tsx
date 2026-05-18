@@ -11,6 +11,11 @@ export const metadata: Metadata = {
   title: "Travel Pioneers — AI Supplier Intelligence Agent",
   description:
     "AI Supplier Intelligence Agent de Travel Pioneers — Powered by Destiny Media",
+  icons: {
+    icon: "/favicon.png",
+    shortcut: "/favicon.png",
+    apple: "/favicon.png",
+  },
 };
 
 export default function RootLayout({
