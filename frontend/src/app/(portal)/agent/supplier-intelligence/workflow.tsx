@@ -499,11 +499,12 @@ export function SupplierWorkflow() {
   };
 
   return (
-    <section className="relative overflow-hidden rounded-2xl border border-border bg-card/80 shadow-[0_1px_0_0_hsl(var(--primary)/0.08)_inset]">
-      <div
-        aria-hidden
-        className="pointer-events-none absolute -top-20 left-1/2 h-56 w-[70%] -translate-x-1/2 rounded-full bg-primary/10 blur-3xl"
-      />
+    <>
+      <section className="relative overflow-hidden rounded-2xl border border-border bg-card/80 shadow-[0_1px_0_0_hsl(var(--primary)/0.08)_inset]">
+        <div
+          aria-hidden
+          className="pointer-events-none absolute -top-20 left-1/2 h-56 w-[70%] -translate-x-1/2 rounded-full bg-primary/10 blur-3xl"
+        />
 
       <div className="relative px-5 sm:px-8 pt-6 pb-5 border-b border-border">
         <ol className="flex items-center justify-between gap-2">
@@ -596,6 +597,19 @@ export function SupplierWorkflow() {
         )}
       </div>
     </section>
+
+    <div className="text-center mt-4 space-y-1">
+      <p className="text-[11px] text-muted-foreground/60">Version 1.0.0 - Mayo 18</p>
+      <a
+        href="https://forms.gle/GANUbdcuAS3P7szS8"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-[11px] text-primary/70 hover:text-primary transition-colors"
+      >
+        ¿Encontraste un bug? Repórtalo
+      </a>
+    </div>
+    </>
   );
 }
 

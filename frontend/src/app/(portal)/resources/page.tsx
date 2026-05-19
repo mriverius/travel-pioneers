@@ -7,14 +7,9 @@ type Guide = {
 
 const guides: Guide[] = [
   {
-    title: "Guía del AI Supplier Intelligence Agent",
+    title: "Reportar un bug",
     description:
-      "Cómo usar el sistema para procesar contratos y generar plantillas Utopía",
-  },
-  {
-    title: "Formato de plantillas Utopía",
-    description:
-      "Especificaciones de las plantillas de proveedor y tarifas generadas",
+      "Formulario para reportar problemas encontrados en el sistema",
   },
 ];
 
@@ -32,17 +27,12 @@ const faqs: Faq[] = [
   {
     question: "¿Qué formato tienen las plantillas que genera?",
     answer:
-      "El sistema genera dos plantillas Excel estructuradas: una plantilla de proveedor (datos generales, contacto, condiciones) y una plantilla de tarifas (temporadas, tipos de habitación, régimen, precios). Ambas listas para carga directa en Utopía.",
+      "El sistema genera una plantilla Excel estructurada lista para carga directa en Utopía.",
   },
   {
     question: "¿Qué pasa si el contrato tiene información ambigua?",
     answer:
       "El agente detecta automáticamente información ambigua, incompleta o contradictoria y la señala en los resultados para que pueda ser revisada y completada manualmente antes de la carga.",
-  },
-  {
-    question: "¿Cómo subo un contrato al sistema?",
-    answer:
-      "Simplemente envíe el archivo PDF o Word directamente en el chat del agente. Puede arrastrarlo a la ventana del chat o usar el botón de adjuntar archivo.",
   },
 ];
 
@@ -81,13 +71,15 @@ export default function ResourcesPage() {
                   {g.description}
                 </p>
               </div>
-              <button
-                type="button"
+              <a
+                href="https://forms.gle/GANUbdcuAS3P7szS8"
+                target="_blank"
+                rel="noopener noreferrer"
                 className="inline-flex items-center px-3 py-1.5 rounded-md border border-border text-[12.5px] text-primary hover:bg-primary/10 transition-colors"
               >
                 <Download className="w-4 h-4 mr-1.5" />
-                Descargar
-              </button>
+                Reportar
+              </a>
             </article>
           ))}
         </div>
