@@ -51,16 +51,32 @@ function parseComments(raw: unknown): string | undefined {
 }
 
 /**
+ * Build a single, stable display filename for the response `meta.filename`
+ * field when the user uploads more than one document. We always lead with
+ * the first file's name (which is normally the primary contract) and append
+ * a "+N más" suffix so the UI and persisted history stay readable.
+ */
+function combineFilenames(files: Express.Multer.File[]): string {
+  if (files.length === 0) return "";
+  const first = files[0]!.originalname;
+  if (files.length === 1) return first;
+  return `${first} (+${files.length - 1} más)`;
+}
+
+/**
  * POST /api/supplier-intelligence/extract
  *
  * `multipart/form-data` with these fields:
- *   - `file` (required) — the contract document (PDF / Word / Excel).
+ *   - `files` (required, 1..MAX_UPLOAD_FILES) — one or more contract documents
+ *     (PDF / Word / Excel). All files are bundled into a single Claude call
+ *     and produce a single merged extraction; the model is told to treat them
+ *     as one logical contract (main contract + amendments + price lists).
  *   - `is_existing_supplier` (required) — "true" | "false" toggle from step 1.
  *   - `comments` (optional) — free-form context (e.g. email body excerpts)
  *     forwarded to Claude as additional extraction context.
  *
  * See `uploadMiddleware.ts` for the validation that runs before this handler
- * (size, mime, extension).
+ * (size, mime, extension, file count).
  *
  * Response shape is pinned by the product spec:
  *   { success, data, validation, meta }
@@ -71,19 +87,18 @@ export async function extractContractHandler(
   req: Request,
   res: Response,
 ): Promise<void> {
-  const file = req.file;
-  if (!file) {
-    throw ApiError.badRequest(
-      "No se recibió ningún archivo. Envía el documento en el campo 'file'.",
-    );
-  }
+  // Multer's `.array("files")` populates `req.files` as an array; the typing
+  // is `Express.Multer.File[] | { [fieldname: string]: Express.Multer.File[] }`
+  // depending on the multer mode, but `.array(...)` always yields the array
+  // form. Narrow defensively before iterating.
+  const rawFiles = req.files;
+  const files: Express.Multer.File[] = Array.isArray(rawFiles)
+    ? rawFiles
+    : [];
 
-  const kind = detectDocKind(file.mimetype, file.originalname);
-  if (!kind) {
-    // Defensive — the multer fileFilter should have already caught this.
-    throw new ApiError(
-      415,
-      `Tipo de archivo no soportado: ${file.mimetype ?? "desconocido"}.`,
+  if (files.length === 0) {
+    throw ApiError.badRequest(
+      "No se recibió ningún archivo. Envía los documentos en el campo 'files'.",
     );
   }
 
@@ -92,24 +107,45 @@ export async function extractContractHandler(
   const isExistingSupplier = parseExistingSupplier(req.body?.is_existing_supplier);
   const comments = parseComments(req.body?.comments);
 
+  // Prepare each document in order (PDFs stay as base64, Word/Excel get
+  // converted to plain text). Failures here surface as 400 from the
+  // extractors and are returned to the client before we contact Anthropic.
+  const prepared = [];
+  let totalBytes = 0;
+  for (const file of files) {
+    const kind = detectDocKind(file.mimetype, file.originalname);
+    if (!kind) {
+      // Defensive — the multer fileFilter should have already caught this.
+      throw new ApiError(
+        415,
+        `Tipo de archivo no soportado: ${file.originalname} (${file.mimetype ?? "desconocido"}).`,
+      );
+    }
+    const doc = await prepareDocument(kind, file.buffer);
+    prepared.push({ ...doc, originalName: file.originalname });
+    totalBytes += file.size;
+  }
+
   logger.info("Supplier Intelligence extraction started", {
     requestId: req.id,
-    filename: file.originalname,
-    size: file.size,
-    kind,
+    fileCount: files.length,
+    filenames: files.map((f) => f.originalname),
+    totalSize: totalBytes,
     isExistingSupplier,
     hasComments: comments !== undefined,
   });
 
-  const prepared = await prepareDocument(kind, file.buffer);
   const { data, validation, model } = await extractContract(prepared, req.id, {
     comments,
     isExistingSupplier,
   });
 
+  const combinedFilename = combineFilenames(files);
+
   logger.info("Supplier Intelligence extraction finished", {
     requestId: req.id,
-    filename: file.originalname,
+    filename: combinedFilename,
+    fileCount: files.length,
     confianza: data.confianza,
     warnings: validation.warnings.length,
   });
@@ -119,8 +155,8 @@ export async function extractContractHandler(
     data,
     validation,
     meta: {
-      filename: file.originalname,
-      size_bytes: file.size,
+      filename: combinedFilename,
+      size_bytes: totalBytes,
       model,
       processed_at: new Date().toISOString(),
       is_existing_supplier: isExistingSupplier,

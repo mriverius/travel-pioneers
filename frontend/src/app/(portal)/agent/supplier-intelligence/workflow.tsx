@@ -102,6 +102,12 @@ export type CatalogMatchInfo =
 
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 
+/**
+ * Mirrors `MAX_UPLOAD_FILES` in the backend `uploadMiddleware`. Kept in sync
+ * manually — if the backend raises this, bump it here too.
+ */
+const MAX_FILES_PER_REQUEST = 10;
+
 const ACCEPT_ATTR = [
   "application/pdf",
   ".pdf",
@@ -123,20 +129,26 @@ const STEPS: { id: Step; label: string; hint: string }[] = [
 
 function inferKind(mime: string, name: string): FileKind | null {
   const lower = name.toLowerCase();
-  if (mime === "application/pdf" || lower.endsWith(".pdf")) return "pdf";
+  // Match the extension as a token, not just at the end of the string. The
+  // backend's `meta.filename` can be a combined display string like
+  // `contrato.pdf (+2 más)` when multiple documents were uploaded; that still
+  // needs to resolve to a kind so step 3 can persist the run with the right
+  // file_kind. We anchor on `.ext` followed by a non-letter (word boundary,
+  // space, end-of-string) so `.pdf2026` doesn't get mistaken for a PDF.
+  if (mime === "application/pdf" || /\.pdf(\b|$|[^a-z])/i.test(lower)) {
+    return "pdf";
+  }
   if (
     mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
     mime === "application/msword" ||
-    lower.endsWith(".docx") ||
-    lower.endsWith(".doc")
+    /\.docx?(\b|$|[^a-z])/i.test(lower)
   ) {
     return "docx";
   }
   if (
     mime === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
     mime === "application/vnd.ms-excel" ||
-    lower.endsWith(".xlsx") ||
-    lower.endsWith(".xls")
+    /\.xlsx?(\b|$|[^a-z])/i.test(lower)
   ) {
     return "xlsx";
   }
@@ -169,7 +181,13 @@ export interface ApprovedPayload {
 
 export function SupplierWorkflow() {
   const [step, setStep] = useState<Step>(1);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  /**
+   * Files queued for extraction. Order is preserved end-to-end: the first
+   * file is treated as the "primary" contract by the backend (its name is
+   * what populates `meta.filename` once combined), and additional files are
+   * sent as supporting documents (amendments, price lists, etc.).
+   */
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [result, setResult] = useState<ExtractContractResponse | null>(null);
@@ -205,54 +223,118 @@ export function SupplierWorkflow() {
     return () => window.clearInterval(id);
   }, [analyzing]);
 
-  const acceptFile = (incoming: File) => {
-    setUploadError(null);
+  /**
+   * Validate and append a batch of newly picked / dropped files to the queue.
+   * Validation errors are aggregated into a single `uploadError` line per
+   * batch so the user sees every problem at once instead of having to retry
+   * file-by-file. Duplicates (by name + size) are skipped silently — the
+   * user dragging the same file twice is almost always an accident.
+   *
+   * The first error sentence in the message is the one most likely to be
+   * actionable, so keep it specific (which file, what limit, what size).
+   */
+  const acceptFiles = (incoming: FileList | File[]) => {
     setServerError(null);
 
-    const kind = inferKind(incoming.type, incoming.name);
-    if (!kind) {
-      setUploadError(
-        `${incoming.name}: formato no admitido. Usa PDF, Word (.docx, .doc) o Excel (.xlsx, .xls).`,
-      );
-      return;
-    }
-    if (incoming.size > MAX_FILE_BYTES) {
-      setUploadError(
-        `${incoming.name}: excede el tamaño máximo de 20 MB (tamaño: ${humanSize(incoming.size)}).`,
-      );
+    const list = Array.from(incoming);
+    if (list.length === 0) {
+      setUploadError(null);
       return;
     }
 
-    setSelectedFile(incoming);
+    // We validate against the CURRENT files state up-front (read once via
+    // the functional getter we already have). The state updater itself must
+    // stay pure — pushing into outer arrays from inside `setSelectedFiles`
+    // would double-count files under React strict mode (the updater runs
+    // twice in development).
+    setSelectedFiles((prev) => {
+      const seen = new Set(prev.map((f) => `${f.name}|${f.size}`));
+      const accepted: File[] = [];
+      const errors: string[] = [];
+
+      for (const file of list) {
+        const kind = inferKind(file.type, file.name);
+        if (!kind) {
+          errors.push(
+            `${file.name}: formato no admitido. Usa PDF, Word o Excel.`,
+          );
+          continue;
+        }
+        if (file.size > MAX_FILE_BYTES) {
+          errors.push(
+            `${file.name}: excede el límite de 20 MB (${humanSize(file.size)}).`,
+          );
+          continue;
+        }
+        const key = `${file.name}|${file.size}`;
+        if (seen.has(key)) {
+          // Silently skip duplicates — most often a drag-and-drop double-fire.
+          continue;
+        }
+        if (prev.length + accepted.length >= MAX_FILES_PER_REQUEST) {
+          errors.push(
+            `Máximo ${MAX_FILES_PER_REQUEST} documentos por análisis — se descartó "${file.name}".`,
+          );
+          continue;
+        }
+        seen.add(key);
+        accepted.push(file);
+      }
+
+      // Surface validation errors as part of the same render. Safe to call
+      // from inside the updater: setState calls are batched and idempotent
+      // even if the updater itself runs twice in strict mode.
+      setUploadError(errors.length > 0 ? errors.join(" ") : null);
+
+      if (accepted.length === 0) return prev;
+      return [...prev, ...accepted];
+    });
   };
 
   const handleDrop = (e: DragEvent<HTMLDivElement>) => {
     e.preventDefault();
-    const f = e.dataTransfer.files?.[0];
-    if (!f) return;
-    acceptFile(f);
+    const files = e.dataTransfer.files;
+    if (!files || files.length === 0) return;
+    // Materialize the FileList into a real array immediately. DataTransfer
+    // objects are short-lived and the spec lets browsers null them out once
+    // the drop event has been dispatched.
+    acceptFiles(Array.from(files));
   };
 
   const handlePick = (e: ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0];
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
+    // Snapshot the FileList BEFORE resetting the input's value. Setting
+    // `value = ""` clears the input's associated FileList in some browsers,
+    // which would leave `acceptFiles` with an empty iterable and silently
+    // drop the selection — that's the bug that made step 1 look like
+    // nothing happened after picking files.
+    const files = Array.from(fileList);
     e.target.value = "";
-    if (!f) return;
-    acceptFile(f);
+    acceptFiles(files);
   };
 
-  const clearFile = () => {
-    setSelectedFile(null);
+  const removeFile = (index: number) => {
+    setSelectedFiles((prev) => prev.filter((_, i) => i !== index));
+    setUploadError(null);
+    setServerError(null);
+  };
+
+  const clearFiles = () => {
+    setSelectedFiles([]);
     setUploadError(null);
     setServerError(null);
   };
 
   const startAnalysis = async () => {
-    if (!selectedFile || analyzing || isExistingSupplier === null) return;
+    if (selectedFiles.length === 0 || analyzing || isExistingSupplier === null) {
+      return;
+    }
     setAnalyzing(true);
     setServerError(null);
     setProgress(4);
     try {
-      const response = await api.supplierIntelligence.extract(selectedFile, {
+      const response = await api.supplierIntelligence.extract(selectedFiles, {
         comments,
         isExistingSupplier,
       });
@@ -327,7 +409,12 @@ export function SupplierWorkflow() {
               shared.tipo_moneda ? `Moneda: ${shared.tipo_moneda}` : null,
               shared.pais ? `País proveedor: ${shared.pais}` : null,
               comments?.trim() ? `Notas: ${comments.trim()}` : null,
-              selectedFile.name ? `Archivo: ${selectedFile.name}` : null,
+              selectedFiles[0]?.name
+                ? `Archivo: ${selectedFiles[0].name}` +
+                  (selectedFiles.length > 1
+                    ? ` (+${selectedFiles.length - 1} más)`
+                    : "")
+                : null,
             ].filter((s): s is string => s !== null);
             const serviceHint = hintParts.join(" · ");
 
@@ -393,7 +480,7 @@ export function SupplierWorkflow() {
 
   const reset = () => {
     setStep(1);
-    setSelectedFile(null);
+    setSelectedFiles([]);
     setResult(null);
     setUploadError(null);
     setServerError(null);
@@ -473,7 +560,7 @@ export function SupplierWorkflow() {
       <div key={step} className="animate-page-enter">
         {step === 1 && (
           <UploadStep
-            file={selectedFile}
+            files={selectedFiles}
             uploadError={uploadError}
             serverError={serverError}
             analyzing={analyzing}
@@ -486,7 +573,8 @@ export function SupplierWorkflow() {
             onExistingSupplierChange={setIsExistingSupplier}
             onDrop={handleDrop}
             onPick={handlePick}
-            onClear={clearFile}
+            onRemoveFile={removeFile}
+            onClearAll={clearFiles}
             onStart={startAnalysis}
           />
         )}
@@ -516,7 +604,7 @@ export function SupplierWorkflow() {
    ========================================================================== */
 
 function UploadStep({
-  file,
+  files,
   uploadError,
   serverError,
   analyzing,
@@ -529,10 +617,11 @@ function UploadStep({
   onExistingSupplierChange,
   onDrop,
   onPick,
-  onClear,
+  onRemoveFile,
+  onClearAll,
   onStart,
 }: {
-  file: File | null;
+  files: File[];
   uploadError: string | null;
   serverError: string | null;
   analyzing: boolean;
@@ -545,45 +634,62 @@ function UploadStep({
   onExistingSupplierChange: (value: boolean) => void;
   onDrop: (e: DragEvent<HTMLDivElement>) => void;
   onPick: (e: ChangeEvent<HTMLInputElement>) => void;
-  onClear: () => void;
+  onRemoveFile: (index: number) => void;
+  onClearAll: () => void;
   onStart: () => void;
 }) {
   const [dragActive, setDragActive] = useState(false);
-  const kind = file ? inferKind(file.type, file.name) : null;
   const COMMENTS_MAX = 5000;
-  const canSubmit = !!file && !analyzing && isExistingSupplier !== null;
+  const totalBytes = useMemo(
+    () => files.reduce((acc, f) => acc + f.size, 0),
+    [files],
+  );
+  const hasFiles = files.length > 0;
+  const slotsLeft = MAX_FILES_PER_REQUEST - files.length;
+  const canAddMore = slotsLeft > 0 && !analyzing;
+  const canSubmit = hasFiles && !analyzing && isExistingSupplier !== null;
 
   return (
     <div className="px-5 sm:px-8 py-7 space-y-5">
       <div
         onDragOver={(e) => {
           e.preventDefault();
-          setDragActive(true);
+          if (canAddMore) setDragActive(true);
         }}
         onDragLeave={() => setDragActive(false)}
         onDrop={(e) => {
           setDragActive(false);
+          if (!canAddMore) {
+            e.preventDefault();
+            return;
+          }
           onDrop(e);
         }}
-        onClick={() => fileInputRef.current?.click()}
+        onClick={() => {
+          if (canAddMore) fileInputRef.current?.click();
+        }}
         role="button"
         tabIndex={0}
+        aria-disabled={!canAddMore}
         onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
+          if ((e.key === "Enter" || e.key === " ") && canAddMore) {
             e.preventDefault();
             fileInputRef.current?.click();
           }
         }}
-        className={`group cursor-pointer rounded-2xl border-2 border-dashed p-8 sm:p-10 text-center transition-all ${
-          dragActive
-            ? "border-primary bg-primary/10 shadow-[0_0_30px_0_hsl(var(--primary)/0.25)]"
-            : "border-border bg-secondary/20 hover:border-primary/50 hover:bg-primary/5"
+        className={`group rounded-2xl border-2 border-dashed p-8 sm:p-10 text-center transition-all ${
+          !canAddMore
+            ? "cursor-not-allowed opacity-60 border-border bg-secondary/20"
+            : dragActive
+              ? "cursor-pointer border-primary bg-primary/10 shadow-[0_0_30px_0_hsl(var(--primary)/0.25)]"
+              : "cursor-pointer border-border bg-secondary/20 hover:border-primary/50 hover:bg-primary/5"
         }`}
       >
         <input
           ref={fileInputRef}
           type="file"
           accept={ACCEPT_ATTR}
+          multiple
           onChange={onPick}
           className="hidden"
         />
@@ -591,20 +697,24 @@ function UploadStep({
           <CloudUpload className="w-6 h-6 text-primary" />
         </div>
         <p className="mt-4 text-[15px] font-semibold text-foreground">
-          Arrastra tu contrato aquí
+          {hasFiles
+            ? "Arrastra documentos adicionales aquí"
+            : "Arrastra tus contratos aquí"}
         </p>
         <p className="mt-1 text-[12.5px] text-muted-foreground">
           o{" "}
           <span className="text-primary font-medium">
-            haz click para buscarlo
-          </span>{" "}
-          en tu equipo
+            haz click para buscar
+          </span>
+          {hasFiles ? " más archivos" : ""} en tu equipo
         </p>
         <div className="mt-4 inline-flex items-center gap-2 text-[11px] text-muted-foreground/80">
           <Badge label="PDF" />
           <Badge label="DOCX" />
           <Badge label="XLSX" />
-          <span className="opacity-60">· hasta 20 MB</span>
+          <span className="opacity-60">
+            · hasta 20 MB c/u · máx {MAX_FILES_PER_REQUEST} archivos
+          </span>
         </div>
       </div>
 
@@ -628,44 +738,96 @@ function UploadStep({
         </div>
       )}
 
-      {file && kind && !analyzing && (
+      {hasFiles && !analyzing && (
         <div className="rounded-xl border border-border bg-card/60">
           <header className="flex items-center justify-between px-4 py-3 border-b border-border/60">
             <p className="text-[12.5px] font-semibold text-foreground">
-              Documento listo para analizar
+              {files.length === 1
+                ? "Documento listo para analizar"
+                : `${files.length} documentos listos para analizar`}
             </p>
-            <p className="text-[11.5px] text-muted-foreground">
-              {humanSize(file.size)}
-            </p>
-          </header>
-          <div className="flex items-center gap-3 px-4 py-3">
-            <div className="w-8 h-8 rounded-lg bg-secondary/70 border border-border/60 flex items-center justify-center shrink-0">
-              {fileIcon(kind)}
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-[13px] text-foreground truncate">{file.name}</p>
-              <p className="text-[11px] text-muted-foreground">
-                {humanSize(file.size)} · {kind.toUpperCase()}
+            <div className="flex items-center gap-3">
+              <p className="text-[11.5px] text-muted-foreground">
+                {humanSize(totalBytes)} total
               </p>
+              {files.length > 1 && (
+                <button
+                  type="button"
+                  onClick={onClearAll}
+                  className="text-[11px] text-muted-foreground hover:text-destructive transition-colors"
+                >
+                  Quitar todos
+                </button>
+              )}
             </div>
-            <button
-              type="button"
-              onClick={onClear}
-              disabled={analyzing}
-              aria-label={`Quitar ${file.name}`}
-              className="text-muted-foreground hover:text-destructive disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
+          </header>
+          <ul className="divide-y divide-border/60">
+            {files.map((f, idx) => {
+              const fkind = inferKind(f.type, f.name);
+              return (
+                <li
+                  key={`${f.name}|${f.size}|${idx}`}
+                  className="flex items-center gap-3 px-4 py-3"
+                >
+                  <div className="w-8 h-8 rounded-lg bg-secondary/70 border border-border/60 flex items-center justify-center shrink-0">
+                    {fkind ? (
+                      fileIcon(fkind)
+                    ) : (
+                      <FileText className="w-4 h-4 text-muted-foreground" />
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[13px] text-foreground truncate">
+                      {idx === 0 && files.length > 1 ? (
+                        <>
+                          <span className="text-primary font-medium">
+                            Principal:
+                          </span>{" "}
+                          {f.name}
+                        </>
+                      ) : (
+                        f.name
+                      )}
+                    </p>
+                    <p className="text-[11px] text-muted-foreground">
+                      {humanSize(f.size)}
+                      {fkind ? ` · ${fkind.toUpperCase()}` : ""}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onRemoveFile(idx)}
+                    aria-label={`Quitar ${f.name}`}
+                    className="text-muted-foreground hover:text-destructive transition-colors"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+          {canAddMore && (
+            <div className="px-4 py-2.5 border-t border-border/60">
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="inline-flex items-center gap-1.5 text-[12px] text-primary hover:text-primary/80 transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Agregar otro documento
+                <span className="text-muted-foreground/80">
+                  ({slotsLeft} {slotsLeft === 1 ? "disponible" : "disponibles"})
+                </span>
+              </button>
+            </div>
+          )}
         </div>
       )}
 
-      {file && kind && analyzing && (
+      {hasFiles && analyzing && (
         <AnalysisProgressCard
-          fileName={file.name}
-          fileSize={file.size}
-          kind={kind}
+          files={files}
+          totalBytes={totalBytes}
           progress={progress}
           matchingPhase={matchingPhase}
         />
@@ -872,15 +1034,13 @@ function analysisPhase(progress: number): string {
 }
 
 function AnalysisProgressCard({
-  fileName,
-  fileSize,
-  kind,
+  files,
+  totalBytes,
   progress,
   matchingPhase,
 }: {
-  fileName: string;
-  fileSize: number;
-  kind: FileKind;
+  files: File[];
+  totalBytes: number;
   progress: number;
   matchingPhase: "local" | "ai" | null;
 }) {
@@ -891,16 +1051,31 @@ function AnalysisProgressCard({
       : matchingPhase === "local"
         ? "Buscando coincidencia en el maestro…"
         : analysisPhase(progress);
+
+  const primary = files[0];
+  const primaryKind = primary ? inferKind(primary.type, primary.name) : null;
+  const headlineName = primary
+    ? files.length === 1
+      ? primary.name
+      : `${primary.name} (+${files.length - 1} más)`
+    : "";
+
   return (
     <div className="rounded-xl border border-primary/30 bg-primary/5">
       <div className="flex items-center gap-3 px-4 py-3 border-b border-border/50">
         <div className="w-8 h-8 rounded-lg bg-secondary/70 border border-border/60 flex items-center justify-center shrink-0">
-          {fileIcon(kind)}
+          {primaryKind ? (
+            fileIcon(primaryKind)
+          ) : (
+            <FileText className="w-4 h-4 text-muted-foreground" />
+          )}
         </div>
         <div className="flex-1 min-w-0">
-          <p className="text-[13px] text-foreground truncate">{fileName}</p>
+          <p className="text-[13px] text-foreground truncate">{headlineName}</p>
           <p className="text-[11px] text-muted-foreground">
-            {humanSize(fileSize)} · {kind.toUpperCase()}
+            {files.length === 1
+              ? `${humanSize(totalBytes)}${primaryKind ? ` · ${primaryKind.toUpperCase()}` : ""}`
+              : `${files.length} documentos · ${humanSize(totalBytes)} total`}
           </p>
         </div>
         <Loader2 className="w-4 h-4 text-primary animate-spin shrink-0" />
@@ -933,7 +1108,9 @@ function AnalysisProgressCard({
         <p className="text-[11px] text-muted-foreground">
           {matchingPhase === "ai"
             ? "Pidiéndole a Claude que elija el proveedor del catálogo. Opus 4.6 puede tardar 30-60s para contratos con muchas combinaciones."
-            : "Opus 4.6 puede tardar entre 30 y 90 segundos para contratos con muchas filas (ej. 21 combinaciones)."}
+            : files.length > 1
+              ? `Opus 4.6 está consolidando ${files.length} documentos. Puede tardar varios minutos — mantén esta pestaña abierta.`
+              : "Opus 4.6 puede tardar entre 30 y 90 segundos para contratos con muchas filas (ej. 21 combinaciones)."}
         </p>
       </div>
     </div>

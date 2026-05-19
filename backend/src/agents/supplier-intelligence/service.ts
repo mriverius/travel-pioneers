@@ -83,14 +83,30 @@ function buildContextBlock(ctx: ExtractionContext | undefined): string | null {
 }
 
 /**
+ * Service-level input for a single document that includes the user-visible
+ * filename. We keep this separate from `PreparedDocument` (which is the raw
+ * extractor output) because the extractors operate on buffers and don't know
+ * the original filename — only the controller has that.
+ */
+export type PreparedDocumentInput = PreparedDocument & {
+  originalName: string;
+};
+
+/**
  * Build the user message that gets sent alongside the system prompt. PDFs go
- * as a native `document` block (Claude reads layout + page numbers); Word /
- * Excel arrive as plain text in a single text block. When the caller supplies
- * additional context (comments / supplier flag), it's prepended as a separate
- * text block so the document content remains untouched.
+ * as native `document` blocks (Claude reads layout + page numbers); Word /
+ * Excel arrive as plain text blocks. When the caller supplies additional
+ * context (comments / supplier flag), it's prepended as a separate text block
+ * so the document content remains untouched.
+ *
+ * When multiple documents are uploaded together, each one is rendered as its
+ * own pair of (header text block, content block). The header tells Claude
+ * which file it's looking at so cross-document references stay readable; the
+ * trailing instruction asks the model to treat the whole bundle as ONE
+ * logical contract (typical case: main contract + amendment + price list).
  */
 function buildUserMessage(
-  doc: PreparedDocument,
+  docs: PreparedDocumentInput[],
   ctx?: ExtractionContext,
 ): MessageParam {
   const content: ContentBlockParam[] = [];
@@ -100,36 +116,55 @@ function buildUserMessage(
     content.push({ type: "text", text: contextBlock });
   }
 
-  if (doc.kind === "pdf") {
-    content.push({
-      type: "document",
-      source: {
-        type: "base64",
-        media_type: doc.mediaType,
-        data: doc.base64,
-      },
-    });
+  if (docs.length > 1) {
     content.push({
       type: "text",
       text:
-        "Extrae los datos del contrato adjunto usando el tool " +
-        `"${EXTRAER_DATOS_CONTRATO_TOOL_NAME}". Genera TODAS las ` +
-        "combinaciones product × season en `rows` — no resumas a una sola " +
-        "fila. Respeta las reglas del system prompt.",
-    });
-  } else {
-    const label =
-      doc.sourceFormat === "docx" ? "contrato (Word)" : "contrato (Excel)";
-    content.push({
-      type: "text",
-      text:
-        `A continuación el contenido del ${label} ya convertido a texto.\n\n` +
-        `-----BEGIN DOCUMENT-----\n${doc.text}\n-----END DOCUMENT-----\n\n` +
-        `Extrae los datos usando el tool "${EXTRAER_DATOS_CONTRATO_TOOL_NAME}". ` +
-        `Genera TODAS las combinaciones product × season en \`rows\` — no ` +
-        `resumas a una sola fila. Respeta las reglas del system prompt.`,
+        `A continuación encontrarás ${docs.length} documentos relacionados ` +
+        "que componen un mismo contrato (por ejemplo: contrato principal, " +
+        "anexos, listas de precios). Trátalos como una sola fuente de " +
+        "información y consolida los datos extraídos. Si un dato aparece en " +
+        "más de un documento, prefiere el más reciente o el más específico; " +
+        "registra la página de origen incluyendo el archivo cuando sea " +
+        "ambiguo (ej: \"anexo.pdf p.3\").",
     });
   }
+
+  docs.forEach((doc, idx) => {
+    const label = `Documento ${idx + 1} de ${docs.length}: ${doc.originalName}`;
+    if (doc.kind === "pdf") {
+      content.push({ type: "text", text: label });
+      content.push({
+        type: "document",
+        source: {
+          type: "base64",
+          media_type: doc.mediaType,
+          data: doc.base64,
+        },
+      });
+    } else {
+      const format =
+        doc.sourceFormat === "docx" ? "Word" : "Excel";
+      content.push({
+        type: "text",
+        text:
+          `${label} (${format}, convertido a texto)\n\n` +
+          `-----BEGIN DOCUMENT-----\n${doc.text}\n-----END DOCUMENT-----`,
+      });
+    }
+  });
+
+  const closing =
+    docs.length === 1
+      ? "Extrae los datos del contrato adjunto usando el tool " +
+        `"${EXTRAER_DATOS_CONTRATO_TOOL_NAME}". Genera TODAS las ` +
+        "combinaciones product × season en `rows` — no resumas a una sola " +
+        "fila. Respeta las reglas del system prompt."
+      : "Extrae los datos consolidados del conjunto de documentos usando el " +
+        `tool "${EXTRAER_DATOS_CONTRATO_TOOL_NAME}". Genera TODAS las ` +
+        "combinaciones product × season en `rows` — no resumas a una sola " +
+        "fila. Respeta las reglas del system prompt.";
+  content.push({ type: "text", text: closing });
 
   return { role: "user", content };
 }
@@ -277,14 +312,21 @@ export interface ExtractionResult {
 
 /**
  * Run the extraction against Anthropic with `tool_choice` forced to the
- * extraction tool. Maps SDK errors to `ApiError` with spec-aligned status
- * codes (502 for upstream failures, 422 for a missing tool_use block).
+ * extraction tool. Accepts one or more prepared documents; Claude treats the
+ * bundle as a single logical contract (see `buildUserMessage`). Maps SDK
+ * errors to `ApiError` with spec-aligned status codes (502 for upstream
+ * failures, 422 for a missing tool_use block).
  */
 export async function extractContract(
-  doc: PreparedDocument,
+  docs: PreparedDocumentInput[],
   requestId?: string,
   context?: ExtractionContext,
 ): Promise<ExtractionResult> {
+  if (docs.length === 0) {
+    // Defensive — the controller already rejects empty arrays with 400.
+    throw ApiError.badRequest("Se requiere al menos un documento para extraer.");
+  }
+
   const client = getAnthropicClient();
 
   let response;
@@ -298,7 +340,7 @@ export async function extractContract(
         type: "tool",
         name: EXTRAER_DATOS_CONTRATO_TOOL_NAME,
       },
-      messages: [buildUserMessage(doc, context)],
+      messages: [buildUserMessage(docs, context)],
     });
   } catch (err) {
     // Map all Anthropic-side failures (timeouts, 429, 5xx, auth) to 502.

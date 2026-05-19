@@ -78,10 +78,58 @@ interface RequestOptions extends Omit<RequestInit, "body"> {
   body?: unknown;
   /** Attach the persisted bearer token. Defaults to false. */
   auth?: boolean;
+  /**
+   * Client-side timeout in milliseconds. When the timer fires the underlying
+   * `fetch` is aborted via `AbortController` and the promise rejects with an
+   * `ApiError(408)` so callers can branch on it the same way they branch on
+   * backend errors. Defaults to no timeout (long-running uploads handle this
+   * per-call — e.g. `supplierIntelligence.extract` overrides to 6 minutes).
+   */
+  timeoutMs?: number;
+}
+
+/**
+ * Default UX message for client-side timeouts. Kept in Spanish to match the
+ * rest of the user-facing error copy.
+ */
+const CLIENT_TIMEOUT_MESSAGE =
+  "La solicitud tardó demasiado. Intenta de nuevo o usa un archivo más pequeño.";
+
+/**
+ * Wire an `AbortSignal` that fires after `timeoutMs`. Returns the signal plus
+ * a cleanup function the caller must invoke once the request settles so the
+ * timer is never leaked. If the caller already provided a signal, the two are
+ * combined so external aborts still propagate.
+ */
+function makeTimeoutSignal(
+  timeoutMs: number | undefined,
+  external: AbortSignal | null | undefined,
+): { signal: AbortSignal | undefined; cleanup: () => void; timedOutRef: { current: boolean } } {
+  const timedOutRef = { current: false };
+  if (!timeoutMs || timeoutMs <= 0) {
+    return { signal: external ?? undefined, cleanup: () => {}, timedOutRef };
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    timedOutRef.current = true;
+    controller.abort();
+  }, timeoutMs);
+  if (external) {
+    if (external.aborted) {
+      controller.abort();
+    } else {
+      external.addEventListener("abort", () => controller.abort(), { once: true });
+    }
+  }
+  return {
+    signal: controller.signal,
+    cleanup: () => clearTimeout(timer),
+    timedOutRef,
+  };
 }
 
 async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
-  const { body, headers, auth: authed = false, ...rest } = init;
+  const { body, headers, auth: authed = false, timeoutMs, signal: externalSignal, ...rest } = init;
 
   const finalHeaders: Record<string, string> = {
     Accept: "application/json",
@@ -97,11 +145,27 @@ async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
     }
   }
 
-  const res = await fetch(`${API_URL}${path}`, {
-    ...rest,
-    headers: finalHeaders,
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  const { signal, cleanup, timedOutRef } = makeTimeoutSignal(
+    timeoutMs,
+    externalSignal,
+  );
+
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${path}`, {
+      ...rest,
+      headers: finalHeaders,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
+    });
+  } catch (err) {
+    if (timedOutRef.current) {
+      throw new ApiError(408, CLIENT_TIMEOUT_MESSAGE, [], "client_timeout");
+    }
+    throw err;
+  } finally {
+    cleanup();
+  }
 
   // 204 No Content → nothing to parse.
   if (res.status === 204) {
@@ -147,9 +211,19 @@ async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
 async function requestForm<T>(
   path: string,
   form: FormData,
-  init: Omit<RequestInit, "body" | "method"> & { auth?: boolean } = {},
+  init: Omit<RequestInit, "body" | "method"> & {
+    auth?: boolean;
+    /** See `RequestOptions.timeoutMs`. */
+    timeoutMs?: number;
+  } = {},
 ): Promise<T> {
-  const { headers, auth: authed = false, ...rest } = init;
+  const {
+    headers,
+    auth: authed = false,
+    timeoutMs,
+    signal: externalSignal,
+    ...rest
+  } = init;
 
   const finalHeaders: Record<string, string> = {
     Accept: "application/json",
@@ -162,12 +236,28 @@ async function requestForm<T>(
     }
   }
 
-  const res = await fetch(`${API_URL}${path}`, {
-    ...rest,
-    method: "POST",
-    headers: finalHeaders,
-    body: form,
-  });
+  const { signal, cleanup, timedOutRef } = makeTimeoutSignal(
+    timeoutMs,
+    externalSignal,
+  );
+
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${path}`, {
+      ...rest,
+      method: "POST",
+      headers: finalHeaders,
+      body: form,
+      signal,
+    });
+  } catch (err) {
+    if (timedOutRef.current) {
+      throw new ApiError(408, CLIENT_TIMEOUT_MESSAGE, [], "client_timeout");
+    }
+    throw err;
+  } finally {
+    cleanup();
+  }
 
   if (res.status === 204) {
     return undefined as T;
@@ -217,7 +307,14 @@ async function requestBlob(
   init: RequestOptions,
   fallbackFilename: string,
 ): Promise<{ blob: Blob; filename: string }> {
-  const { body, headers, auth: authed = false, ...rest } = init;
+  const {
+    body,
+    headers,
+    auth: authed = false,
+    timeoutMs,
+    signal: externalSignal,
+    ...rest
+  } = init;
 
   const finalHeaders: Record<string, string> = {
     Accept: "application/octet-stream, */*",
@@ -233,11 +330,27 @@ async function requestBlob(
     }
   }
 
-  const res = await fetch(`${API_URL}${path}`, {
-    ...rest,
-    headers: finalHeaders,
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  const { signal, cleanup, timedOutRef } = makeTimeoutSignal(
+    timeoutMs,
+    externalSignal,
+  );
+
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${path}`, {
+      ...rest,
+      headers: finalHeaders,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
+    });
+  } catch (err) {
+    if (timedOutRef.current) {
+      throw new ApiError(408, CLIENT_TIMEOUT_MESSAGE, [], "client_timeout");
+    }
+    throw err;
+  } finally {
+    cleanup();
+  }
 
   if (!res.ok) {
     if (res.status === 401 && authed) clearSession();
@@ -666,16 +779,31 @@ export const api = {
   },
   supplierIntelligence: {
     /**
-     * Upload a single contract (PDF / Word / Excel) and get the extracted
-     * fields back. Backend accepts a single `file` part, max 20 MB.
+     * Upload one or more contract documents (PDF / Word / Excel) and get a
+     * single merged extraction back. Each file ≤ 20 MB; backend caps the
+     * number of files per request (currently 10) so the combined Claude
+     * payload stays within token + size limits.
+     *
+     * All files are sent under the same `files` multipart field name so the
+     * backend's `multer.array("files")` parses them as an ordered list.
      *
      * Not authenticated in the backend yet — keeping `auth: false` here so
      * the scoped error handler's 401 shape doesn't matter. Flip to
      * `auth: true` when the backend adds a guard.
      */
-    extract(file: File, input: ExtractContractInput) {
+    extract(files: File[], input: ExtractContractInput) {
+      if (files.length === 0) {
+        throw new ApiError(
+          400,
+          "Adjunta al menos un documento antes de continuar.",
+        );
+      }
       const form = new FormData();
-      form.append("file", file);
+      // Multer's `.array("files")` expects every file under the same field
+      // name; the backend reads `req.files` as an array preserving order.
+      for (const f of files) {
+        form.append("files", f);
+      }
       // Backend expects snake_case form fields. Comments are optional; the
       // existing-supplier flag is required and serialized as "true" / "false".
       form.append("is_existing_supplier", input.isExistingSupplier ? "true" : "false");
@@ -683,9 +811,14 @@ export const api = {
       if (trimmed) {
         form.append("comments", trimmed);
       }
+      // AI extraction is slow (Claude reading a multi-page PDF, sometimes
+      // multiple docs together). Give the request a generous 8-minute ceiling
+      // — long enough for combined extractions, short enough that a stuck
+      // backend doesn't hang the UI forever.
       return requestForm<ExtractContractResponse>(
         "/api/supplier-intelligence/extract",
         form,
+        { timeoutMs: 8 * 60 * 1000 },
       );
     },
     /**

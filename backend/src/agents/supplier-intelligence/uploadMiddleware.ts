@@ -6,6 +6,14 @@ import { detectDocKind } from "./extractors/index.js";
 export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // 20 MB per spec
 
 /**
+ * Maximum number of documents allowed in a single extract request. Picked to
+ * keep the combined Claude payload under the API's per-message size limit
+ * (~32 MB for native PDF blocks) and to bound the prompt token budget when
+ * mixing PDFs with extracted Word/Excel text.
+ */
+export const MAX_UPLOAD_FILES = 10;
+
+/**
  * We use `memoryStorage` intentionally:
  *   - never hits disk (no cleanup, no tmp-file leaks),
  *   - contracts are small (<20 MB) so RAM is not a concern,
@@ -36,18 +44,24 @@ const fileFilter: multer.Options["fileFilter"] = (_req, file, cb) => {
   cb(null, true);
 };
 
+/**
+ * Accept multiple files under a single `files` field. Multer enforces the
+ * per-file size limit and the per-request file count; anything bigger or
+ * a different field name is rejected before the controller runs.
+ */
 const uploader = multer({
   storage,
   fileFilter,
-  limits: { fileSize: MAX_UPLOAD_BYTES, files: 1 },
-}).single("file");
+  limits: { fileSize: MAX_UPLOAD_BYTES, files: MAX_UPLOAD_FILES },
+}).array("files", MAX_UPLOAD_FILES);
 
 /**
  * Thin wrapper that runs multer and normalizes its error taxonomy:
- *   - file too large         → 413
- *   - unexpected field name  → 400 ("expected field 'file'")
- *   - unsupported type       → 415 (raised by fileFilter above)
- *   - everything else        → delegated to global error handler
+ *   - file too large           → 413
+ *   - too many files           → 400
+ *   - unexpected field name    → 400 ("expected field 'files'")
+ *   - unsupported type         → 415 (raised by fileFilter above)
+ *   - everything else          → delegated to global error handler
  */
 export const handleContractUpload: RequestHandler = (
   req: Request,
@@ -61,13 +75,26 @@ export const handleContractUpload: RequestHandler = (
     }
     if (err instanceof MulterError) {
       if (err.code === "LIMIT_FILE_SIZE") {
-        next(new ApiError(413, "El archivo excede el límite de 20 MB."));
+        next(
+          new ApiError(
+            413,
+            `Cada archivo debe pesar 20 MB o menos.`,
+          ),
+        );
+        return;
+      }
+      if (err.code === "LIMIT_FILE_COUNT") {
+        next(
+          ApiError.badRequest(
+            `Demasiados archivos. Máximo permitido: ${MAX_UPLOAD_FILES}.`,
+          ),
+        );
         return;
       }
       if (err.code === "LIMIT_UNEXPECTED_FILE") {
         next(
           ApiError.badRequest(
-            "Campo de archivo inesperado. Envía el documento en el campo 'file'.",
+            "Campo de archivo inesperado. Envía los documentos en el campo 'files'.",
           ),
         );
         return;

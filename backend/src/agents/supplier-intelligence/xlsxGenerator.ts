@@ -27,17 +27,14 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
- * Ruta a la plantilla. El backend vive en `backend/src/...` y la plantilla
- * en `frontend/data/...` — subimos 4 niveles desde este archivo. Si en el
- * futuro la plantilla se mueve a un paquete compartido, actualizar aquí.
+ * Ruta a la plantilla. Ahora vive en `backend/data/` para que el contenedor
+ * de producción pueda encontrarla sin depender del directorio frontend.
  */
 const TEMPLATE_PATH = resolve(
   __dirname,
   "..",
   "..",
   "..",
-  "..",
-  "frontend",
   "data",
   "plantilla-agente-utopia.xlsx",
 );
