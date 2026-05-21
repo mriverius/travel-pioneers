@@ -33,11 +33,29 @@ import type {
 export const SUPPLIER_INTELLIGENCE_MODEL = "claude-opus-4-6";
 
 /**
- * Cap de output tokens. Antes era 1500 cuando devolvíamos 1 fila plana
- * (~150 tokens). Ahora un contrato como Parador con 21 filas ronda los
- * ~5-8k tokens. Subimos a 16k para tener margen sin riesgo de cortes.
+ * Cap de output tokens. Historia:
+ *   - 1500: una fila plana (~150 tokens). Histórico.
+ *   - 16k:  Parador (~21 filas ≈ 5-8k tokens). OK pero ajustado.
+ *   - 32k:  intento de cubrir BTPV (~130 filas), insuficiente.
+ *   - 64k:  límite actual. Cubre BTPV (~40k output) con margen cómodo y
+ *           aguanta hasta ~200 filas si aparecieran.
+ *
+ * Opus 4.6 admite hasta 128k. NO cobramos por el cap — solo por los tokens
+ * que efectivamente se emiten — así que un cap alto solo cuesta latencia.
+ * Subir a 96k/128k es viable si en el futuro vemos contratos más grandes.
+ *
+ * NOTA: a partir de ~16k Anthropic recomienda streaming para evitar HTTP
+ * timeouts upstream — ver `extractContract`.
+ *
+ * NOTA sobre extended thinking: NO podemos enviar `thinking` config en
+ * esta llamada — la API responde 400 con
+ *   "Thinking may not be enabled when tool_choice forces tool use."
+ * y como nosotros forzamos tool_choice (es la base del schema-driven
+ * extract), thinking queda automáticamente deshabilitado del lado del
+ * servidor. Eso significa que los 64k completos van a la salida, no se
+ * comparten con un budget de thinking — mejor para nosotros.
  */
-const MAX_TOKENS = 16_000;
+const MAX_TOKENS = 64_000;
 
 /**
  * Optional context the caller can attach to an extraction. The `comments`
@@ -329,19 +347,31 @@ export async function extractContract(
 
   const client = getAnthropicClient();
 
+  // Streaming endpoint en lugar de `messages.create` no-stream: con
+  // MAX_TOKENS alto (64k) y contratos densos, la generación puede tardar
+  // 3-5 min y Anthropic recomienda streaming para evitar HTTP timeouts
+  // upstream. La SDK helper `messages.stream().finalMessage()` colecta los
+  // chunks y nos devuelve un `Message` con la misma forma que el endpoint
+  // no-stream, así que el resto del flujo (búsqueda de tool_use, coerce,
+  // validación) no cambia.
   let response;
   try {
-    response = await client.messages.create({
-      model: SUPPLIER_INTELLIGENCE_MODEL,
-      max_tokens: MAX_TOKENS,
-      system: SUPPLIER_INTELLIGENCE_SYSTEM_PROMPT,
-      tools: [EXTRAER_DATOS_CONTRATO_TOOL],
-      tool_choice: {
-        type: "tool",
-        name: EXTRAER_DATOS_CONTRATO_TOOL_NAME,
-      },
-      messages: [buildUserMessage(docs, context)],
-    });
+    response = await client.messages
+      .stream({
+        model: SUPPLIER_INTELLIGENCE_MODEL,
+        max_tokens: MAX_TOKENS,
+        // No mandar `thinking`: la API rechaza con 400 cuando tool_choice
+        // fuerza un tool, y como además forzamos el tool el modelo no hace
+        // thinking del lado del servidor — todo el max_tokens va al output.
+        system: SUPPLIER_INTELLIGENCE_SYSTEM_PROMPT,
+        tools: [EXTRAER_DATOS_CONTRATO_TOOL],
+        tool_choice: {
+          type: "tool",
+          name: EXTRAER_DATOS_CONTRATO_TOOL_NAME,
+        },
+        messages: [buildUserMessage(docs, context)],
+      })
+      .finalMessage();
   } catch (err) {
     // Map all Anthropic-side failures (timeouts, 429, 5xx, auth) to 502.
     // We never surface the upstream status code directly because the client
@@ -362,6 +392,37 @@ export async function extractContract(
       error: err instanceof Error ? err.message : String(err),
     });
     throw new ApiError(502, "Error al invocar al agente de extracción.");
+  }
+
+  // Visibilidad: stop_reason + uso de tokens en TODA extracción. output_tokens
+  // nos da una señal directa de cuánto cerca del cap está cada contrato —
+  // útil para detectar la tendencia antes de pegar en MAX_TOKENS.
+  logger.info("Anthropic extraction completed", {
+    requestId,
+    stopReason: response.stop_reason,
+    outputTokens: response.usage?.output_tokens,
+    inputTokens: response.usage?.input_tokens,
+  });
+
+  // Truncamiento por max_tokens: el JSON del tool_use queda partido a la
+  // mitad y solo llega `shared_fields` (o ni eso). En lugar de fallar con
+  // "formato inesperado" — que no le dice nada al usuario — devolvemos un
+  // error específico. Con MAX_TOKENS=64k esto solo debería pasar en
+  // contratos extraordinarios (>200 filas); si se vuelve recurrente, subir
+  // MAX_TOKENS a 96k/128k es seguro — cobramos por tokens emitidos, no por
+  // el cap.
+  if (response.stop_reason === "max_tokens") {
+    logger.warn("Extraction hit max_tokens — output truncated", {
+      requestId,
+      maxTokens: MAX_TOKENS,
+      outputTokens: response.usage?.output_tokens,
+    });
+    throw new ApiError(
+      502,
+      "El contrato es excepcionalmente denso y la extracción excedió el " +
+        "límite máximo de salida del agente. Avisanos para subir el " +
+        "límite — el modelo soporta hasta el doble de la capacidad actual.",
+    );
   }
 
   // Find the tool_use block. Even with `tool_choice` forced the API spec
@@ -391,6 +452,8 @@ export async function extractContract(
     logger.error("Failed to coerce Claude tool_use input", {
       requestId,
       error: err instanceof Error ? err.message : String(err),
+      stopReason: response.stop_reason,
+      outputTokens: response.usage?.output_tokens,
       input: toolUse.input,
     });
     throw new ApiError(
