@@ -618,7 +618,10 @@ export const ContractRunScalarFieldEnum = {
   rows: 'rows',
   catalogPrefill: 'catalogPrefill',
   manualFields: 'manualFields',
-  aiModel: 'aiModel'
+  aiModel: 'aiModel',
+  inputTokens: 'inputTokens',
+  outputTokens: 'outputTokens',
+  costUsd: 'costUsd'
 } as const
 
 export type ContractRunScalarFieldEnum = (typeof ContractRunScalarFieldEnum)[keyof typeof ContractRunScalarFieldEnum]

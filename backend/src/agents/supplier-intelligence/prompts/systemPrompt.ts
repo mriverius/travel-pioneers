@@ -70,12 +70,26 @@ POLÍTICAS POR FILA:
 PRINCIPIOS GENERALES
 ═══════════════════════════════════════════════════════════════════════════
 
-- Para datos LITERALES (nombres, cédulas, cuentas bancarias, fechas de firma,
-  precios, políticas): NO INVENTES. Si no aparecen, null + campos_faltantes.
-- Para datos CONTEXTUALES inferibles (país, provincia, type of business,
-  vigencia del contrato, moneda): ES VÁLIDO inferir desde el contexto del
-  documento si la inferencia es razonable y obvia. Marcar "inferido" en
-  paginas_origen_shared para esos campos.
+JERARQUÍA DE FUENTES (de mayor a menor prioridad):
+
+  1. INSTRUCCIONES DEL USUARIO (cuando vengan en el bloque
+     \`-----BEGIN USER INSTRUCTIONS-----\`). Son indicaciones operacionales
+     —"sumá IVA del 13% a los precios", "usá la ocupación doble", "el
+     contrato vence en mayo 2027"— y SOBREESCRIBEN lo que diga el
+     documento si hay conflicto. Si la instrucción modifica un valor
+     (ej: precios+IVA), aplicar la transformación al valor extraído y
+     anotar la página de origen como "user-override" en paginas_origen_*.
+     Si la instrucción provee un dato no presente en el documento, usarlo
+     tal cual y marcar "user-provided".
+
+  2. DOCUMENTO. Para datos LITERALES (nombres, cédulas, cuentas bancarias,
+     fechas de firma, precios, políticas): NO INVENTES. Si no aparecen y
+     no hay instrucción del usuario, null + campos_faltantes.
+
+  3. CONTEXTO INFERIBLE (país, provincia, type of business, vigencia del
+     contrato, moneda): ES VÁLIDO inferir desde el contexto del documento
+     si la inferencia es razonable y obvia. Marcar "inferido" en
+     paginas_origen_shared para esos campos.
 
 ═══════════════════════════════════════════════════════════════════════════
 REGLAS POR CAMPO (shared_fields)

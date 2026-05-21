@@ -536,6 +536,15 @@ export interface ExtractionMeta {
    * extracted data.
    */
   is_existing_supplier?: boolean;
+  /**
+   * Token usage real reportado por Anthropic + costo estimado en USD a
+   * los precios actuales del modelo. El frontend reenvía estos valores en
+   * el `saveRun` para que queden en el historial.
+   * Opcionales por compat con backends viejos que aún no los emitan.
+   */
+  input_tokens?: number;
+  output_tokens?: number;
+  cost_usd?: number;
 }
 
 export interface ExtractContractResponse {
@@ -661,7 +670,7 @@ export interface MatchServiceResponse {
 
 /* --- contract runs (persistencia de step 3) --- */
 
-export type ContractFileKind = "pdf" | "docx" | "xlsx";
+export type ContractFileKind = "pdf" | "docx" | "xlsx" | "image";
 
 /**
  * Lo que el frontend envía a `POST /contracts` cuando un run llega a
@@ -676,6 +685,14 @@ export interface SaveContractRunInput {
   rows: ExtractedContractRow[];
   catalog_prefill?: GenerateXlsxCatalogPrefill | null;
   manual_fields?: GenerateXlsxManualFields | null;
+  /**
+   * Telemetría opcional reenviada desde `meta` del extract. Si el extract
+   * no las trae (compat con backends viejos), se omiten y el backend las
+   * persiste como null — el historial sigue siendo válido.
+   */
+  input_tokens?: number;
+  output_tokens?: number;
+  cost_usd?: number;
 }
 
 export interface ContractRunUserRef {
@@ -697,6 +714,13 @@ export interface ContractRun {
   catalogPrefill: GenerateXlsxCatalogPrefill | null;
   manualFields: GenerateXlsxManualFields | null;
   aiModel: string;
+  /**
+   * Token usage + costo USD del run. Nullables porque los runs persistidos
+   * antes de esta feature no tienen estos valores.
+   */
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: number | null;
 }
 
 /**

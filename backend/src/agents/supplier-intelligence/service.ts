@@ -33,6 +33,28 @@ import type {
 export const SUPPLIER_INTELLIGENCE_MODEL = "claude-opus-4-6";
 
 /**
+ * Pricing oficial de Claude Opus 4.6 (USD por millón de tokens).
+ *
+ * Fuente: https://platform.claude.com/docs/en/about-claude/pricing (feb 2026).
+ * Si Anthropic cambia precios, este es el único lugar donde editar — el
+ * cómputo de `cost_usd` por extracción se hace abajo en `extractContract`.
+ *
+ * Nota: NO contemplamos prompt caching todavía. Cuando lo activemos, habrá
+ * que distinguir entre cache_write / cache_hit (tarifas distintas) — por
+ * ahora todo el input cuenta a precio plano.
+ */
+const PRICE_INPUT_PER_MTOK_USD = 5;
+const PRICE_OUTPUT_PER_MTOK_USD = 25;
+
+function computeCostUsd(inputTokens: number, outputTokens: number): number {
+  const inputCost = (inputTokens / 1_000_000) * PRICE_INPUT_PER_MTOK_USD;
+  const outputCost = (outputTokens / 1_000_000) * PRICE_OUTPUT_PER_MTOK_USD;
+  // 6 decimales de precisión es overkill para mostrar pero útil para
+  // reportes agregados (sumar muchas extracciones baratas sin redondeo).
+  return Number((inputCost + outputCost).toFixed(6));
+}
+
+/**
  * Cap de output tokens. Historia:
  *   - 1500: una fila plana (~150 tokens). Histórico.
  *   - 16k:  Parador (~21 filas ≈ 5-8k tokens). OK pero ajustado.
@@ -70,29 +92,51 @@ export interface ExtractionContext {
 
 /**
  * Render the optional user-provided context as a text block that gets
- * prepended to the document content. We wrap it in clear delimiters and a
- * heads-up sentence so Claude treats it as supplementary, not authoritative.
+ * prepended to the document content.
+ *
+ * Las INSTRUCCIONES DEL USUARIO van en lo más alto de la pila de contexto
+ * con prioridad ALTA — son indicaciones operacionales (no datos), y le
+ * dicen a Claude CÓMO interpretar el documento, no qué extraer. Casos
+ * reales que motivan esta prioridad:
+ *   - "los precios del PDF no incluyen IVA, sumá 13%"
+ *   - "ignorar las tarifas en colones, usar solo USD"
+ *   - "el contrato vence en mayo 2027 aunque diga 2026"
+ *   - "usar la ocupación doble como base"
+ *
+ * Si solo las tratáramos como "contexto complementario" (versión anterior),
+ * el modelo las ignora cuando entran en conflicto con el texto del
+ * documento — exactamente al revés de lo que el usuario quiere.
  */
 function buildContextBlock(ctx: ExtractionContext | undefined): string | null {
   if (!ctx) return null;
   const parts: string[] = [];
+
+  if (ctx.comments && ctx.comments.trim() !== "") {
+    parts.push(
+      "═══════════════════════════════════════════════════════════════════\n" +
+        "INSTRUCCIONES DEL USUARIO — PRIORIDAD ALTA\n" +
+        "═══════════════════════════════════════════════════════════════════\n\n" +
+        "Las siguientes notas vienen directamente del usuario que cargó este " +
+        "contrato. Son INSTRUCCIONES OPERACIONALES, no datos. Tienen " +
+        "prioridad SOBRE el documento cuando dicen algo distinto a lo que " +
+        "el documento muestra literalmente.\n\n" +
+        "Ejemplos típicos: \"sumá IVA del 13% a los precios\", \"usá la " +
+        "ocupación doble\", \"ignorá las tarifas en colones\", \"el contrato " +
+        "vence en mayo 2027\". Si una instrucción contradice el documento, " +
+        "seguí la instrucción del usuario y registralo en " +
+        "paginas_origen_shared del campo afectado como \"user-override\".\n\n" +
+        "Si la instrucción es un dato puntual (ej: el email de reservas), " +
+        "tratala como autoritativa para ese campo y marcala como " +
+        "\"user-provided\" en paginas_origen_shared.\n\n" +
+        `-----BEGIN USER INSTRUCTIONS-----\n${ctx.comments.trim()}\n-----END USER INSTRUCTIONS-----`,
+    );
+  }
 
   if (ctx.isExistingSupplier !== undefined) {
     parts.push(
       ctx.isExistingSupplier
         ? "Este proveedor YA EXISTE en el sistema (es un proveedor recurrente)."
         : "Este proveedor es NUEVO (primera vez que se registra).",
-    );
-  }
-
-  if (ctx.comments && ctx.comments.trim() !== "") {
-    parts.push(
-      "Comentarios adicionales del usuario (típicamente extraídos del cuerpo " +
-        "del correo). Úsalos SOLO como contexto complementario; el documento " +
-        "sigue siendo la fuente autoritativa. Si un dato aparece únicamente " +
-        "aquí y no en el documento, márcalo como \"inferido\" en " +
-        "paginas_origen_shared.\n\n" +
-        `-----BEGIN USER NOTES-----\n${ctx.comments.trim()}\n-----END USER NOTES-----`,
     );
   }
 
@@ -111,17 +155,22 @@ export type PreparedDocumentInput = PreparedDocument & {
 };
 
 /**
- * Build the user message that gets sent alongside the system prompt. PDFs go
- * as native `document` blocks (Claude reads layout + page numbers); Word /
- * Excel arrive as plain text blocks. When the caller supplies additional
- * context (comments / supplier flag), it's prepended as a separate text block
- * so the document content remains untouched.
+ * Build the user message that gets sent alongside the system prompt. Tres
+ * tipos de bloque según el documento:
+ *   - PDF      → `document` block nativo (Claude lee layout + páginas).
+ *   - Image    → `image` block nativo (Claude lee con vision).
+ *   - DOCX/XLSX → texto convertido (mammoth / SheetJS).
  *
- * When multiple documents are uploaded together, each one is rendered as its
- * own pair of (header text block, content block). The header tells Claude
- * which file it's looking at so cross-document references stay readable; the
- * trailing instruction asks the model to treat the whole bundle as ONE
- * logical contract (typical case: main contract + amendment + price list).
+ * Cuando el caller manda contexto adicional (comments / supplier flag),
+ * se prepende como bloque de texto separado para no mezclarse con los
+ * documentos.
+ *
+ * Cuando se cargan varios documentos juntos, cada uno tiene su par
+ * (header de texto, bloque de contenido). El header le indica al modelo
+ * qué archivo está viendo para que las referencias cruzadas queden
+ * legibles, y una instrucción final le pide tratar el bundle como UN
+ * solo contrato lógico (caso típico: contrato principal + anexo + lista
+ * de precios).
  */
 function buildUserMessage(
   docs: PreparedDocumentInput[],
@@ -154,6 +203,26 @@ function buildUserMessage(
       content.push({ type: "text", text: label });
       content.push({
         type: "document",
+        source: {
+          type: "base64",
+          media_type: doc.mediaType,
+          data: doc.base64,
+        },
+      });
+    } else if (doc.kind === "image") {
+      // Imágenes (JPEG / PNG / GIF / WebP) van como bloque `image` nativo.
+      // El header explícita "(imagen)" para que el modelo entienda que no
+      // hay numeración de páginas — el campo `paginas_origen_*` debería
+      // anotar simplemente el nombre del archivo (no un número) cuando el
+      // origen sea una imagen.
+      content.push({
+        type: "text",
+        text:
+          `${label} (imagen — sin paginación; usá el nombre del archivo en ` +
+          `paginas_origen_* en lugar de un número de página).`,
+      });
+      content.push({
+        type: "image",
         source: {
           type: "base64",
           media_type: doc.mediaType,
@@ -326,6 +395,16 @@ export interface ExtractionResult {
   data: ExtractedContract;
   validation: ValidationResult;
   model: string;
+  /**
+   * Uso real reportado por Anthropic + costo estimado en USD según los
+   * precios actuales del modelo (ver `PRICE_*_PER_MTOK_USD`). Se persiste
+   * con el run para el historial / dashboards.
+   */
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    costUsd: number;
+  };
 }
 
 /**
@@ -464,9 +543,14 @@ export async function extractContract(
 
   const { extraction, validation } = validateExtraction(raw);
 
+  const inputTokens = response.usage?.input_tokens ?? 0;
+  const outputTokens = response.usage?.output_tokens ?? 0;
+  const costUsd = computeCostUsd(inputTokens, outputTokens);
+
   return {
     data: extraction,
     validation,
     model: SUPPLIER_INTELLIGENCE_MODEL,
+    usage: { inputTokens, outputTokens, costUsd },
   };
 }

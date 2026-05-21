@@ -121,7 +121,12 @@ export async function extractContractHandler(
         `Tipo de archivo no soportado: ${file.originalname} (${file.mimetype ?? "desconocido"}).`,
       );
     }
-    const doc = await prepareDocument(kind, file.buffer);
+    const doc = await prepareDocument(
+      kind,
+      file.buffer,
+      file.mimetype,
+      file.originalname,
+    );
     prepared.push({ ...doc, originalName: file.originalname });
     totalBytes += file.size;
   }
@@ -135,10 +140,11 @@ export async function extractContractHandler(
     hasComments: comments !== undefined,
   });
 
-  const { data, validation, model } = await extractContract(prepared, req.id, {
-    comments,
-    isExistingSupplier,
-  });
+  const { data, validation, model, usage } = await extractContract(
+    prepared,
+    req.id,
+    { comments, isExistingSupplier },
+  );
 
   const combinedFilename = combineFilenames(files);
 
@@ -148,6 +154,9 @@ export async function extractContractHandler(
     fileCount: files.length,
     confianza: data.confianza,
     warnings: validation.warnings.length,
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    costUsd: usage.costUsd,
   });
 
   res.status(200).json({
@@ -160,6 +169,13 @@ export async function extractContractHandler(
       model,
       processed_at: new Date().toISOString(),
       is_existing_supplier: isExistingSupplier,
+      // Telemetría real reportada por Anthropic — el frontend la persiste
+      // junto con el run en el step 3 (saveRun). Si Anthropic no reportó
+      // usage (edge case), inputTokens/outputTokens vienen en 0 y costUsd
+      // como 0 — preferible a omitir el campo y romper el contrato.
+      input_tokens: usage.inputTokens,
+      output_tokens: usage.outputTokens,
+      cost_usd: usage.costUsd,
     },
   });
 }

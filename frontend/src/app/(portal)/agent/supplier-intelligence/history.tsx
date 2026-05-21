@@ -8,6 +8,7 @@ import {
   Eye,
   FileSpreadsheet,
   FileText,
+  ImageIcon,
   Loader2,
   Search,
   X,
@@ -63,14 +64,23 @@ export interface HistoryEntry {
   catalogPrefill: GenerateXlsxCatalogPrefill | null;
   manualFields: GenerateXlsxManualFields | null;
   rows: ExtractedContractRow[];
+
+  /**
+   * Telemetría del run (Anthropic usage + costo estimado en USD).
+   * Null en runs anteriores a la feature de tracking de tokens.
+   */
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: number | null;
 }
 
 /* ---------------------------------- Data ---------------------------------- */
 
 function toHistoryEntry(run: ContractRun): HistoryEntry {
-  // `fileKind` viene del backend como ContractFileKind ("pdf"|"docx"|"xlsx"),
-  // que coincide 1:1 con FileKind en este módulo. Cast explícito para que
-  // TypeScript no infiera `string` aunque sean estructuralmente iguales.
+  // `fileKind` viene del backend como ContractFileKind
+  // ("pdf"|"docx"|"xlsx"|"image"), que coincide 1:1 con FileKind en este
+  // módulo. Cast explícito para que TypeScript no infiera `string` aunque
+  // sean estructuralmente iguales.
   const kind: FileKind = run.fileKind as ContractFileKind;
   return {
     id: run.id,
@@ -84,6 +94,9 @@ function toHistoryEntry(run: ContractRun): HistoryEntry {
     catalogPrefill: run.catalogPrefill,
     manualFields: run.manualFields,
     rows: run.rows,
+    inputTokens: run.inputTokens,
+    outputTokens: run.outputTokens,
+    costUsd: run.costUsd,
   };
 }
 
@@ -157,6 +170,34 @@ function formatCalendarShort(d: Date): string {
   return d.toLocaleDateString("es-CR", { day: "numeric", month: "short" });
 }
 
+/**
+ * Compactá un conteo de tokens para mostrar en chips/badges:
+ *   123       → "123"
+ *   3_456     → "3.5K"
+ *   42_318    → "42.3K"
+ *   1_234_567 → "1.2M"
+ * Anthropic devuelve usage como enteros; mantenemos 1 decimal en K/M para
+ * que cifras intermedias (típicas en nuestro flujo, 1K-100K) sigan
+ * legibles sin agrandar el chip.
+ */
+function formatTokenCount(n: number): string {
+  if (n < 1000) return `${n}`;
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}K`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+/**
+ * Costo en USD con 2-4 decimales según magnitud:
+ *   < $0.01 → 4 decimales (ej. "$0.0042")
+ *   ≥ $0.01 → 2 decimales (ej. "$1.23")
+ * Por debajo del centavo no es señal: queremos ver si fue $0.001 o $0.008
+ * para no confundir "casi gratis" con "0".
+ */
+function formatCostUsd(usd: number): string {
+  if (usd < 0.01) return `$${usd.toFixed(4)}`;
+  return `$${usd.toFixed(2)}`;
+}
+
 function formatRelative(d: Date): string {
   const diffMs = Date.now() - d.getTime();
   const diffMin = Math.floor(diffMs / 60_000);
@@ -173,6 +214,7 @@ const HISTORY_FILE_ICONS: Record<FileKind, LucideIcon> = {
   pdf: FileText,
   docx: FileText,
   xlsx: FileSpreadsheet,
+  image: ImageIcon,
 };
 
 const FILE_KIND_TONES: Record<
@@ -197,6 +239,12 @@ const FILE_KIND_TONES: Record<
     text: "text-emerald-300",
     label: "XLSX",
   },
+  image: {
+    bg: "bg-violet-500/10",
+    border: "border-violet-500/30",
+    text: "text-violet-300",
+    label: "IMG",
+  },
 };
 
 /* --------------------------------- Filters -------------------------------- */
@@ -209,6 +257,7 @@ const FILE_FILTERS: { id: FileFilter; label: string }[] = [
   { id: "pdf", label: "PDF" },
   { id: "docx", label: "DOCX" },
   { id: "xlsx", label: "XLSX" },
+  { id: "image", label: "IMG" },
 ];
 
 const DATE_FILTERS: { id: DateFilter; label: string }[] = [
@@ -654,6 +703,17 @@ function HistoryDetailModal({
   // (sería raro pero defensivo): un contrato persistido siempre tiene ≥1.
   const rowCount = Math.max(entry.rows.length, 1);
 
+  // Telemetría: input/output por separado + costo. Runs persistidos
+  // antes de la feature de tracking traen null en estos campos — los
+  // ocultamos en ese caso para no mostrar "0 tokens · $0" engañoso.
+  // Mostramos input y output como números independientes (no totalizamos)
+  // porque tienen tarifas distintas con Anthropic ($5/M input vs $25/M
+  // output) y separarlos hace visible dónde se va el costo.
+  const hasUsage =
+    entry.inputTokens !== null &&
+    entry.outputTokens !== null &&
+    entry.costUsd !== null;
+
   return createPortal(
     <div
       role="dialog"
@@ -705,6 +765,44 @@ function HistoryDetailModal({
                 <CheckCircle2 className="w-3 h-3" />
                 {rowCount} {rowCount === 1 ? "fila" : "filas"} · 52 columnas
               </span>
+              {hasUsage && (
+                <>
+                  {/*
+                    Tres chips chicos, uno por dimensión — input, output y
+                    costo. Más compacto que párrafos pero deja en claro
+                    cuántos tokens se gastaron en cada lado y qué costó.
+                    El tooltip muestra el conteo exacto (sin abreviación
+                    K/M) por si alguien quiere copiarlo a un dashboard.
+                  */}
+                  <span
+                    title={`Input: ${entry.inputTokens!.toLocaleString("es-CR")} tokens`}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-indigo-500/30 bg-indigo-500/10 text-[10.5px] font-semibold uppercase tracking-wider text-indigo-300"
+                  >
+                    <span className="text-indigo-400/70">Input</span>
+                    <span className="tabular-nums">
+                      {formatTokenCount(entry.inputTokens!)}
+                    </span>
+                  </span>
+                  <span
+                    title={`Output: ${entry.outputTokens!.toLocaleString("es-CR")} tokens`}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-indigo-500/30 bg-indigo-500/10 text-[10.5px] font-semibold uppercase tracking-wider text-indigo-300"
+                  >
+                    <span className="text-indigo-400/70">Output</span>
+                    <span className="tabular-nums">
+                      {formatTokenCount(entry.outputTokens!)}
+                    </span>
+                  </span>
+                  <span
+                    title={`Costo aproximado (Opus 4.6: $5/M input + $25/M output)`}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-amber-500/30 bg-amber-500/10 text-[10.5px] font-semibold uppercase tracking-wider text-amber-300"
+                  >
+                    <span className="text-amber-400/70">Costo</span>
+                    <span className="tabular-nums">
+                      {formatCostUsd(entry.costUsd!)}
+                    </span>
+                  </span>
+                </>
+              )}
             </div>
           </div>
           <button

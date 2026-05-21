@@ -125,6 +125,40 @@ interface CatalogPrefill {
   codigo_servicio: string | null;
 }
 
+/**
+ * Telemetría opcional. Aceptamos:
+ *   - `undefined` / `null`     → null (cliente viejo, no se persiste nada)
+ *   - número entero ≥ 0        → ese valor
+ *   - cualquier otra cosa      → 400, para que no entren basura silenciosa
+ *     (ej. el cliente mandando "1234" en string por accidente)
+ */
+function coerceOptionalNonNegativeInt(
+  input: unknown,
+  fieldName: string,
+): number | null {
+  if (input === undefined || input === null) return null;
+  if (typeof input !== "number" || !Number.isFinite(input)) {
+    throw ApiError.badRequest(`\`${fieldName}\` debe ser un número entero ≥ 0.`);
+  }
+  if (input < 0 || !Number.isInteger(input)) {
+    throw ApiError.badRequest(`\`${fieldName}\` debe ser un número entero ≥ 0.`);
+  }
+  return input;
+}
+
+function coerceOptionalNonNegativeFloat(
+  input: unknown,
+  fieldName: string,
+): number | null {
+  if (input === undefined || input === null) return null;
+  if (typeof input !== "number" || !Number.isFinite(input) || input < 0) {
+    throw ApiError.badRequest(
+      `\`${fieldName}\` debe ser un número (float) ≥ 0.`,
+    );
+  }
+  return input;
+}
+
 function coerceCatalogPrefill(input: unknown): CatalogPrefill | null {
   if (input === null || input === undefined) return null;
   if (typeof input !== "object") {
@@ -155,6 +189,14 @@ interface PublicContractRun {
   catalogPrefill: CatalogPrefill | null;
   manualFields: ManualFields | null;
   aiModel: string;
+  /**
+   * Telemetría real reportada por Anthropic (tokens) y el costo estimado
+   * en USD computado en el servicio. Nullables porque las filas
+   * persistidas antes de esta feature no los tienen.
+   */
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: number | null;
 }
 
 interface ContractRunRow {
@@ -168,6 +210,9 @@ interface ContractRunRow {
   catalogPrefill: unknown;
   manualFields: unknown;
   aiModel: string;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: number | null;
   processedBy: { id: string; name: string; email: string };
 }
 
@@ -184,6 +229,9 @@ function toPublicRun(row: ContractRunRow): PublicContractRun {
     catalogPrefill: row.catalogPrefill as CatalogPrefill | null,
     manualFields: row.manualFields as ManualFields | null,
     aiModel: row.aiModel,
+    inputTokens: row.inputTokens,
+    outputTokens: row.outputTokens,
+    costUsd: row.costUsd,
   };
 }
 
@@ -200,9 +248,18 @@ interface SaveBody {
   rows: unknown;
   catalog_prefill?: unknown;
   manual_fields?: unknown;
+  /**
+   * Telemetría opcional del run. El frontend la reenvía desde `meta` que
+   * devolvió `POST /extract`. Si el cliente es viejo (no las envía), las
+   * persistimos como null en lugar de bloquear el save — la fila sigue
+   * siendo válida para el historial.
+   */
+  input_tokens?: unknown;
+  output_tokens?: unknown;
+  cost_usd?: unknown;
 }
 
-const ALLOWED_FILE_KINDS = new Set(["pdf", "docx", "xlsx"]);
+const ALLOWED_FILE_KINDS = new Set(["pdf", "docx", "xlsx", "image"]);
 
 export async function saveContractRunHandler(
   req: Request<unknown, unknown, SaveBody>,
@@ -224,7 +281,7 @@ export async function saveContractRunHandler(
 
   const fileKind = typeof body.file_kind === "string" ? body.file_kind.trim().toLowerCase() : "";
   if (!ALLOWED_FILE_KINDS.has(fileKind)) {
-    throw ApiError.badRequest("`file_kind` debe ser pdf, docx o xlsx.");
+    throw ApiError.badRequest("`file_kind` debe ser pdf, docx, xlsx o image.");
   }
 
   const fileSize = typeof body.file_size === "number" ? body.file_size : NaN;
@@ -255,6 +312,19 @@ export async function saveContractRunHandler(
   const catalogPrefill = coerceCatalogPrefill(body.catalog_prefill);
   const manualFields = coerceManualFields(body.manual_fields);
 
+  // Telemetría: si llega, debe ser numérica y no-negativa. La rechazamos
+  // si es basura, pero un cliente viejo que no la mande sigue funcionando
+  // (queda persistido como null).
+  const inputTokens = coerceOptionalNonNegativeInt(
+    body.input_tokens,
+    "input_tokens",
+  );
+  const outputTokens = coerceOptionalNonNegativeInt(
+    body.output_tokens,
+    "output_tokens",
+  );
+  const costUsd = coerceOptionalNonNegativeFloat(body.cost_usd, "cost_usd");
+
   const created = await prisma.contractRun.create({
     data: {
       processedById: req.auth.id,
@@ -268,6 +338,9 @@ export async function saveContractRunHandler(
       rows: rows as unknown as object,
       catalogPrefill: (catalogPrefill ?? undefined) as unknown as object | undefined,
       manualFields: (manualFields ?? undefined) as unknown as object | undefined,
+      inputTokens: inputTokens ?? undefined,
+      outputTokens: outputTokens ?? undefined,
+      costUsd: costUsd ?? undefined,
     },
     include: {
       processedBy: { select: { id: true, name: true, email: true } },
@@ -280,6 +353,9 @@ export async function saveContractRunHandler(
     actorId: req.auth.id,
     rowCount: rows.length,
     filename,
+    inputTokens,
+    outputTokens,
+    costUsd,
   });
 
   res.status(201).json({ run: toPublicRun(created as unknown as ContractRunRow) });

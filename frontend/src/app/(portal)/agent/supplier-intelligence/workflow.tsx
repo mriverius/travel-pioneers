@@ -8,6 +8,7 @@ import {
   CloudUpload,
   FileSpreadsheet,
   FileText,
+  ImageIcon,
   Loader2,
   MessageSquareText,
   Plus,
@@ -68,7 +69,7 @@ import {
 
 type Step = 1 | 2 | 3;
 
-export type FileKind = "pdf" | "docx" | "xlsx";
+export type FileKind = "pdf" | "docx" | "xlsx" | "image";
 
 /* -------------------------------------------------------------------------- */
 /*                       Catalog prefill from master                          */
@@ -119,10 +120,27 @@ const ACCEPT_ATTR = [
   ".xlsx",
   "application/vnd.ms-excel",
   ".xls",
+  // Imágenes — Claude Opus 4.6 las lee nativamente con vision. Las
+  // extensiones se incluyen además del MIME porque algunos sistemas
+  // (notablemente Windows arrastrando desde el escritorio) suben con
+  // MIME genérico application/octet-stream y nos quedamos sin señal.
+  "image/jpeg",
+  ".jpg",
+  ".jpeg",
+  "image/png",
+  ".png",
+  "image/gif",
+  ".gif",
+  "image/webp",
+  ".webp",
 ].join(",");
 
 const STEPS: { id: Step; label: string; hint: string }[] = [
-  { id: 1, label: "Cargar documento", hint: "PDF, Word o Excel · máx 20 MB" },
+  {
+    id: 1,
+    label: "Cargar documento",
+    hint: "PDF, Word, Excel o imagen · máx 20 MB",
+  },
   { id: 2, label: "Revisar información", hint: "Tabla con todas las filas" },
   { id: 3, label: "Descargar xlsx", hint: "Genera el archivo final" },
 ];
@@ -152,6 +170,15 @@ function inferKind(mime: string, name: string): FileKind | null {
   ) {
     return "xlsx";
   }
+  // Imágenes — todas comparten un único `file_kind = "image"` para no
+  // explosionar el universo de tipos en BD. El media_type específico
+  // (jpeg vs png vs …) lo resuelve el backend desde el MIME del upload.
+  if (
+    mime.startsWith("image/") ||
+    /\.(jpe?g|png|gif|webp)(\b|$|[^a-z])/i.test(lower)
+  ) {
+    return "image";
+  }
   return null;
 }
 
@@ -165,6 +192,7 @@ function fileIcon(kind: FileKind) {
   if (kind === "xlsx")
     return <FileSpreadsheet className="w-4 h-4 text-emerald-300" />;
   if (kind === "docx") return <FileText className="w-4 h-4 text-sky-300" />;
+  if (kind === "image") return <ImageIcon className="w-4 h-4 text-violet-300" />;
   return <FileText className="w-4 h-4 text-amber-300" />;
 }
 
@@ -256,7 +284,7 @@ export function SupplierWorkflow() {
         const kind = inferKind(file.type, file.name);
         if (!kind) {
           errors.push(
-            `${file.name}: formato no admitido. Usa PDF, Word o Excel.`,
+            `${file.name}: formato no admitido. Usa PDF, Word, Excel o imagen (JPG/PNG/GIF/WebP).`,
           );
           continue;
         }
@@ -599,7 +627,7 @@ export function SupplierWorkflow() {
     </section>
 
     <div className="text-center mt-4 space-y-1">
-      <p className="text-[11px] text-muted-foreground/60">Version 1.0.0 - Mayo 18</p>
+      <p className="text-[11px] text-muted-foreground/60">Version 1.1.0 - Mayo 21</p>
       <a
         href="https://forms.gle/GANUbdcuAS3P7szS8"
         target="_blank"
@@ -1678,7 +1706,27 @@ function FullTable({
         </button>
       </header>
 
-      <div className="overflow-x-auto">
+      {/*
+        Caja de scroll de la tabla.
+
+        Antes era `overflow-x-auto` sin alto: la barra horizontal vivía al
+        fondo de la tabla entera, así que con muchas filas había que
+        scrollear la página hasta abajo de todo para encontrarla. UX
+        terrible (especialmente en contratos con >20 filas).
+
+        Ahora `overflow-auto` + `max-h` acota la caja a ~viewport menos
+        margen para nav + header + warnings + botón "Generar". El thead
+        (`sticky top-0`) y la columna `#` (`sticky left-0`) ya estaban
+        listos para esto — ahora "sticky" se ancla al borde de ESTA caja,
+        no del viewport, así que el header se queda visible cuando se
+        scrollea vertical adentro de la tabla y las dos scrollbars
+        (vertical + horizontal) están siempre a mano.
+
+        Usamos `dvh` (dynamic viewport) cuando esté disponible — en
+        Safari móvil 100vh incluye la URL bar y la caja se cortaría.
+        Fallback a `vh` para navegadores viejos.
+      */}
+      <div className="overflow-auto max-h-[calc(100vh-14rem)] supports-[height:100dvh]:max-h-[calc(100dvh-14rem)]">
         <table className="w-full border-collapse text-[12px]">
           <thead className="bg-secondary/40 border-b border-border/60 sticky top-0 z-10">
             <tr>
@@ -2081,6 +2129,12 @@ function DownloadStep({
               rows: payload.rows,
               catalog_prefill: payload.catalogPrefill,
               manual_fields: payload.manualFields,
+              // Telemetría real del extract — se persiste con el run.
+              // Si el backend es viejo y no las trajo en meta, el
+              // saveRun las omite y se guarda como null en BD.
+              input_tokens: meta.input_tokens,
+              output_tokens: meta.output_tokens,
+              cost_usd: meta.cost_usd,
             })
             .catch((err) => {
               // Logueamos a console para que sea visible en dev / Sentry,

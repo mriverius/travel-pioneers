@@ -36,7 +36,8 @@ const fileFilter: multer.Options["fileFilter"] = (_req, file, cb) => {
       new ApiError(
         415,
         `Tipo de archivo no soportado: ${file.mimetype ?? "desconocido"}. ` +
-          "Solo se aceptan PDF, Word (.docx, .doc) y Excel (.xlsx, .xls).",
+          "Solo se aceptan PDF, Word (.docx, .doc), Excel (.xlsx, .xls) e " +
+          "imágenes (.jpg, .jpeg, .png, .gif, .webp).",
       ),
     );
     return;

@@ -75,6 +75,24 @@ model ContractRun {
   /** AI model used for the extraction (e.g. `claude-opus-4-6-20251109`). */
   aiModel         String   @map("ai_model")
 
+  /**
+   * Token usage reported by Anthropic for the extraction call (no thinking
+   * because tool_choice is forced — see `service.ts`). Nullable for back-
+   * compat with rows created before this column existed and as a safety
+   * valve when Anthropic's `usage` object happens to be missing.
+   */
+  inputTokens     Int?     @map("input_tokens")
+  outputTokens    Int?     @map("output_tokens")
+  /**
+   * Costo estimado del run en USD según la pricing actual de Claude Opus
+   * 4.6 ($5/MTok input, $25/MTok output al 2026-02). Se computa server-side
+   * a partir de los token counts y los precios constantes en `service.ts`
+   * — si Anthropic cambia tarifas, hay que actualizar esos constants antes
+   * de que afecten a runs nuevos. Float (PG `DOUBLE PRECISION`) es
+   * suficiente para nuestro rango de costos (centavos a ~$10/run).
+   */
+  costUsd         Float?   @map("cost_usd")
+
   @@index([processedAt(sort: Desc)])
   @@index([processedById])
   @@map("contract_runs")

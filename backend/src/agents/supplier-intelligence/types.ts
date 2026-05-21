@@ -135,13 +135,26 @@ export interface ValidationResult {
 }
 
 /** The kinds of documents the agent accepts. */
-export type SupportedDocKind = "pdf" | "docx" | "xlsx";
+export type SupportedDocKind = "pdf" | "docx" | "xlsx" | "image";
 
 /**
- * Output of the extractors — either a PDF that Claude reads natively (as a
- * base64 document block) or a pre-converted plain-text representation for
- * Word / Excel.
+ * Subset of `image/*` MIME types soportados por la Messages API de
+ * Anthropic. Cualquier otra extensión / MIME (heic, tiff, svg, etc.) se
+ * rechaza en el extractor de imágenes con 415.
+ */
+export type ImageMediaType =
+  | "image/jpeg"
+  | "image/png"
+  | "image/gif"
+  | "image/webp";
+
+/**
+ * Output of the extractors — three branches:
+ *   - PDF: leído nativamente por Claude (`document` block, base64).
+ *   - Image: leída nativamente por Claude (`image` block, base64).
+ *   - Text: pre-convertido a UTF-8 para Word / Excel.
  */
 export type PreparedDocument =
   | { kind: "pdf"; base64: string; mediaType: "application/pdf" }
+  | { kind: "image"; base64: string; mediaType: ImageMediaType }
   | { kind: "text"; text: string; sourceFormat: "docx" | "xlsx" };
