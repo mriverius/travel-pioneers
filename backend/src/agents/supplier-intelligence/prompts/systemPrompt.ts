@@ -228,13 +228,13 @@ REGLAS POR CAMPO (rows[])
 
 15d. "codigo_servicio" (POR FILA, columna N — Bug #2): código corto en
     MAYÚSCULAS DERIVADO DEL NOMBRE DEL PRODUCTO de ESTA fila. NO copies
-    un único valor a todas las filas (ese era el bug). El código tiene
-    que matchear LITERALMENTE el nombre del producto — si no estás
-    100% seguro, devolvé null (NO inventes, NO copies del producto
-    anterior).
+    un único valor a todas las filas (ese era el bug — cada fila
+    obtiene su propio código según su \`product_name\`). El match no
+    tiene que ser perfecto: usá la guía de mapeo como referencia y
+    aproximá al código más cercano cuando el producto no calce 1:1.
 
-    Reglas (en orden de prioridad — el match es por SUBSTRING en el
-    nombre del producto, case-insensitive):
+    Reglas de mapeo (en orden de prioridad, match aproximado por
+    SUBSTRING en el nombre del producto, case-insensitive):
 
       • Hospedajes (\`tipo_servicio === "HO"\`):
         - "Master Suite" / "Vista Master Suite"   → "MAS"
@@ -243,42 +243,30 @@ REGLAS POR CAMPO (rows[])
         - "Deluxe Suite"                           → "DLX"
         - "Junior Suite"                           → "JUN"
         - "Infinity Suite" / "Vista Suite" /
-          CUALQUIER otra "… Suite" que no haya
-          matcheado arriba                         → "SUI"
+          cualquier otra "… Suite" no específica   → "SUI"
         - "Premium" (sin "Suite")                  → "PRM"
-        - "Standard" / "Garden" / "Tropical"       → "STD"
+        - "Standard" / "Garden" / "Tropical" /
+          nombre de ave o naturaleza               → "STD"
         - "Superior"                               → "SUP"
         - "Villa"                                  → "VIL"
         - "Bungalow"                               → "BUN"
+        - Cualquier otro hospedaje no reconocido   → "STD"
 
       • Tours / actividades / transfers / comidas
         (\`tipo_servicio !== "HO"\`): código de 6-10 chars en MAYÚSCULAS
-        derivado de las palabras significativas del tour. Ejemplos:
+        derivado de las palabras significativas del producto. Ejemplos:
           - "Whale & Dolphin Watching"     → "WHALEDOL"
           - "Waterfalls Tour"              → "WATERTOUR"
           - "Marino Ballena Nature Walk"   → "MBNATWLK"
           - "Corcovado Nature Hike"        → "CORCOHIKE"
           - "Sunset Catamaran"             → "SUNSETCAT"
 
-    REGLAS DE ORO — releerlas antes de emitir codigo_servicio:
-
-      1. NO puede haber DOS filas con product_name distinto y el MISMO
-         codigo_servicio. Si tu pasada quedó con "Master Suite"=MAS y
-         "Infinity Suite"=MAS, está MAL — la segunda fila tiene que
-         ser SUI. Revisá cada fila independientemente.
-
-      2. Si el nombre del producto NO matchea NINGUNA regla con
-         certeza absoluta (ej: "Habitación con vista al mar" — ¿es
-         Suite? ¿es Standard? ¿es Premium?), devolvé \`null\` y agregá
-         al campo \`shared_fields.notes\` el texto literal:
-            "[REVIEW NEEDED: codigo_servicio para '<product_name>']"
-         El sistema tiene un fallback heurístico server-side que sabe
-         hacer el match cuando el nombre es claro; si no es claro,
-         preferimos null + flag a un código inventado.
-
-      3. NO uses el código del primer producto que viste en el
-         contrato como default para los demás — eso es exactamente
-         el bug que estamos cazando.
+    Hint: tratá de no repetir el mismo código en filas con
+    \`product_name\` distinto (ej. "Master Suite" y "Infinity Suite" no
+    deberían terminar ambas en "MAS"). Si tenés dudas en el mapeo,
+    igual emití el código más cercano y agregá "[REVIEW NEEDED]" al
+    campo \`shared_fields.notes\` con el motivo — el usuario corrige en
+    step 2.
 
 16. "ocupacion": código corto típico ('DBL' = doble, 'SGL' = single, 'TPL'
     = triple, 'CPL' = cuádruple, 'FAM' = familiar). Si el contrato dice

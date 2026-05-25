@@ -1281,7 +1281,11 @@ export const ALL_COLUMNS: ColumnDef[] = [
   { excelCol: "K",  key: "type_of_business",  label: "Type of Business",   scope: { kind: "shared", source: "ai" },      minWidth: 150, placeholder: "Ej: Hotel" },
   { excelCol: "L",  key: "contract_starts",   label: "Contract Starts",    scope: { kind: "shared", source: "ai" },      minWidth: 140, inputType: "date" },
   { excelCol: "M",  key: "contract_ends",     label: "Contract Ends",      scope: { kind: "shared", source: "ai" },      minWidth: 140, inputType: "date" },
-  { excelCol: "N",  key: "codigo_servicio",   label: "Cod. Servicio",      scope: { kind: "shared", source: "catalog" }, minWidth: 130, placeholder: "Ej: PARADOR-HO" },
+  // Bug #2: codigo_servicio es POR FILA — la IA lo deriva del nombre del
+  // producto de cada fila (antes era shared y replicaba "MASTER" para
+  // todas). El catálogo lo sigue trayendo como hint via prefill, pero el
+  // valor que termina en el xlsx sale de `rows[i].codigo_servicio`.
+  { excelCol: "N",  key: "codigo_servicio",   label: "Cod. Servicio",      scope: { kind: "row" },                       minWidth: 130, placeholder: "Ej: MAS, SUI…" },
   { excelCol: "O",  key: "product_name",      label: "Product Name",       scope: { kind: "row" },                       minWidth: 170, placeholder: "Garden, Suites…" },
   { excelCol: "P",  key: "tipo_unidad",       label: "Tipo Unidad",        scope: { kind: "shared", source: "ai" },      minWidth: 130, options: () => TIPO_UNIDAD_OPTIONS },
   { excelCol: "Q",  key: "tipo_servicio",     label: "Tipo Servicio",      scope: { kind: "shared", source: "ai" },      minWidth: 140, options: () => TIPOS_SERVICIO },
@@ -1337,7 +1341,7 @@ const AI_SHARED_KEYS: ExtractedSharedFieldKey[] = [
 ];
 
 const CATALOG_KEYS = [
-  "tipo_actividad", "zona_turismo", "proveedor_codigo", "codigo_servicio",
+  "tipo_actividad", "zona_turismo", "proveedor_codigo",
 ] as const;
 type CatalogKey = (typeof CATALOG_KEYS)[number];
 
@@ -1356,10 +1360,9 @@ export const COLS_NEEDING_REVIEW = new Set<string>([
   "tipo_actividad",
   "zona_turismo",
   "proveedor_codigo",
-  // codigo_servicio se rellena con el matcher local + fallback IA
-  // (findServiceForSupplierWithAI). Igual que los otros 3 campos del
-  // catálogo, siempre puede estar incorrecto si el proveedor tiene varios
-  // servicios — el warning sign le recuerda al usuario que verifique.
+  // codigo_servicio (Bug #2): cada fila trae su propio código derivado
+  // por la IA del nombre del producto. El match no es perfecto — el
+  // warning sign le recuerda al usuario que verifique cada fila.
   "codigo_servicio",
 ]);
 
@@ -1408,11 +1411,11 @@ function buildInitialSharedValues(
   for (const k of AI_SHARED_KEYS) {
     out[k] = data.shared_fields[k];
   }
-  // 4 catalog keys
+  // 3 catalog keys (codigo_servicio dejó de ser shared en Bug #2 — vive
+  // por fila en `rows[i].codigo_servicio`).
   out.tipo_actividad = prefill?.tipo_actividad ?? null;
   out.zona_turismo = prefill?.zona_turismo ?? null;
   out.proveedor_codigo = prefill?.proveedor_codigo ?? null;
-  out.codigo_servicio = prefill?.codigo_servicio ?? null;
   // 14 manual keys → null
   for (const k of MANUAL_KEYS) {
     out[k] = null;
@@ -1520,14 +1523,19 @@ function ReviewStep({
       const v = sharedValues[k];
       return typeof v === "string" && v.trim() !== "";
     });
-    const finalCatalogPrefill: GenerateXlsxCatalogPrefill | null = hasAnyCatalog
-      ? {
-          tipo_actividad: sharedValues.tipo_actividad,
-          zona_turismo: sharedValues.zona_turismo,
-          proveedor_codigo: sharedValues.proveedor_codigo,
-          codigo_servicio: sharedValues.codigo_servicio,
-        }
-      : null;
+    // codigo_servicio ya no es editable como shared (es per-row); igual lo
+    // mandamos al backend como hint del catálogo para que el writer lo use
+    // como FALLBACK cuando alguna fila venga sin código (ver
+    // `resolveRowClassification` en xlsxGenerator).
+    const finalCatalogPrefill: GenerateXlsxCatalogPrefill | null =
+      hasAnyCatalog || catalogPrefill?.codigo_servicio
+        ? {
+            tipo_actividad: sharedValues.tipo_actividad,
+            zona_turismo: sharedValues.zona_turismo,
+            proveedor_codigo: sharedValues.proveedor_codigo,
+            codigo_servicio: catalogPrefill?.codigo_servicio ?? null,
+          }
+        : null;
 
     // Manual fields — null si todos los 14 son null/empty
     const hasAnyManual = MANUAL_KEYS.some((k) => {
