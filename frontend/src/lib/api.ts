@@ -474,6 +474,14 @@ export interface ExtractedSharedFields {
   tipo_moneda: string | null;
   numero_cuenta: string | null;
   banco: string | null;
+  /**
+   * Columna BA — "NOTAS". Cláusulas globales del contrato que no
+   * encajan en ninguna otra columna (restricciones de edad, requisitos
+   * de booking, alérgenos, condiciones especiales, etc.). El backend
+   * la trata como shared (mismo valor en cada fila) y la escribe a la
+   * columna BA del xlsx.
+   */
+  notes: string | null;
 }
 
 /**
@@ -527,12 +535,6 @@ export interface ExtractedContract {
   rows: ExtractedContractRow[];
   confianza: ExtractionConfianza;
   campos_faltantes: string[];
-  /**
-   * Cláusulas globales del contrato que no encajaron en ninguna columna
-   * del schema (Bug #6). El backend las copia a la columna AK del xlsx
-   * cuando el usuario no llenó manualmente others_payment_cancel.
-   */
-  notes: string | null;
   /** Map of shared-field key -> source page. */
   paginas_origen_shared: Record<string, ExtractionSourcePage>;
   /** Per-row source pages, parallel to `rows`. */
@@ -625,12 +627,6 @@ export interface GenerateXlsxInput {
   rows: ExtractedContractRow[];
   catalog_prefill?: GenerateXlsxCatalogPrefill | null;
   manual_fields?: GenerateXlsxManualFields | null;
-  /**
-   * Notas globales (Bug #6) — cláusulas no mapeadas que extrajo la IA y
-   * que el backend vuelca a AK si manual_fields.others_payment_cancel
-   * está vacío. Opcional por compat con clientes viejos.
-   */
-  notes?: string | null;
 }
 
 /* --- match-supplier (fallback IA del lookup contra el catálogo) --- */

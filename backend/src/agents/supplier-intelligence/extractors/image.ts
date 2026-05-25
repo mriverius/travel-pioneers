@@ -52,7 +52,7 @@ export function resolveImageMediaType(
 
 /**
  * Imágenes (JPEG / PNG / GIF / WebP) van como bloques `image` nativos a
- * Claude Opus 4.6 — el modelo tiene vision built-in, así que no necesitamos
+ * Claude Opus 4.7 — el modelo tiene vision built-in, así que no necesitamos
  * pre-procesar (OCR, redimensión, etc.). Anthropic recomienda imágenes
  * ≤ ~5 MB y resolución ≤ ~1568px en el lado largo para minimizar tokens,
  * pero el SDK acepta cualquier tamaño dentro del límite global (32 MB por

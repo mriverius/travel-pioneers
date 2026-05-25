@@ -72,7 +72,7 @@ model ContractRun {
   /** User-entered fields from step 2 that the AI doesn't extract. Nullable. */
   manualFields    Json?    @map("manual_fields")
 
-  /** AI model used for the extraction (e.g. `claude-opus-4-6-20251109`). */
+  /** AI model used for the extraction (e.g. `claude-opus-4-7`). */
   aiModel         String   @map("ai_model")
 
   /**

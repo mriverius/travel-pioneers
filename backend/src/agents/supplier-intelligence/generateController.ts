@@ -12,6 +12,7 @@ import type {
   SharedFields,
   TipoUnidad,
 } from "./types.js";
+import { normalizeDate } from "./validators.js";
 
 /**
  * POST /api/supplier-intelligence/generate-xlsx
@@ -42,6 +43,29 @@ const stringOrNull = (v: unknown): string | null => {
   return null;
 };
 
+/**
+ * Guardrail de fechas — TODO campo de fecha (fecha, contract_starts,
+ * contract_ends, season_starts, season_ends) que entre al generator
+ * tiene que salir en YYYY-MM-DD. Reusa el normalizador que ya usamos en
+ * la extracción y en el save.
+ */
+const dateOrNull = (v: unknown): string | null => {
+  return normalizeDate(stringOrNull(v)).value;
+};
+
+/**
+ * "Tipo Tarifa" sólo acepta los códigos "1" (FIJA) o "2" (PORCENTUAL) —
+ * los mismos que emite `inferTipoTarifa` cuando no hay valor manual.
+ * Cualquier otro string se transforma a null para que el generator caiga
+ * al fallback inferido.
+ */
+const tipoTarifaCodeOrNull = (v: unknown): string | null => {
+  const s = stringOrNull(v);
+  if (s === null) return null;
+  const trimmed = s.trim();
+  return trimmed === "1" || trimmed === "2" ? trimmed : null;
+};
+
 function coerceTipoUnidad(v: unknown): TipoUnidad | null {
   if (v === "N" || v === "S") return v;
   return null;
@@ -53,7 +77,7 @@ function coerceSharedFields(input: unknown): SharedFields {
   }
   const r = input as Record<string, unknown>;
   return {
-    fecha: stringOrNull(r.fecha),
+    fecha: dateOrNull(r.fecha),
     proveedor: stringOrNull(r.proveedor),
     nombre_comercial: stringOrNull(r.nombre_comercial),
     cedula: stringOrNull(r.cedula),
@@ -62,14 +86,15 @@ function coerceSharedFields(input: unknown): SharedFields {
     pais: stringOrNull(r.pais),
     state_province: stringOrNull(r.state_province),
     type_of_business: stringOrNull(r.type_of_business),
-    contract_starts: stringOrNull(r.contract_starts),
-    contract_ends: stringOrNull(r.contract_ends),
+    contract_starts: dateOrNull(r.contract_starts),
+    contract_ends: dateOrNull(r.contract_ends),
     reservations_email: stringOrNull(r.reservations_email),
     tipo_unidad: coerceTipoUnidad(r.tipo_unidad),
     tipo_servicio: stringOrNull(r.tipo_servicio),
     tipo_moneda: stringOrNull(r.tipo_moneda),
     numero_cuenta: stringOrNull(r.numero_cuenta),
     banco: stringOrNull(r.banco),
+    notes: stringOrNull(r.notes),
   };
 }
 
@@ -86,8 +111,8 @@ function coerceRow(input: unknown, index: number): ContractRow {
     codigo_servicio: stringOrNull(r.codigo_servicio),
     ocupacion: stringOrNull(r.ocupacion),
     season_name: stringOrNull(r.season_name),
-    season_starts: stringOrNull(r.season_starts),
-    season_ends: stringOrNull(r.season_ends),
+    season_starts: dateOrNull(r.season_starts),
+    season_ends: dateOrNull(r.season_ends),
     meals_included: stringOrNull(r.meals_included),
     precios_neto_iva: stringOrNull(r.precios_neto_iva),
     precio_rack_iva: stringOrNull(r.precio_rack_iva),
@@ -110,7 +135,7 @@ function coerceManualFields(input: unknown): ManualFields | null {
   }
   const r = input as Record<string, unknown>;
   return {
-    tipo_tarifa_neta: stringOrNull(r.tipo_tarifa_neta),
+    tipo_tarifa_neta: tipoTarifaCodeOrNull(r.tipo_tarifa_neta),
     tipo_tarifa_mayorista: stringOrNull(r.tipo_tarifa_mayorista),
     tipo_tarifa_fds: stringOrNull(r.tipo_tarifa_fds),
     t_tar_neta_fds: stringOrNull(r.t_tar_neta_fds),
@@ -168,9 +193,16 @@ function parseGenerateInput(body: unknown): GenerateXlsxInput {
 
   const catalog_prefill = coerceCatalogPrefill(b.catalog_prefill);
   const manual_fields = coerceManualFields(b.manual_fields);
-  const notes = stringOrNull(b.notes);
 
-  return { shared_fields, rows, catalog_prefill, manual_fields, notes };
+  // Backward-compat: clientes viejos podían mandar `notes` top-level. Si
+  // viene y `shared_fields.notes` no está poblado, lo movemos adentro
+  // para no perder la información durante el rollout.
+  const legacyNotes = stringOrNull((b as Record<string, unknown>).notes);
+  if (legacyNotes !== null && shared_fields.notes === null) {
+    shared_fields.notes = legacyNotes;
+  }
+
+  return { shared_fields, rows, catalog_prefill, manual_fields };
 }
 
 export async function generateXlsxHandler(

@@ -25,19 +25,29 @@ import type {
 } from "./types.js";
 
 /**
- * Opus 4.6 es el modelo de extracción. Es más caro y más lento que Sonnet,
+ * Opus 4.7 es el modelo de extracción. Es más caro y más lento que Sonnet,
  * pero la tarea ahora requiere generar potencialmente decenas de filas con
  * razonamiento sobre múltiples temporadas/categorías — Opus paga el precio
  * en calidad de extracción.
+ *
+ * Notas de migración 4.6 → 4.7 (Anthropic, abr 2026):
+ *   - Drop-in: mismo SDK, mismo tool-use, mismo schema, mismo pricing.
+ *   - Context window: 500k → 1M tokens — perfecto para PDFs de 60+ páginas
+ *     que antes nos tenían ajustados en input.
+ *   - Tokenizer nuevo: el mismo input puede mapear a ~1.0-1.35x más tokens
+ *     que con 4.6 (cost-aware, pero mucho menos que el riesgo de cortar
+ *     contratos densos por context overflow).
+ *   - SWE-bench Verified 84.1 → 87.6, 2x throughput agentic.
  */
-export const SUPPLIER_INTELLIGENCE_MODEL = "claude-opus-4-6";
+export const SUPPLIER_INTELLIGENCE_MODEL = "claude-opus-4-7";
 
 /**
- * Pricing oficial de Claude Opus 4.6 (USD por millón de tokens).
+ * Pricing oficial de Claude Opus 4.7 (USD por millón de tokens).
  *
- * Fuente: https://platform.claude.com/docs/en/about-claude/pricing (feb 2026).
- * Si Anthropic cambia precios, este es el único lugar donde editar — el
- * cómputo de `cost_usd` por extracción se hace abajo en `extractContract`.
+ * Fuente: https://www.anthropic.com/news/claude-opus-4-7 (abr 2026).
+ * Sin cambio respecto a 4.6 — same $5 / $25 por millón. Si Anthropic
+ * cambia precios este es el único lugar donde editar — el cómputo de
+ * `cost_usd` por extracción se hace abajo en `extractContract`.
  *
  * Nota: NO contemplamos prompt caching todavía. Cuando lo activemos, habrá
  * que distinguir entre cache_write / cache_hit (tarifas distintas) — por
@@ -59,12 +69,16 @@ function computeCostUsd(inputTokens: number, outputTokens: number): number {
  *   - 1500: una fila plana (~150 tokens). Histórico.
  *   - 16k:  Parador (~21 filas ≈ 5-8k tokens). OK pero ajustado.
  *   - 32k:  intento de cubrir BTPV (~130 filas), insuficiente.
- *   - 64k:  límite actual. Cubre BTPV (~40k output) con margen cómodo y
- *           aguanta hasta ~200 filas si aparecieran.
+ *   - 64k:  cubre BTPV (~40k output) con margen, pero PDFs muy densos
+ *           empezaron a apretar.
+ *   - 128k: máximo soportado por Opus 4.7. Damos todo el headroom posible
+ *           porque NO cobramos por el cap — solo por los tokens que
+ *           efectivamente se emiten — así que el único costo es latencia
+ *           si el modelo se acerca al cap. En la práctica un contrato
+ *           normal se queda muy por debajo.
  *
- * Opus 4.6 admite hasta 128k. NO cobramos por el cap — solo por los tokens
- * que efectivamente se emiten — así que un cap alto solo cuesta latencia.
- * Subir a 96k/128k es viable si en el futuro vemos contratos más grandes.
+ * El context window de Opus 4.7 es 1M, así que el cuello de botella
+ * realista ahora es el output, no el input.
  *
  * NOTA: a partir de ~16k Anthropic recomienda streaming para evitar HTTP
  * timeouts upstream — ver `extractContract`.
@@ -74,10 +88,9 @@ function computeCostUsd(inputTokens: number, outputTokens: number): number {
  *   "Thinking may not be enabled when tool_choice forces tool use."
  * y como nosotros forzamos tool_choice (es la base del schema-driven
  * extract), thinking queda automáticamente deshabilitado del lado del
- * servidor. Eso significa que los 64k completos van a la salida, no se
- * comparten con un budget de thinking — mejor para nosotros.
+ * servidor. Eso significa que los 128k completos van a la salida.
  */
-const MAX_TOKENS = 64_000;
+const MAX_TOKENS = 128_000;
 
 /**
  * Optional context the caller can attach to an extraction. The `comments`
@@ -298,6 +311,7 @@ function coerceSharedFields(input: unknown): SharedFields {
     tipo_moneda: stringOrNull(r.tipo_moneda),
     numero_cuenta: stringOrNull(r.numero_cuenta),
     banco: stringOrNull(r.banco),
+    notes: stringOrNull(r.notes),
   };
 }
 
@@ -374,8 +388,6 @@ function coerceExtraction(input: unknown): ExtractedContract {
     ? r.campos_faltantes.filter((x): x is string => typeof x === "string")
     : [];
 
-  const notes = stringOrNull(r.notes);
-
   const paginas_origen_shared = coercePaginasOrigen(r.paginas_origen_shared);
 
   // paginas_origen_rows debe ser un array paralelo a rows.
@@ -391,7 +403,6 @@ function coerceExtraction(input: unknown): ExtractedContract {
     rows,
     confianza,
     campos_faltantes,
-    notes,
     paginas_origen_shared,
     paginas_origen_rows,
   };
@@ -433,7 +444,7 @@ export async function extractContract(
   const client = getAnthropicClient();
 
   // Streaming endpoint en lugar de `messages.create` no-stream: con
-  // MAX_TOKENS alto (64k) y contratos densos, la generación puede tardar
+  // MAX_TOKENS alto (128k) y contratos densos, la generación puede tardar
   // 3-5 min y Anthropic recomienda streaming para evitar HTTP timeouts
   // upstream. La SDK helper `messages.stream().finalMessage()` colecta los
   // chunks y nos devuelve un `Message` con la misma forma que el endpoint
@@ -492,10 +503,10 @@ export async function extractContract(
   // Truncamiento por max_tokens: el JSON del tool_use queda partido a la
   // mitad y solo llega `shared_fields` (o ni eso). En lugar de fallar con
   // "formato inesperado" — que no le dice nada al usuario — devolvemos un
-  // error específico. Con MAX_TOKENS=64k esto solo debería pasar en
-  // contratos extraordinarios (>200 filas); si se vuelve recurrente, subir
-  // MAX_TOKENS a 96k/128k es seguro — cobramos por tokens emitidos, no por
-  // el cap.
+  // error específico. Con MAX_TOKENS=128k (máximo soportado por Opus 4.7)
+  // esto solo debería ocurrir en contratos extraordinariamente densos
+  // (cientos de filas). Si se vuelve recurrente, el siguiente paso es
+  // un flujo de chunking por temporada — no hay más cap arriba.
   if (response.stop_reason === "max_tokens") {
     logger.warn("Extraction hit max_tokens — output truncated", {
       requestId,
@@ -504,9 +515,10 @@ export async function extractContract(
     });
     throw new ApiError(
       502,
-      "El contrato es excepcionalmente denso y la extracción excedió el " +
-        "límite máximo de salida del agente. Avisanos para subir el " +
-        "límite — el modelo soporta hasta el doble de la capacidad actual.",
+      "El contrato es excepcionalmente denso y la extracción llegó al " +
+        "límite máximo del modelo (128k tokens de salida). Si necesitás " +
+        "procesarlo de igual forma, avisanos para evaluar un flujo de " +
+        "extracción por secciones.",
     );
   }
 

@@ -52,6 +52,253 @@ export function looksLikeCostaRicaCedulaJuridica(raw: string): boolean {
   return /^\d-\d{3}-\d{6}$/.test(raw.trim());
 }
 
+/* -------------------------------------------------------------------------- */
+/*                              Date normalization                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Guardrail server-side: TODA fecha que devolvamos a partir del agente
+ * (campos `fecha`, `contract_starts`, `contract_ends`, `season_starts`,
+ * `season_ends`) tiene que salir en formato ISO YYYY-MM-DD. El prompt ya
+ * lo pide, pero el modelo igualmente emite a veces "6 de enero de 2026",
+ * "06/01/2026", "2026-01-06T00:00:00Z", etc. — este normalizador es el
+ * cinturón de seguridad.
+ *
+ * Acepta:
+ *   - YYYY-MM-DD                 → passthrough (no warn)
+ *   - YYYY/MM/DD, YYYY.MM.DD     → reformatea con guiones
+ *   - YYYYMMDD                   → reformatea con guiones
+ *   - YYYY-MM-DD HH:MM... / T... → strip de hora
+ *   - DD/MM/YYYY, DD-MM-YYYY     → reformatea (convención CR/LatAm)
+ *   - MM/DD/YYYY (cuando es no-ambiguo: mes > 12 imposible al inicio)
+ *   - "6 de enero de 2026", "6 ene 2026", "January 6, 2026", etc.
+ *   - Sentinel "NOT AVAILABLE"   → preserva tal cual (downstream lo usa)
+ *
+ * Devuelve `{ value, changed }`:
+ *   - `value`: la fecha normalizada en YYYY-MM-DD, o `"NOT AVAILABLE"`, o
+ *     `null` si no se pudo parsear.
+ *   - `changed`: true si tuvimos que reformatear o si perdimos la fecha
+ *     (para que el caller pueda agregar un warning visible).
+ *
+ * Convención de DD/MM vs MM/DD: cuando ambos componentes son ≤ 12 (caso
+ * ambiguo), preferimos DD/MM porque el universo de contratos del
+ * producto es LatAm. Si el primer componente es > 12, el formato sólo
+ * puede ser MM/DD así que lo aceptamos. Si el segundo es > 12, sólo
+ * puede ser DD/MM.
+ */
+const SPANISH_MONTHS: Record<string, number> = {
+  ene: 1, enero: 1,
+  feb: 2, febrero: 2,
+  mar: 3, marzo: 3,
+  abr: 4, abril: 4,
+  may: 5, mayo: 5,
+  jun: 6, junio: 6,
+  jul: 7, julio: 7,
+  ago: 8, agosto: 8,
+  sep: 9, sept: 9, septiembre: 9, set: 9, setiembre: 9,
+  oct: 10, octubre: 10,
+  nov: 11, noviembre: 11,
+  dic: 12, diciembre: 12,
+};
+
+const ENGLISH_MONTHS: Record<string, number> = {
+  jan: 1, january: 1,
+  feb: 2, february: 2,
+  mar: 3, march: 3,
+  apr: 4, april: 4,
+  may: 5,
+  jun: 6, june: 6,
+  jul: 7, july: 7,
+  aug: 8, august: 8,
+  sep: 9, sept: 9, september: 9,
+  oct: 10, october: 10,
+  nov: 11, november: 11,
+  dec: 12, december: 12,
+};
+
+function isValidYmd(y: number, m: number, d: number): boolean {
+  if (!Number.isInteger(y) || !Number.isInteger(m) || !Number.isInteger(d)) {
+    return false;
+  }
+  // Rango razonable para contratos turísticos. Si aparece algo fuera de
+  // esta ventana es casi seguro un error de parseo (ej: año 0006).
+  if (y < 1900 || y > 2100) return false;
+  if (m < 1 || m > 12) return false;
+  if (d < 1 || d > 31) return false;
+  // Verifica que el Date construido refleje los mismos componentes — así
+  // detectamos casos como "Feb 30" o "Apr 31".
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return (
+    dt.getUTCFullYear() === y &&
+    dt.getUTCMonth() === m - 1 &&
+    dt.getUTCDate() === d
+  );
+}
+
+function fmtYmd(y: number, m: number, d: number): string {
+  return `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
+
+/** Quita acentos (NFD + strip combining marks) para matchear "enero" vs "énero". */
+function stripAccents(s: string): string {
+  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+/**
+ * Resolve a 2- or 4-digit year. 2-digit years are a pain because contracts
+ * could in theory reference past or future decades; lacking a stronger
+ * signal, asumimos 20YY para YY ≤ 49 y 19YY para YY ≥ 50.
+ */
+function expandYear(y: number): number {
+  if (y >= 100) return y;
+  return y <= 49 ? 2000 + y : 1900 + y;
+}
+
+export interface NormalizedDate {
+  value: string | null;
+  changed: boolean;
+}
+
+export function normalizeDate(raw: unknown): NormalizedDate {
+  if (raw === null || raw === undefined) return { value: null, changed: false };
+  if (typeof raw !== "string") {
+    // Defensive — el coerce upstream debería garantizar string|null, pero
+    // si llega un número/fecha por accidente, lo descartamos en lugar de
+    // crashear.
+    return { value: null, changed: true };
+  }
+  const trimmed = raw.trim();
+  if (trimmed === "") return { value: null, changed: true };
+
+  // Sentinel reservado por el prompt — passthrough.
+  if (trimmed.toUpperCase() === "NOT AVAILABLE") {
+    return { value: "NOT AVAILABLE", changed: false };
+  }
+
+  // 1) YYYY-MM-DD limpio.
+  {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+    if (m) {
+      const y = Number(m[1]);
+      const mo = Number(m[2]);
+      const d = Number(m[3]);
+      if (isValidYmd(y, mo, d)) return { value: trimmed, changed: false };
+      return { value: null, changed: true };
+    }
+  }
+
+  // 2) ISO con hora: 2026-01-06T... / "2026-01-06 12:34:56"
+  {
+    const m = /^(\d{4})-(\d{1,2})-(\d{1,2})[T ]/.exec(trimmed);
+    if (m) {
+      const y = Number(m[1]);
+      const mo = Number(m[2]);
+      const d = Number(m[3]);
+      if (isValidYmd(y, mo, d)) {
+        return { value: fmtYmd(y, mo, d), changed: true };
+      }
+      return { value: null, changed: true };
+    }
+  }
+
+  // 3) YYYY/MM/DD o YYYY.MM.DD (incluye dígitos sueltos).
+  {
+    const m = /^(\d{4})[\/.](\d{1,2})[\/.](\d{1,2})$/.exec(trimmed);
+    if (m) {
+      const y = Number(m[1]);
+      const mo = Number(m[2]);
+      const d = Number(m[3]);
+      if (isValidYmd(y, mo, d)) {
+        return { value: fmtYmd(y, mo, d), changed: true };
+      }
+      return { value: null, changed: true };
+    }
+  }
+
+  // 4) YYYYMMDD compacto.
+  {
+    const m = /^(\d{4})(\d{2})(\d{2})$/.exec(trimmed);
+    if (m) {
+      const y = Number(m[1]);
+      const mo = Number(m[2]);
+      const d = Number(m[3]);
+      if (isValidYmd(y, mo, d)) {
+        return { value: fmtYmd(y, mo, d), changed: true };
+      }
+      return { value: null, changed: true };
+    }
+  }
+
+  // 5) DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY (o MM/DD/YYYY cuando es
+  //    no-ambiguo). Acepta también años de 2 dígitos.
+  {
+    const m = /^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})$/.exec(trimmed);
+    if (m) {
+      const a = Number(m[1]);
+      const b = Number(m[2]);
+      const y = expandYear(Number(m[3]));
+
+      // Heurística de orden — ver doc del normalizador.
+      const dmy = isValidYmd(y, b, a) ? ([b, a] as const) : null;
+      const mdy = isValidYmd(y, a, b) ? ([a, b] as const) : null;
+
+      let pick: readonly [number, number] | null = null;
+      if (a > 12 && b <= 12) pick = dmy;          // sólo cabe DD/MM
+      else if (b > 12 && a <= 12) pick = mdy;     // sólo cabe MM/DD
+      else pick = dmy ?? mdy;                     // ambiguo → DD/MM
+
+      if (pick) return { value: fmtYmd(y, pick[0], pick[1]), changed: true };
+      return { value: null, changed: true };
+    }
+  }
+
+  // 6) Nombre de mes — soporta variantes comunes en es/en:
+  //      "6 de enero de 2026" / "6 enero 2026" / "6-ene-2026" / "6 ene 26"
+  //      "January 6, 2026"    / "Jan 6 2026"   / "Jan-6-2026"
+  {
+    const cleaned = stripAccents(trimmed.toLowerCase())
+      .replace(/\bde\b/g, " ")
+      .replace(/[,]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    // Pattern A: D MONTH YEAR
+    const a = /^(\d{1,2})[\s\-\/]+([a-z]{3,9})[\s\-\/]+(\d{2,4})$/.exec(cleaned);
+    if (a) {
+      const [, dayStr, monthName, yearStr] = a;
+      const day = Number(dayStr);
+      const month =
+        SPANISH_MONTHS[monthName ?? ""] ??
+        ENGLISH_MONTHS[monthName ?? ""] ??
+        null;
+      const y = expandYear(Number(yearStr));
+      if (month !== null && isValidYmd(y, month, day)) {
+        return { value: fmtYmd(y, month, day), changed: true };
+      }
+      return { value: null, changed: true };
+    }
+
+    // Pattern B: MONTH D YEAR (típico en inglés)
+    const b = /^([a-z]{3,9})[\s\-\/]+(\d{1,2})[\s\-\/]+(\d{2,4})$/.exec(cleaned);
+    if (b) {
+      const [, monthName, dayStr, yearStr] = b;
+      const month =
+        SPANISH_MONTHS[monthName ?? ""] ??
+        ENGLISH_MONTHS[monthName ?? ""] ??
+        null;
+      const day = Number(dayStr);
+      const y = expandYear(Number(yearStr));
+      if (month !== null && isValidYmd(y, month, day)) {
+        return { value: fmtYmd(y, month, day), changed: true };
+      }
+      return { value: null, changed: true };
+    }
+  }
+
+  // 7) Nada matcheó — perdemos la fecha pero al menos lo decimos.
+  return { value: null, changed: true };
+}
+
 /**
  * Very loose E.164 check: strip everything non-digit, require 7–15 digits.
  */
@@ -146,6 +393,72 @@ export function validateExtraction(
   const warnings: string[] = [];
   let extraction = data;
 
+  // Guardrail de fechas — TODAS las fechas deben quedar en YYYY-MM-DD.
+  // Si Claude emitió algo distinto (DD/MM/YYYY, "January 6 2026", ISO con
+  // hora, etc.) lo normalizamos. Si no se pudo parsear, lo dejamos en
+  // null y avisamos para que se revise.
+  {
+    const shared = extraction.shared_fields;
+    const sharedDateFields = [
+      "fecha",
+      "contract_starts",
+      "contract_ends",
+    ] as const;
+    const patchedShared: Partial<typeof shared> = {};
+    for (const field of sharedDateFields) {
+      const original = shared[field];
+      const { value, changed } = normalizeDate(original);
+      if (changed) {
+        patchedShared[field] = value;
+        if (value === null) {
+          warnings.push(
+            `Campo "${field}" tenía una fecha en formato no reconocido ` +
+              `(${JSON.stringify(original)}) — se descartó. Revisá manualmente.`,
+          );
+        } else if (value !== "NOT AVAILABLE") {
+          warnings.push(
+            `Campo "${field}" se reformateó a YYYY-MM-DD (estaba como ${JSON.stringify(original)}).`,
+          );
+        }
+      }
+    }
+    if (Object.keys(patchedShared).length > 0) {
+      extraction = {
+        ...extraction,
+        shared_fields: { ...shared, ...patchedShared },
+      };
+    }
+
+    const rowDateFields = ["season_starts", "season_ends"] as const;
+    let rowsChanged = false;
+    const normalizedRows = extraction.rows.map((row, idx) => {
+      let next = row;
+      for (const field of rowDateFields) {
+        const original = row[field];
+        const { value, changed } = normalizeDate(original);
+        if (changed) {
+          rowsChanged = true;
+          next = { ...next, [field]: value };
+          if (value === null) {
+            warnings.push(
+              `Fila ${idx + 1}: "${field}" en formato no reconocido ` +
+                `(${JSON.stringify(original)}) — se descartó.`,
+            );
+          } else if (value !== "NOT AVAILABLE") {
+            warnings.push(
+              `Fila ${idx + 1}: "${field}" se reformateó a YYYY-MM-DD ` +
+                `(estaba como ${JSON.stringify(original)}).`,
+            );
+          }
+        }
+      }
+      return next;
+    });
+    if (rowsChanged) {
+      extraction = { ...extraction, rows: normalizedRows };
+    }
+  }
+
   // numero_cuenta — if it looks like an IBAN (starts with two letters), check it.
   const accountNumber = extraction.shared_fields.numero_cuenta;
   if (accountNumber) {
@@ -222,6 +535,81 @@ export function validateExtraction(
       );
     }
   });
+
+  // Guardrail anti-alucinación de codigo_servicio (col N): si el mismo
+  // código aparece en filas con product_name distintos, es casi seguro
+  // que Claude copió el código de la primera fila al resto (bug típico
+  // observado con "MAS" en TODAS las filas aunque las filas posteriores
+  // sean Infinity/Junior/Deluxe Suite).
+  //
+  // Estrategia:
+  //   - Warn SIEMPRE cuando el patrón aparece para que el usuario lo
+  //     vea en Step 2.
+  //   - Auto-limpiar (null) las ocurrencias duplicadas SOLO cuando el
+  //     tipo_servicio efectivo de la fila es "HO" — en hospedajes el
+  //     fallback heurístico server-side (`deriveCodigoServicioFromProduct`
+  //     en xlsxGenerator) deriva el código correcto del nombre del
+  //     producto con alta confianza. Para tours/transfers/meals el
+  //     fallback retorna "UNI" (genérico) y limpiar perdería el código
+  //     específico del tour (ej. WHALEDOL) — por eso ahí solo warneamos.
+  {
+    const sharedTipoSrv = extraction.shared_fields.tipo_servicio;
+    const effectiveTipoSrv = (row: ContractRow): string | null =>
+      row.tipo_servicio?.trim() || sharedTipoSrv;
+
+    const codeToProducts = new Map<string, Set<string>>();
+    for (const row of extraction.rows) {
+      const code = row.codigo_servicio?.trim();
+      const product = row.product_name?.trim();
+      if (!code || !product) continue;
+      const set = codeToProducts.get(code) ?? new Set<string>();
+      set.add(product);
+      codeToProducts.set(code, set);
+    }
+
+    const suspectCodes = new Set<string>();
+    for (const [code, products] of codeToProducts) {
+      if (products.size > 1) {
+        warnings.push(
+          `codigo_servicio "${code}" aparece en productos distintos ` +
+            `(${[...products].join(" / ")}) — posible alucinación, ` +
+            `revisar el código en cada fila.`,
+        );
+        suspectCodes.add(code);
+      }
+    }
+
+    if (suspectCodes.size > 0) {
+      const seenForCode = new Map<string, string>();
+      const cleanedRows = extraction.rows.map((row) => {
+        const code = row.codigo_servicio?.trim();
+        const product = row.product_name?.trim();
+        if (!code || !product || !suspectCodes.has(code)) return row;
+
+        // Mantenemos la PRIMERA ocurrencia del par (code, product).
+        const firstProductForCode = seenForCode.get(code);
+        if (firstProductForCode === undefined) {
+          seenForCode.set(code, product);
+          return row;
+        }
+        if (firstProductForCode === product) return row;
+
+        // Esta fila comparte el código con un producto distinto que ya
+        // vimos. Solo limpiamos a null si la fila es hospedaje (HO) —
+        // en ese caso el writer xlsx puede derivar el código correcto.
+        if (effectiveTipoSrv(row) === "HO") {
+          return { ...row, codigo_servicio: null };
+        }
+        // Para tours/transfers/etc dejamos el código tal cual y solo
+        // confiamos en el warning de arriba para que el usuario lo
+        // edite manualmente en Step 2.
+        return row;
+      });
+      if (cleanedRows.some((r, i) => r !== extraction.rows[i])) {
+        extraction = { ...extraction, rows: cleanedRows };
+      }
+    }
+  }
 
   // Detect duplicated (product_name, season_name) combinations — eso indica
   // que la IA generó la misma fila dos veces.

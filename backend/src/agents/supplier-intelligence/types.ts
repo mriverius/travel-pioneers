@@ -48,6 +48,17 @@ export interface SharedFields {
   tipo_moneda: string | null;
   numero_cuenta: string | null;
   banco: string | null;
+  /**
+   * Columna BA — "NOTAS". Cláusulas significativas del contrato que no
+   * encajan en ninguna otra columna (restricciones de edad mínima,
+   * requisitos de booking, condiciones especiales, alérgenos, etc.).
+   *
+   * Antes (Bug #6 legacy) se shoehorneaba en la columna AK
+   * (others_payment_cancel) cuando esa celda estaba vacía; ahora vive
+   * en su propia columna dedicada BA y es contract-wide (se replica en
+   * cada fila del xlsx igual que `proveedor` o `nombre_comercial`).
+   */
+  notes: string | null;
 }
 
 /**
@@ -146,14 +157,6 @@ export interface ExtractedContract {
   rows: ContractRow[];
   confianza: Confianza;
   campos_faltantes: string[];
-  /**
-   * Cláusulas significativas del contrato que no encajan en ninguna columna
-   * del schema (restricciones de edad, condiciones especiales, notas de
-   * reserva, etc.). Bug #6: antes se descartaban silenciosamente; ahora se
-   * acumulan acá y el writer las copia a la columna "OTHERS IN PAYMENT OR
-   * CANCELLATION" del xlsx.
-   */
-  notes: string | null;
   paginas_origen_shared: Record<string, SourcePage>;
   paginas_origen_rows: Record<string, SourcePage>[];
 }

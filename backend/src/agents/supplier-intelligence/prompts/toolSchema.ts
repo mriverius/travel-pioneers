@@ -158,6 +158,21 @@ const sharedFieldsSchema = {
         "Nombre del banco. Ejemplo: 'Banco Nacional de Costa Rica', 'BAC " +
         "Credomatic'.",
     },
+    notes: {
+      type: ["string", "null"],
+      description:
+        "Columna BA — 'NOTAS'. Cláusulas significativas del contrato que " +
+        "NO encajan en ninguna otra columna del schema. Ejemplos: " +
+        "restricciones de edad mínima/máxima, condiciones especiales de " +
+        "pago, requisitos de booking (prepago, garantía con tarjeta, " +
+        "presentar ID), notas sobre alérgenos o restricciones " +
+        "alimentarias, exclusiones, force majeure, límites de equipaje en " +
+        "transfers, pesos/edades en tours acuáticos, etc. Es contract-" +
+        "wide: el writer del xlsx replica este valor en cada fila de la " +
+        "columna BA. Resumir en texto plano separado por punto y coma. " +
+        "NO repetir info que ya está en cancellation_policy o " +
+        "range_payment_policy. null si no hay nada que reportar.",
+    },
   },
   required: [
     "fecha",
@@ -177,6 +192,7 @@ const sharedFieldsSchema = {
     "tipo_moneda",
     "numero_cuenta",
     "banco",
+    "notes",
   ],
 } as const;
 
@@ -246,7 +262,7 @@ const rowSchema = {
         "  • Tour / actividad / transfer / comida → 'UNI'\n" +
         "  • Cualquier otro hospedaje no reconocido → 'STD'\n" +
         "Si tenés dudas en el mapeo, devolver el código y agregar " +
-        "'[REVIEW NEEDED]' al campo `notes` con el motivo.",
+        "'[REVIEW NEEDED]' al campo `shared_fields.notes` con el motivo.",
     },
     ocupacion: {
       type: ["string", "null"],
@@ -420,17 +436,6 @@ export const EXTRAER_DATOS_CONTRATO_TOOL: Tool = {
           "una sola vez (ej: 'porcentaje_comision'). Estos se mostrarán al " +
           "usuario como 'No encontrado en el documento'.",
       },
-      notes: {
-        type: ["string", "null"],
-        description:
-          "Cláusulas significativas del contrato que NO encajan en " +
-          "ninguna otra columna del schema. Ejemplos: restricciones de " +
-          "edad mínima/máxima, condiciones especiales de pago, requisitos " +
-          "de booking (prepago, garantía, ID), notas sobre alérgenos, " +
-          "exclusiones, etc. Resumir en texto plano. Estas notas se " +
-          "vuelcan en la columna 'OTHERS IN PAYMENT OR CANCELLATION' del " +
-          "xlsx para que no se pierdan. null si no hay nada que reportar.",
-      },
       paginas_origen_shared: {
         type: "object",
         description:
@@ -457,7 +462,6 @@ export const EXTRAER_DATOS_CONTRATO_TOOL: Tool = {
       "rows",
       "confianza",
       "campos_faltantes",
-      "notes",
       "paginas_origen_shared",
       "paginas_origen_rows",
     ],

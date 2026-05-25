@@ -8,6 +8,7 @@ import type {
   SharedFields,
   TipoUnidad,
 } from "./types.js";
+import { normalizeDate } from "./validators.js";
 
 /**
  * Persistence + read endpoints for Supplier Intelligence runs.
@@ -37,6 +38,38 @@ const stringOrNull = (v: unknown): string | null => {
   return null;
 };
 
+/**
+ * Guardrail final: el agente normaliza fechas al extraer, pero el usuario
+ * puede editar manualmente en Step 2 antes de guardar. Esto asegura que
+ * lo que termina en el histórico SIEMPRE esté en YYYY-MM-DD (o null /
+ * "NOT AVAILABLE"). Si no se pudo parsear lo guardamos como null en
+ * lugar de meter basura en el DB; la lib del normalizador ya conoce
+ * todos los formatos comunes (DD/MM/YYYY, "January 6 2026", etc.).
+ */
+const dateOrNull = (v: unknown): string | null => {
+  return normalizeDate(stringOrNull(v)).value;
+};
+
+/**
+ * Coerce a "Tipo Tarifa" code (col X — `tipo_tarifa_neta`). El sistema
+ * downstream (`xlsxGenerator.inferTipoTarifa`) usa estrictamente los
+ * códigos:
+ *   - "1" → FIJA
+ *   - "2" → PORCENTUAL
+ *
+ * El dropdown de la UI ahora solo deja ingresar esos dos valores, pero
+ * como backstop coercemos en el backend: cualquier otra cosa
+ * (texto libre legacy como "Por persona", strings con espacios, null,
+ * undefined) se transforma a null y deja que el generator infiera el
+ * código a partir del % comisión.
+ */
+const tipoTarifaCodeOrNull = (v: unknown): string | null => {
+  const s = stringOrNull(v);
+  if (s === null) return null;
+  const trimmed = s.trim();
+  return trimmed === "1" || trimmed === "2" ? trimmed : null;
+};
+
 function coerceTipoUnidad(v: unknown): TipoUnidad | null {
   return v === "N" || v === "S" ? v : null;
 }
@@ -47,7 +80,7 @@ function coerceSharedFields(input: unknown): SharedFields {
   }
   const r = input as Record<string, unknown>;
   return {
-    fecha: stringOrNull(r.fecha),
+    fecha: dateOrNull(r.fecha),
     proveedor: stringOrNull(r.proveedor),
     nombre_comercial: stringOrNull(r.nombre_comercial),
     cedula: stringOrNull(r.cedula),
@@ -56,14 +89,15 @@ function coerceSharedFields(input: unknown): SharedFields {
     pais: stringOrNull(r.pais),
     state_province: stringOrNull(r.state_province),
     type_of_business: stringOrNull(r.type_of_business),
-    contract_starts: stringOrNull(r.contract_starts),
-    contract_ends: stringOrNull(r.contract_ends),
+    contract_starts: dateOrNull(r.contract_starts),
+    contract_ends: dateOrNull(r.contract_ends),
     reservations_email: stringOrNull(r.reservations_email),
     tipo_unidad: coerceTipoUnidad(r.tipo_unidad),
     tipo_servicio: stringOrNull(r.tipo_servicio),
     tipo_moneda: stringOrNull(r.tipo_moneda),
     numero_cuenta: stringOrNull(r.numero_cuenta),
     banco: stringOrNull(r.banco),
+    notes: stringOrNull(r.notes),
   };
 }
 
@@ -80,8 +114,8 @@ function coerceRow(input: unknown, index: number): ContractRow {
     codigo_servicio: stringOrNull(r.codigo_servicio),
     ocupacion: stringOrNull(r.ocupacion),
     season_name: stringOrNull(r.season_name),
-    season_starts: stringOrNull(r.season_starts),
-    season_ends: stringOrNull(r.season_ends),
+    season_starts: dateOrNull(r.season_starts),
+    season_ends: dateOrNull(r.season_ends),
     meals_included: stringOrNull(r.meals_included),
     precios_neto_iva: stringOrNull(r.precios_neto_iva),
     precio_rack_iva: stringOrNull(r.precio_rack_iva),
@@ -104,7 +138,7 @@ function coerceManualFields(input: unknown): ManualFields | null {
   }
   const r = input as Record<string, unknown>;
   return {
-    tipo_tarifa_neta: stringOrNull(r.tipo_tarifa_neta),
+    tipo_tarifa_neta: tipoTarifaCodeOrNull(r.tipo_tarifa_neta),
     tipo_tarifa_mayorista: stringOrNull(r.tipo_tarifa_mayorista),
     tipo_tarifa_fds: stringOrNull(r.tipo_tarifa_fds),
     t_tar_neta_fds: stringOrNull(r.t_tar_neta_fds),

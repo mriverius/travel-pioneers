@@ -897,7 +897,7 @@ export type $ContractRunPayload<ExtArgs extends runtime.Types.Extensions.Interna
      */
     manualFields: runtime.JsonValue | null
     /**
-     * * AI model used for the extraction (e.g. `claude-opus-4-6-20251109`).
+     * * AI model used for the extraction (e.g. `claude-opus-4-7`).
      */
     aiModel: string
     /**

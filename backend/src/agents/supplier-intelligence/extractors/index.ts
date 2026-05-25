@@ -10,7 +10,7 @@ import { prepareFromXlsx } from "./xlsx.js";
  * correctly; extension is only a fallback for clients that upload as
  * `application/octet-stream`.
  *
- * Las imágenes (JPEG/PNG/GIF/WebP) mapean a "image" — Claude Opus 4.6 las
+ * Las imágenes (JPEG/PNG/GIF/WebP) mapean a "image" — Claude Opus 4.7 las
  * lee nativamente como bloques `image`, sin OCR previo.
  */
 const MIME_TO_KIND: Record<string, SupportedDocKind> = {

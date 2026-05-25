@@ -52,6 +52,12 @@ export const SHARED_COL: Partial<Record<SharedFieldKey, string>> = {
   banco: "AS",
   tipo_moneda: "AT",
   // telefono: sin columna — se extrae para validación pero no se escribe.
+  // Columna 53 — NOTAS (Bug #6 → BA). Cláusulas globales del contrato
+  // que no encajan en ninguna otra columna del schema. Antes se
+  // shoehorneaba en AK (others_payment_cancel) como fallback; ahora
+  // vive en su propia columna dedicada y se replica en cada fila igual
+  // que el resto de los shared.
+  notes: "BA",
 };
 
 /**
@@ -73,9 +79,6 @@ export const DATE_ROW_FIELDS = ["season_starts", "season_ends"] as const;
 /** Columnas auto-llenadas por el writer en función de porcentaje_comision (Bug #4). */
 export const TIPO_TARIFA_REGULAR_COLS = ["X", "AA"] as const; // tipo_tarifa_neta, tipo_tarifa_mayorista
 export const TIPO_TARIFA_FDS_COLS = ["AC", "AD", "AG"] as const; // tipo_tarifa_fds, t_tar_neta_fds, tipo_tarifa_mayorista_fds
-
-/** Columna donde se vuelcan las notas del contrato (Bug #6). */
-export const NOTES_COL = "AK"; // others_payment_cancel
 
 /**
  * Columnas para los campos "manual" que no extrae la IA pero existen en la

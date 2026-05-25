@@ -9,7 +9,6 @@ import {
   DATE_ROW_FIELDS,
   DATE_SHARED_FIELDS,
   MANUAL_COL,
-  NOTES_COL,
   ROW_CLASSIFICATION_COL,
   ROW_COL,
   SHARED_COL,
@@ -66,16 +65,10 @@ export interface GenerateXlsxInput {
    * Campos "manuales" que el usuario llenó en step 2 — son shared (se
    * replican en cada fila) pero no salen del contrato ni del catálogo.
    * Cuando viene null/undefined, las columnas X, AA, AC, AD, AG, AK, AP,
-   * AQ, AU..AZ quedan vacías en el xlsx.
+   * AQ, AU..AZ quedan vacías en el xlsx. Las notas globales del
+   * contrato viven ahora en `shared_fields.notes` (columna BA), no acá.
    */
   manual_fields?: ManualFields | null;
-  /**
-   * Notas globales del contrato extraídas por la IA (Bug #6) — cláusulas
-   * que no encajaron en ninguna otra columna. Si el usuario llenó
-   * `manual_fields.others_payment_cancel`, lo manual gana; si no, el
-   * writer copia estas notas a la columna AK para que no se pierdan.
-   */
-  notes?: string | null;
 }
 
 /** Resultado de la generación: buffer + filename sugerido. */
@@ -430,17 +423,6 @@ export function generateContractXlsx(
     );
   }
 
-  // Bug #6 — pre-resolver la nota global. La nota AI se cae a la columna
-  // AK solo si el usuario NO llenó manualmente others_payment_cancel.
-  const manualOthers = input.manual_fields?.others_payment_cancel?.trim();
-  const aiNotes = input.notes?.trim();
-  const resolvedNotes =
-    manualOthers && manualOthers !== ""
-      ? manualOthers
-      : aiNotes && aiNotes !== ""
-        ? aiNotes
-        : null;
-
   // Escribimos cada fila con shared + row data.
   for (let i = 0; i < input.rows.length; i++) {
     const xlsxRow = TEMPLATE_DATA_START_ROW + i;
@@ -471,8 +453,9 @@ export function generateContractXlsx(
 
     // Manual fields — replicados en cada fila (igual que shared, pero el
     // usuario los llena directamente en la UI ya que no salen del contrato).
-    // Las columnas X/AA/AC/AD/AG (tipos de tarifa) las maneja Bug #4 abajo,
-    // y la AK (others_payment_cancel) se combina con AI notes (Bug #6).
+    // Las columnas X/AA/AC/AD/AG (tipos de tarifa) las maneja Bug #4 abajo.
+    // others_payment_cancel (AK) sale por el loop genérico — ya no se
+    // combina con notes porque éstas viven en su propia columna BA.
     if (input.manual_fields) {
       const tipoTarifaCols = new Set<string>([
         ...TIPO_TARIFA_REGULAR_COLS,
@@ -480,7 +463,6 @@ export function generateContractXlsx(
       ]);
       for (const [key, col] of Object.entries(MANUAL_COL)) {
         if (tipoTarifaCols.has(col)) continue;
-        if (col === NOTES_COL) continue;
         const value = input.manual_fields[key as keyof ManualFields];
         writeCell(dataSheet, col, xlsxRow, value == null ? null : String(value));
       }
@@ -527,11 +509,9 @@ export function generateContractXlsx(
       writeCell(dataSheet, col, xlsxRow, trimmed && trimmed !== "" ? trimmed : inferred);
     }
 
-    // Bug #6 — vuelco de notas a AK (others_payment_cancel) cuando la
-    // celda manual está vacía.
-    if (resolvedNotes) {
-      writeCell(dataSheet, NOTES_COL, xlsxRow, resolvedNotes);
-    }
+    // Las notas (`shared_fields.notes`) se escriben a la columna BA por
+    // el loop genérico de SHARED_COL más arriba — ya no requiere
+    // resolución especial.
   }
 
   const lastRow = TEMPLATE_DATA_START_ROW + input.rows.length - 1;

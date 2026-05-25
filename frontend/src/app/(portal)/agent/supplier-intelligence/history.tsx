@@ -651,8 +651,9 @@ function readCellValue(
  * the first one.
  *
  * The cell display reuses `formatCellDisplay` from `workflow.tsx`, so dates
- * appear as mm/dd/yyyy and `currency` columns get the dynamic currency code
- * (`sharedFields.tipo_moneda`) — identical formatting to Step 2.
+ * aparecen como YYYY-MM-DD (mismo formato que el storage) y las columnas
+ * `currency` reciben el código de moneda dinámico
+ * (`sharedFields.tipo_moneda`) — idéntico al render de Step 2.
  *
  * Closes on Esc, backdrop click, or the X button.
  */
@@ -793,7 +794,7 @@ function HistoryDetailModal({
                     </span>
                   </span>
                   <span
-                    title={`Costo aproximado (Opus 4.6: $5/M input + $25/M output)`}
+                    title={`Costo aproximado (Opus 4.7: $5/M input + $25/M output)`}
                     className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-amber-500/30 bg-amber-500/10 text-[10.5px] font-semibold uppercase tracking-wider text-amber-300"
                   >
                     <span className="text-amber-400/70">Costo</span>

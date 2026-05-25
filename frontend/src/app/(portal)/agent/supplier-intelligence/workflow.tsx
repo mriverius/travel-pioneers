@@ -120,7 +120,7 @@ const ACCEPT_ATTR = [
   ".xlsx",
   "application/vnd.ms-excel",
   ".xls",
-  // Imágenes — Claude Opus 4.6 las lee nativamente con vision. Las
+  // Imágenes — Claude Opus 4.7 las lee nativamente con vision. Las
   // extensiones se incluyen además del MIME porque algunos sistemas
   // (notablemente Windows arrastrando desde el escritorio) suben con
   // MIME genérico application/octet-stream y nos quedamos sin señal.
@@ -205,12 +205,6 @@ export interface ApprovedPayload {
   rows: ExtractedContractRow[];
   catalogPrefill: GenerateXlsxCatalogPrefill | null;
   manualFields: GenerateXlsxManualFields | null;
-  /**
-   * Notas globales (Bug #6) — pasadas a generate-xlsx para que el backend
-   * las vuelque a AK cuando manual_fields.others_payment_cancel está
-   * vacío. Se reenvían tal cual desde la respuesta de extract.
-   */
-  notes: string | null;
 }
 
 export function SupplierWorkflow() {
@@ -1155,10 +1149,10 @@ function AnalysisProgressCard({
         </div>
         <p className="text-[11px] text-muted-foreground">
           {matchingPhase === "ai"
-            ? "Pidiéndole a Claude que elija el proveedor del catálogo. Opus 4.6 puede tardar 30-60s para contratos con muchas combinaciones."
+            ? "Pidiéndole a Claude que elija el proveedor del catálogo. Opus 4.7 puede tardar 30-60s para contratos con muchas combinaciones."
             : files.length > 1
-              ? `Opus 4.6 está consolidando ${files.length} documentos. Puede tardar varios minutos — mantén esta pestaña abierta.`
-              : "Opus 4.6 puede tardar entre 30 y 90 segundos para contratos con muchas filas (ej. 21 combinaciones)."}
+              ? `Opus 4.7 está consolidando ${files.length} documentos. Puede tardar varios minutos — mantén esta pestaña abierta.`
+              : "Opus 4.7 puede tardar entre 30 y 90 segundos para contratos con muchas filas (ej. 21 combinaciones)."}
         </p>
       </div>
     </div>
@@ -1219,19 +1213,34 @@ const TIPO_UNIDAD_OPTIONS: ReadonlyArray<SelectOption> = [
 ];
 
 /**
- * Formatea una fecha ISO (`yyyy-mm-dd`) al formato US `mm/dd/yyyy` que el
- * negocio prefiere ver en la grilla. Si el valor no calza con ISO (por
- * ejemplo porque la IA extrajo "31/12/2026" tal cual), lo devolvemos sin
- * tocar — preferimos mostrar algo legible a "Invalid Date".
+ * Opciones para "Tipo Tarifa" (columnas X, AA, AC, AD, AG).
+ *
+ * Convención del sistema: el writer xlsx espera literalmente el código
+ * "1" o "2" en esas celdas y la inferencia automática
+ * (`inferTipoTarifa` en xlsxGenerator.ts) emite los mismos códigos —
+ * mantener la UI restringida a "1"/"2" evita free-text como "Por
+ * persona" o "Wholesale" que rompía la plantilla downstream.
+ */
+const TIPO_TARIFA_OPTIONS: ReadonlyArray<SelectOption> = [
+  { codigo: "1", descripcion: "Fija" },
+  { codigo: "2", descripcion: "Porcentual" },
+];
+
+/**
+ * Devuelve la fecha tal cual está guardada (`YYYY-MM-DD`). El sistema
+ * mantiene un único formato extremo a extremo — input nativo `<input
+ * type="date">` lee/escribe en ISO, el normalizador server-side
+ * (`normalizeDate` en validators.ts) garantiza ISO antes de persistir,
+ * y la grilla muestra ISO. Si llega algo distinto (ej. una run viejo
+ * pre-guardrail) lo dejamos pasar literal — preferible a "Invalid Date".
  */
 function formatDateDisplay(value: string): string {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
-  return m ? `${m[2]}/${m[3]}/${m[1]}` : value;
+  return value;
 }
 
 /**
  * Devuelve el valor formateado para mostrar en la celda read-only:
- *   - Fechas ISO → mm/dd/yyyy
+ *   - Fechas → YYYY-MM-DD (mismo formato que el storage)
  *   - Columnas con `currency` → "<código> <valor>" (ej. "USD 295", "CRC 150000").
  *     `tipoMoneda` viene del contrato. Si está vacío, NO mostramos prefijo —
  *     preferimos un valor sin prefijo a inventar una moneda. Si el valor ya
@@ -1282,7 +1291,7 @@ export const ALL_COLUMNS: ColumnDef[] = [
   { excelCol: "U",  key: "season_starts",     label: "Season Starts",      scope: { kind: "row" },                       minWidth: 140, inputType: "date" },
   { excelCol: "V",  key: "season_ends",       label: "Season Ends",        scope: { kind: "row" },                       minWidth: 140, inputType: "date" },
   { excelCol: "W",  key: "meals_included",    label: "Meals Included",     scope: { kind: "row" },                       minWidth: 140, placeholder: "BREAKFAST…" },
-  { excelCol: "X",  key: "tipo_tarifa_neta",  label: "Tipo Tarifa Neta",   scope: { kind: "shared", source: "manual" },  minWidth: 140, placeholder: "Ej: Por persona" },
+  { excelCol: "X",  key: "tipo_tarifa_neta",  label: "Tipo Tarifa Neta",   scope: { kind: "shared", source: "manual" },  minWidth: 140, options: () => TIPO_TARIFA_OPTIONS },
   { excelCol: "Y",  key: "precios_neto_iva",  label: "Precios Neto c/IVA", scope: { kind: "row" },                       minWidth: 110, placeholder: "295", currency: true },
   { excelCol: "Z",  key: "precio_rack_iva",   label: "Precio Rack c/IVA",  scope: { kind: "row" },                       minWidth: 110, placeholder: "295", currency: true },
   { excelCol: "AA", key: "tipo_tarifa_mayorista",     label: "Tipo Tarifa Mayorista",     scope: { kind: "shared", source: "manual" }, minWidth: 150, placeholder: "Ej: Wholesale" },
@@ -1311,6 +1320,10 @@ export const ALL_COLUMNS: ColumnDef[] = [
   { excelCol: "AX", key: "cuenta_bancaria_3",         label: "Cuenta Bancaria 3",         scope: { kind: "shared", source: "manual" }, minWidth: 200 },
   { excelCol: "AY", key: "banco_3",                   label: "Banco 3",                   scope: { kind: "shared", source: "manual" }, minWidth: 150 },
   { excelCol: "AZ", key: "moneda_3",                  label: "Moneda 3",                  scope: { kind: "shared", source: "manual" }, minWidth: 100 },
+  // Columna 53 — NOTAS (Bug #6 → BA). Cláusulas globales que no
+  // encajaron en ninguna otra columna. Es shared (mismo valor en cada
+  // fila) y multilínea — un punto y coma separa items.
+  { excelCol: "BA", key: "notes",                     label: "Notas",                     scope: { kind: "shared", source: "ai" },     minWidth: 320, multiline: true, placeholder: "Cláusulas/notas que no encajaron en otras columnas" },
 ];
 
 /** Keys del backend ExtractedSharedFields que tienen columna en el xlsx
@@ -1320,6 +1333,7 @@ const AI_SHARED_KEYS: ExtractedSharedFieldKey[] = [
   "pais", "state_province", "type_of_business",
   "contract_starts", "contract_ends", "reservations_email",
   "tipo_unidad", "tipo_servicio", "tipo_moneda", "numero_cuenta", "banco",
+  "notes",
 ];
 
 const CATALOG_KEYS = [
@@ -1390,7 +1404,7 @@ function buildInitialSharedValues(
   prefill: CatalogPrefill | null,
 ): Record<SharedKey, string | null> {
   const out: Record<string, string | null> = {};
-  // 16 AI keys con columna
+  // 17 AI keys con columna (16 originales + notes/BA)
   for (const k of AI_SHARED_KEYS) {
     out[k] = data.shared_fields[k];
   }
@@ -1498,6 +1512,7 @@ function ReviewStep({
       tipo_moneda: sharedValues.tipo_moneda,
       numero_cuenta: sharedValues.numero_cuenta,
       banco: sharedValues.banco,
+      notes: sharedValues.notes,
     };
 
     // Catalog prefill — null si todos los 4 son null/empty
@@ -1543,7 +1558,6 @@ function ReviewStep({
       rows,
       catalogPrefill: finalCatalogPrefill,
       manualFields: finalManualFields,
-      notes: data.notes ?? null,
     });
   };
 
@@ -2026,11 +2040,11 @@ function CellEditor({
   }
 
   const missing = value === null || value === "";
-  // Aplicamos formato solo cuando hay valor: las fechas ISO se reformatean
-  // a mm/dd/yyyy y las columnas con `currency` muestran el código de moneda
-  // del contrato (ej. "USD 295", "CRC 150000"). El aria-label usa el valor
-  // formateado para que un lector de pantalla dicte la misma cifra que ve
-  // el usuario.
+  // Aplicamos formato solo cuando hay valor: las fechas se muestran en
+  // YYYY-MM-DD (mismo formato que el storage) y las columnas con
+  // `currency` muestran el código de moneda del contrato (ej. "USD 295",
+  // "CRC 150000"). El aria-label usa el valor formateado para que un
+  // lector de pantalla dicte la misma cifra que ve el usuario.
   const displayValue = missing ? "" : formatCellDisplay(col, value, tipoMoneda);
   return (
     <button
@@ -2101,7 +2115,6 @@ function DownloadStep({
           rows: payload.rows,
           catalog_prefill: payload.catalogPrefill,
           manual_fields: payload.manualFields,
-          notes: payload.notes,
         });
 
         const objectUrl = URL.createObjectURL(blob);

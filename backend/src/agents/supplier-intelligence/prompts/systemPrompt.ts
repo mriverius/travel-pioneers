@@ -228,24 +228,57 @@ REGLAS POR CAMPO (rows[])
 
 15d. "codigo_servicio" (POR FILA, columna N — Bug #2): código corto en
     MAYÚSCULAS DERIVADO DEL NOMBRE DEL PRODUCTO de ESTA fila. NO copies
-    un único valor a todas las filas (ese era el bug). Reglas (en orden
-    de prioridad):
-      • "Master Suite" / "Vista Master Suite"     → "MAS"
-      • "Penthouse"                                → "PNT"
-      • "Family Suite" / "Family Room"             → "FAM"
-      • "Deluxe Suite"                             → "DLX"
-      • "Junior Suite"                             → "JUN"
-      • "Infinity Suite" / "Vista Suite" /
-        cualquier otra "... Suite"                 → "SUI"
-      • "Premium" (sin "Suite")                    → "PRM"
-      • "Standard" / "Garden" / "Tropical" /
-        nombre de ave o naturaleza                 → "STD"
-      • "Superior"                                 → "SUP"
-      • "Villa"                                    → "VIL"
-      • "Bungalow"                                 → "BUN"
-      • Tour / actividad / transfer / comida       → "UNI"
-      • Cualquier otro hospedaje no reconocido     → "STD"
-    Si tenés dudas, marcar el caso en \`notes\` con "[REVIEW NEEDED]".
+    un único valor a todas las filas (ese era el bug). El código tiene
+    que matchear LITERALMENTE el nombre del producto — si no estás
+    100% seguro, devolvé null (NO inventes, NO copies del producto
+    anterior).
+
+    Reglas (en orden de prioridad — el match es por SUBSTRING en el
+    nombre del producto, case-insensitive):
+
+      • Hospedajes (\`tipo_servicio === "HO"\`):
+        - "Master Suite" / "Vista Master Suite"   → "MAS"
+        - "Penthouse"                              → "PNT"
+        - "Family Suite" / "Family Room"           → "FAM"
+        - "Deluxe Suite"                           → "DLX"
+        - "Junior Suite"                           → "JUN"
+        - "Infinity Suite" / "Vista Suite" /
+          CUALQUIER otra "… Suite" que no haya
+          matcheado arriba                         → "SUI"
+        - "Premium" (sin "Suite")                  → "PRM"
+        - "Standard" / "Garden" / "Tropical"       → "STD"
+        - "Superior"                               → "SUP"
+        - "Villa"                                  → "VIL"
+        - "Bungalow"                               → "BUN"
+
+      • Tours / actividades / transfers / comidas
+        (\`tipo_servicio !== "HO"\`): código de 6-10 chars en MAYÚSCULAS
+        derivado de las palabras significativas del tour. Ejemplos:
+          - "Whale & Dolphin Watching"     → "WHALEDOL"
+          - "Waterfalls Tour"              → "WATERTOUR"
+          - "Marino Ballena Nature Walk"   → "MBNATWLK"
+          - "Corcovado Nature Hike"        → "CORCOHIKE"
+          - "Sunset Catamaran"             → "SUNSETCAT"
+
+    REGLAS DE ORO — releerlas antes de emitir codigo_servicio:
+
+      1. NO puede haber DOS filas con product_name distinto y el MISMO
+         codigo_servicio. Si tu pasada quedó con "Master Suite"=MAS y
+         "Infinity Suite"=MAS, está MAL — la segunda fila tiene que
+         ser SUI. Revisá cada fila independientemente.
+
+      2. Si el nombre del producto NO matchea NINGUNA regla con
+         certeza absoluta (ej: "Habitación con vista al mar" — ¿es
+         Suite? ¿es Standard? ¿es Premium?), devolvé \`null\` y agregá
+         al campo \`shared_fields.notes\` el texto literal:
+            "[REVIEW NEEDED: codigo_servicio para '<product_name>']"
+         El sistema tiene un fallback heurístico server-side que sabe
+         hacer el match cuando el nombre es claro; si no es claro,
+         preferimos null + flag a un código inventado.
+
+      3. NO uses el código del primer producto que viste en el
+         contrato como default para los demás — eso es exactamente
+         el bug que estamos cazando.
 
 16. "ocupacion": código corto típico ('DBL' = doble, 'SGL' = single, 'TPL'
     = triple, 'CPL' = cuádruple, 'FAM' = familiar). Si el contrato dice
@@ -274,15 +307,40 @@ REGLAS POR CAMPO (rows[])
     varían, copiar el mismo valor en todas las filas (la UI lo colapsa).
 
 ═══════════════════════════════════════════════════════════════════════════
-FORMATO DE FECHAS — OBLIGATORIO YYYY-MM-DD (Bug #3)
+FORMATO DE FECHAS — OBLIGATORIO YYYY-MM-DD (Bug #3 — guardrail server-side)
 ═══════════════════════════════════════════════════════════════════════════
 
-TODAS las fechas que devuelvas — \`fecha\`, \`contract_starts\`,
-\`contract_ends\`, \`season_starts\`, \`season_ends\` — DEBEN salir en
-formato ISO YYYY-MM-DD como string. NO uses M/D/YYYY, D/M/YYYY,
-"January 6, 2026", "06-Jan-2026", ni timestamps con hora. Ejemplo
-correcto: "2026-01-06". Si una fecha no se encuentra y no es inferible,
-devolver el string literal "NOT AVAILABLE" (no null, no blank).
+ÚNICO formato permitido: \`YYYY-MM-DD\` (año-mes-día con guiones, sin
+zona horaria, sin hora). Aplica a TODOS los campos de fecha:
+\`fecha\`, \`contract_starts\`, \`contract_ends\`, \`season_starts\`,
+\`season_ends\`.
+
+EJEMPLOS:
+  ✅ "2026-01-06"
+  ✅ "2027-12-31"
+  ✅ "NOT AVAILABLE"   ← sentinel cuando el dato no existe en el contrato
+
+  ❌ "01/06/2026"           ← ambiguo y prohibido
+  ❌ "06-01-2026"           ← prohibido (orden DMY)
+  ❌ "06/01/26"             ← año de 2 dígitos prohibido
+  ❌ "January 6, 2026"      ← nombres de mes prohibidos
+  ❌ "6 de enero de 2026"   ← prohibido
+  ❌ "2026-01-06T00:00:00Z" ← sin hora ni zona
+  ❌ "2026/01/06"           ← guiones, no barras
+  ❌ "2026-1-6"             ← cero a la izquierda obligatorio
+  ❌ "" (vacío)             ← usar "NOT AVAILABLE" o null
+  ❌ null para un campo que tenés que llenar — usar "NOT AVAILABLE"
+
+REGLA: si una fecha aparece en el documento en cualquier otro formato,
+TRADUCILA vos a \`YYYY-MM-DD\` antes de emitirla. NO copies el formato
+del documento literalmente. Si no podés determinar el día/mes/año con
+certeza (ej: "2026" suelto sin mes), tratá la fecha como ausente y
+devolvé \`"NOT AVAILABLE"\`.
+
+Hay un validador server-side que normaliza estos formatos como
+backstop, pero si el modelo emite el formato directamente correcto se
+evita ruido en warnings y se conserva información ambigua que el
+backstop podría perder.
 
 ═══════════════════════════════════════════════════════════════════════════
 NOTES — CLÁUSULAS NO MAPEABLES (Bug #6)
@@ -298,14 +356,16 @@ límites de equipaje en transfers, pesos/edades en tours acuáticos, etc.
   - Si son ESPECÍFICAS de una fila (ej: "este tour requiere edad
     mínima 8"), agregar al final del campo más cercano (other_included
     o feeds_adicionales) la marca \`[NOTE: <texto>]\`.
-  - Si son GLOBALES del contrato, juntarlas en el campo top-level
-    \`notes\` separadas por punto y coma. NO inventar contenido — si
-    no hay nada relevante, devolver null.
+  - Si son GLOBALES del contrato, juntarlas en el campo
+    \`shared_fields.notes\` separadas por punto y coma. NO inventar
+    contenido — si no hay nada relevante, devolver null.
 
-El writer copia \`notes\` a la columna AK ("OTHERS IN PAYMENT OR
-CANCELLATION") cuando el usuario no la haya llenado manualmente, así
-que NO repetir info que ya está en cancellation_policy o
-range_payment_policy.
+El writer del xlsx escribe \`shared_fields.notes\` a la columna BA
+("NOTAS") — su columna dedicada, replicada en cada fila como cualquier
+otro campo shared (igual que \`proveedor\` o \`nombre_comercial\`). NO
+repetir info que ya está en cancellation_policy o range_payment_policy
+ni en los campos manuales (others_payment_cancel sigue siendo un campo
+separado de la UI, no se mezcla con notas).
 
 ═══════════════════════════════════════════════════════════════════════════
 METADATOS Y TRAZABILIDAD
