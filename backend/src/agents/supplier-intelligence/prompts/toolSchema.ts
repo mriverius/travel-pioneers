@@ -197,10 +197,56 @@ const rowSchema = {
       type: ["string", "null"],
       description:
         "Código de Categoría del catálogo Utopía (columna R). Debe " +
-        "pertenecer al tipo_servicio shared. Para hospedajes: STD, OCV " +
-        "(Ocean View), DLX, SUI, MAS, FAM, PNT, PRM, etc. Si no aplica, " +
-        "usar 'UNI' (UNIDADES). Mapear la categoría del contrato al " +
-        "código más cercano del catálogo (ej. 'Family Suite' → 'FAM').",
+        "pertenecer al tipo_servicio de la fila (override) o, en su " +
+        "defecto, al tipo_servicio shared. Para hospedajes: STD, OCV " +
+        "(Ocean View), DLX, SUI, MAS, FAM, PNT, PRM, etc. Para tours / " +
+        "actividades / transfers / comidas: 'UNI' (UNIDADES). NUNCA " +
+        "devolver null — usar 'STD' como último recurso para HO y 'UNI' " +
+        "para todo lo demás.",
+    },
+    tipo_servicio: {
+      type: ["string", "null"],
+      enum: [...TIPO_SERVICIO_CODES, null],
+      description:
+        "Código de Tipo de Servicio POR FILA (columna Q). Override del " +
+        "tipo_servicio shared cuando el contrato mezcla servicios — caso " +
+        "típico: contrato de hotel + Experiences Book con tours. " +
+        "Hoteles/lodges/resorts → 'HO'. Tours/actividades/canopy → 'TO'. " +
+        "Transfers → 'TR'. Comidas/desayunos cobrados aparte → 'AL'. " +
+        "Rent a car → 'RE'. Si la fila comparte el mismo valor que el " +
+        "shared, devolver null y dejar que el writer use el shared.",
+    },
+    tipo_unidad: {
+      type: ["string", "null"],
+      enum: [...TIPO_UNIDAD_CODES, null],
+      description:
+        "Tipo de unidad POR FILA (columna P). 'N' por noche (hospedajes); " +
+        "'S' por servicio (tours, transfers, comidas, rent a car por día). " +
+        "Si coincide con el shared, devolver null.",
+    },
+    codigo_servicio: {
+      type: ["string", "null"],
+      description:
+        "Código corto único por fila (columna N — 'Cod.Servicio'). Bug #2: " +
+        "se DEBE derivar del nombre del producto de ESTA fila, no copiar " +
+        "el primero del contrato. Reglas de mapeo (case-insensitive, en " +
+        "orden de prioridad):\n" +
+        "  • 'Master Suite' / 'Vista Master Suite' → 'MAS'\n" +
+        "  • 'Penthouse' → 'PNT'\n" +
+        "  • 'Family Suite' / 'Family Room' → 'FAM'\n" +
+        "  • 'Deluxe Suite' → 'DLX'\n" +
+        "  • 'Junior Suite' → 'JUN'\n" +
+        "  • 'Infinity Suite' / 'Vista Suite' / cualquier otra '... Suite' → 'SUI'\n" +
+        "  • 'Premium' (sin 'Suite') → 'PRM'\n" +
+        "  • 'Standard' / 'Garden' / 'Tropical' / nombre de ave o " +
+        "naturaleza (Cotinga, Motmot, Toucanet, etc.) → 'STD'\n" +
+        "  • 'Superior' → 'SUP'\n" +
+        "  • 'Villa' → 'VIL'\n" +
+        "  • 'Bungalow' → 'BUN'\n" +
+        "  • Tour / actividad / transfer / comida → 'UNI'\n" +
+        "  • Cualquier otro hospedaje no reconocido → 'STD'\n" +
+        "Si tenés dudas en el mapeo, devolver el código y agregar " +
+        "'[REVIEW NEEDED]' al campo `notes` con el motivo.",
     },
     ocupacion: {
       type: ["string", "null"],
@@ -315,6 +361,9 @@ const rowSchema = {
   required: [
     "product_name",
     "categoria",
+    "tipo_servicio",
+    "tipo_unidad",
+    "codigo_servicio",
     "ocupacion",
     "season_name",
     "season_starts",
@@ -371,6 +420,17 @@ export const EXTRAER_DATOS_CONTRATO_TOOL: Tool = {
           "una sola vez (ej: 'porcentaje_comision'). Estos se mostrarán al " +
           "usuario como 'No encontrado en el documento'.",
       },
+      notes: {
+        type: ["string", "null"],
+        description:
+          "Cláusulas significativas del contrato que NO encajan en " +
+          "ninguna otra columna del schema. Ejemplos: restricciones de " +
+          "edad mínima/máxima, condiciones especiales de pago, requisitos " +
+          "de booking (prepago, garantía, ID), notas sobre alérgenos, " +
+          "exclusiones, etc. Resumir en texto plano. Estas notas se " +
+          "vuelcan en la columna 'OTHERS IN PAYMENT OR CANCELLATION' del " +
+          "xlsx para que no se pierdan. null si no hay nada que reportar.",
+      },
       paginas_origen_shared: {
         type: "object",
         description:
@@ -397,6 +457,7 @@ export const EXTRAER_DATOS_CONTRATO_TOOL: Tool = {
       "rows",
       "confianza",
       "campos_faltantes",
+      "notes",
       "paginas_origen_shared",
       "paginas_origen_rows",
     ],

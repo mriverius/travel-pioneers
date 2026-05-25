@@ -3,14 +3,20 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as XLSX from "xlsx";
 import type { WorkBook, WorkSheet } from "xlsx";
-import type { ContractRow, ManualFields, SharedFields } from "./types.js";
+import type { ContractRow, ManualFields, SharedFields, TipoUnidad } from "./types.js";
 import {
   CATALOG_PREFILL_COL,
+  DATE_ROW_FIELDS,
+  DATE_SHARED_FIELDS,
   MANUAL_COL,
+  NOTES_COL,
+  ROW_CLASSIFICATION_COL,
   ROW_COL,
   SHARED_COL,
   TEMPLATE_DATA_SHEET_NAME,
   TEMPLATE_DATA_START_ROW,
+  TIPO_TARIFA_FDS_COLS,
+  TIPO_TARIFA_REGULAR_COLS,
 } from "./xlsxColumnMap.js";
 
 /**
@@ -63,6 +69,13 @@ export interface GenerateXlsxInput {
    * AQ, AU..AZ quedan vacías en el xlsx.
    */
   manual_fields?: ManualFields | null;
+  /**
+   * Notas globales del contrato extraídas por la IA (Bug #6) — cláusulas
+   * que no encajaron en ninguna otra columna. Si el usuario llenó
+   * `manual_fields.others_payment_cancel`, lo manual gana; si no, el
+   * writer copia estas notas a la columna AK para que no se pierdan.
+   */
+  notes?: string | null;
 }
 
 /** Resultado de la generación: buffer + filename sugerido. */
@@ -174,6 +187,200 @@ function writeCell(
   sheet[ref] = { t: "s", v: value };
 }
 
+/* -------------------------------------------------------------------------- */
+/*                       Bug-fix helpers                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Bug #3 — Date normalization. Acepta cualquiera de los formatos que la IA
+ * o el usuario puedan haber dejado pasar (ISO, datetime, M/D/YYYY,
+ * D-M-YYYY, "January 6, 2026", etc.) y devuelve siempre YYYY-MM-DD.
+ *
+ * Reglas:
+ *   - null / "" / undefined  → "NOT AVAILABLE"
+ *   - "NOT AVAILABLE" (case-insensitive) → "NOT AVAILABLE"
+ *   - YYYY-MM-DD ya está OK
+ *   - M/D/YYYY o MM/DD/YYYY → asumir convención US (es lo que la mayoría
+ *     de contratos en EN escriben). Es ambiguo, pero el system prompt
+ *     siempre exige YYYY-MM-DD del modelo, así que esta rama es solo un
+ *     safety net para datos legacy / manuales.
+ *   - Cualquier otra cosa que `Date.parse` interprete → la pasamos por ahí
+ *   - Imposible de parsear → "NOT AVAILABLE" (Bug #3 spec: NUNCA dejar la
+ *     celda en blanco para columnas de fecha).
+ */
+function normalizeDate(input: unknown): string {
+  if (input === null || input === undefined) return "NOT AVAILABLE";
+  const raw = typeof input === "string" ? input.trim() : String(input).trim();
+  if (raw === "") return "NOT AVAILABLE";
+  if (raw.toUpperCase() === "NOT AVAILABLE") return "NOT AVAILABLE";
+
+  // Already YYYY-MM-DD — fast path.
+  const iso = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (iso) {
+    const [, y, m, d] = iso;
+    return `${y}-${m!.padStart(2, "0")}-${d!.padStart(2, "0")}`;
+  }
+
+  // ISO datetime (e.g. "2026-01-06T00:00:00Z") — keep the date part only.
+  const isoDt = raw.match(/^(\d{4})-(\d{2})-(\d{2})T/);
+  if (isoDt) {
+    return `${isoDt[1]}-${isoDt[2]}-${isoDt[3]}`;
+  }
+
+  // M/D/YYYY or MM/DD/YYYY (US convention, dash variants too).
+  const slashy = raw.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+  if (slashy) {
+    const [, m, d, y] = slashy;
+    return `${y}-${m!.padStart(2, "0")}-${d!.padStart(2, "0")}`;
+  }
+
+  // Last resort: Date.parse — handles "January 6, 2026", "Jan 6 2026", etc.
+  // Use UTC components to avoid local-tz drift around midnight.
+  const parsed = new Date(raw);
+  if (!Number.isNaN(parsed.getTime())) {
+    const y = parsed.getUTCFullYear();
+    const m = String(parsed.getUTCMonth() + 1).padStart(2, "0");
+    const d = String(parsed.getUTCDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+
+  return "NOT AVAILABLE";
+}
+
+/**
+ * Bug #4 — Tipo Tarifa. Si hay porcentaje de comisión > 0 → "2"
+ * (PORCENTUAL); si es 0/null/ausente → "1" (FIJA). Acepta strings con %,
+ * espacios o coma decimal.
+ */
+function inferTipoTarifa(porcentaje: string | null | undefined): "1" | "2" {
+  if (porcentaje === null || porcentaje === undefined) return "1";
+  const cleaned = String(porcentaje).trim().replace(/%/g, "").replace(",", ".");
+  if (cleaned === "") return "1";
+  const num = Number(cleaned);
+  if (!Number.isFinite(num) || num <= 0) return "1";
+  return "2";
+}
+
+/**
+ * Bug #2 — derivar el código corto a partir del nombre del producto.
+ * Solo se usa como FALLBACK cuando ni la fila ni el catalog_prefill traen
+ * un valor. La IA es la fuente primaria; este mapping garantiza que la
+ * columna N nunca quede vacía.
+ *
+ * Reglas alineadas con el system prompt y la categoría del catálogo Utopía
+ * para HO. Evaluación en orden de especificidad (master antes que suite,
+ * suite antes que premium, etc.) — así "Vista Master Suite" mapea a MAS
+ * y no a SUI.
+ */
+function deriveCodigoServicioFromProduct(product: string | null): string {
+  if (!product) return "STD";
+  const p = product.toLowerCase();
+
+  if (p.includes("master suite")) return "MAS";
+  if (p.includes("penthouse")) return "PNT";
+  if (p.includes("family suite") || p.includes("family room")) return "FAM";
+  if (p.includes("deluxe suite") || p.includes("deluxe")) return "DLX";
+  if (p.includes("junior suite")) return "JUN";
+  // Cualquier otra "... Suite" cae en SUI (Infinity, Vista, etc.)
+  if (p.includes("suite")) return "SUI";
+  if (p.includes("premium")) return "PRM";
+  if (p.includes("standard") || p.includes("garden") || p.includes("tropical")) return "STD";
+  if (p.includes("superior")) return "SUP";
+  if (p.includes("villa")) return "VIL";
+  if (p.includes("bungalow") || p.includes("boungalow")) return "BUN";
+  if (p.includes("ocean view")) return "OCV";
+  // Tour / actividad / transfer / comida — heurística por keywords típicas.
+  if (
+    p.includes("tour") ||
+    p.includes("hike") ||
+    p.includes("watching") ||
+    p.includes("transfer") ||
+    p.includes("breakfast") ||
+    p.includes("dinner") ||
+    p.includes("canopy") ||
+    p.includes("kayak") ||
+    p.includes("zip") ||
+    p.includes("safari")
+  ) {
+    return "UNI";
+  }
+  return "STD";
+}
+
+/**
+ * Bug #5 — fallback de tipo_servicio cuando ni la fila ni shared traen
+ * valor. Heurística defensiva: tour si el nombre del producto sugiere
+ * tour, transfer si dice transfer, comida si dice meal/breakfast/dinner;
+ * todo lo demás cae a "OT" (OTHER) que es válido en el catálogo.
+ */
+function inferTipoServicioFromProduct(product: string | null): string {
+  if (!product) return "OT";
+  const p = product.toLowerCase();
+  if (p.includes("transfer") || p.includes("shuttle")) return "TR";
+  if (
+    p.includes("tour") ||
+    p.includes("hike") ||
+    p.includes("watching") ||
+    p.includes("canopy") ||
+    p.includes("safari") ||
+    p.includes("kayak") ||
+    p.includes("zip")
+  ) {
+    return "TO";
+  }
+  if (p.includes("breakfast") || p.includes("dinner") || p.includes("lunch") || p.includes("meal")) {
+    return "AL";
+  }
+  if (p.includes("rent a car") || p.includes("car rental")) return "RE";
+  return "OT";
+}
+
+/**
+ * Resolución por fila de los tres campos de clasificación (Bug #1, #2, #5).
+ * Orden de precedencia:
+ *   1. valor por fila (override de la IA)
+ *   2. valor shared del contrato
+ *   3. heurística sobre product_name
+ *   4. fallback duro ("STD" / "UNI" / "N" / "OT")
+ *
+ * NUNCA devuelve string vacío — si todas las fuentes fallan, usa el
+ * fallback duro para garantizar que las columnas P, Q, R, N siempre
+ * lleven algo.
+ */
+function resolveRowClassification(
+  row: ContractRow,
+  shared: SharedFields,
+  catalogPrefill: CatalogPrefillInput | null | undefined,
+): {
+  tipoServicio: string;
+  tipoUnidad: TipoUnidad;
+  codigoServicio: string;
+  categoria: string;
+} {
+  const tipoServicio =
+    row.tipo_servicio?.trim() ||
+    shared.tipo_servicio?.trim() ||
+    inferTipoServicioFromProduct(row.product_name);
+
+  const rowUnidad = row.tipo_unidad === "N" || row.tipo_unidad === "S" ? row.tipo_unidad : null;
+  const sharedUnidad =
+    shared.tipo_unidad === "N" || shared.tipo_unidad === "S" ? shared.tipo_unidad : null;
+  const tipoUnidad: TipoUnidad =
+    rowUnidad ?? sharedUnidad ?? (tipoServicio === "HO" ? "N" : "S");
+
+  const codigoServicio =
+    row.codigo_servicio?.trim() ||
+    catalogPrefill?.codigo_servicio?.trim() ||
+    deriveCodigoServicioFromProduct(row.product_name);
+
+  const categoria =
+    row.categoria?.trim() ||
+    (tipoServicio === "HO" ? deriveCodigoServicioFromProduct(row.product_name) : "UNI") ||
+    (tipoServicio === "HO" ? "STD" : "UNI");
+
+  return { tipoServicio, tipoUnidad, codigoServicio, categoria };
+}
+
 /**
  * Expandir el `!ref` de la hoja para incluir todas las filas escritas. La
  * plantilla viene con `A1:AZ60` pero solo si las filas físicas existen las
@@ -223,31 +430,57 @@ export function generateContractXlsx(
     );
   }
 
+  // Bug #6 — pre-resolver la nota global. La nota AI se cae a la columna
+  // AK solo si el usuario NO llenó manualmente others_payment_cancel.
+  const manualOthers = input.manual_fields?.others_payment_cancel?.trim();
+  const aiNotes = input.notes?.trim();
+  const resolvedNotes =
+    manualOthers && manualOthers !== ""
+      ? manualOthers
+      : aiNotes && aiNotes !== ""
+        ? aiNotes
+        : null;
+
   // Escribimos cada fila con shared + row data.
   for (let i = 0; i < input.rows.length; i++) {
     const xlsxRow = TEMPLATE_DATA_START_ROW + i;
     const row = input.rows[i];
     if (!row) continue; // unreachable per length check, but TS noUncheckedIndexedAccess requires it
 
-    // Catalog prefill (A, B, C, N) — opcional
+    // Catalog prefill (A, B, C) — opcional. NOTA: la columna N
+    // (codigo_servicio) ya NO se escribe acá — se resuelve más abajo
+    // por fila (Bug #2).
     if (input.catalog_prefill) {
       writeCell(dataSheet, CATALOG_PREFILL_COL.tipo_actividad, xlsxRow, input.catalog_prefill.tipo_actividad);
       writeCell(dataSheet, CATALOG_PREFILL_COL.zona_turismo, xlsxRow, input.catalog_prefill.zona_turismo);
       writeCell(dataSheet, CATALOG_PREFILL_COL.proveedor_codigo, xlsxRow, input.catalog_prefill.proveedor_codigo);
-      writeCell(dataSheet, CATALOG_PREFILL_COL.codigo_servicio, xlsxRow, input.catalog_prefill.codigo_servicio);
     }
 
-    // Shared fields — replicados en cada fila
+    // Shared fields — replicados en cada fila. tipo_unidad y tipo_servicio
+    // ya no están en SHARED_COL: se manejan por fila más abajo (Bug #1, #5).
     for (const [key, col] of Object.entries(SHARED_COL)) {
       if (!col) continue;
       const value = input.shared_fields[key as keyof SharedFields];
+      // Bug #3 — fechas siempre normalizadas a YYYY-MM-DD.
+      if (DATE_SHARED_FIELDS.includes(key as (typeof DATE_SHARED_FIELDS)[number])) {
+        writeCell(dataSheet, col, xlsxRow, normalizeDate(value));
+        continue;
+      }
       writeCell(dataSheet, col, xlsxRow, value == null ? null : String(value));
     }
 
     // Manual fields — replicados en cada fila (igual que shared, pero el
-    // usuario los llena directamente en la UI ya que no salen del contrato)
+    // usuario los llena directamente en la UI ya que no salen del contrato).
+    // Las columnas X/AA/AC/AD/AG (tipos de tarifa) las maneja Bug #4 abajo,
+    // y la AK (others_payment_cancel) se combina con AI notes (Bug #6).
     if (input.manual_fields) {
+      const tipoTarifaCols = new Set<string>([
+        ...TIPO_TARIFA_REGULAR_COLS,
+        ...TIPO_TARIFA_FDS_COLS,
+      ]);
       for (const [key, col] of Object.entries(MANUAL_COL)) {
+        if (tipoTarifaCols.has(col)) continue;
+        if (col === NOTES_COL) continue;
         const value = input.manual_fields[key as keyof ManualFields];
         writeCell(dataSheet, col, xlsxRow, value == null ? null : String(value));
       }
@@ -255,8 +488,49 @@ export function generateContractXlsx(
 
     // Row-specific fields
     for (const [key, col] of Object.entries(ROW_COL)) {
+      if (!col) continue;
       const value = row[key as keyof ContractRow];
+      // Bug #3 — fechas de temporada siempre YYYY-MM-DD.
+      if (DATE_ROW_FIELDS.includes(key as (typeof DATE_ROW_FIELDS)[number])) {
+        writeCell(dataSheet, col, xlsxRow, normalizeDate(value));
+        continue;
+      }
       writeCell(dataSheet, col, xlsxRow, value == null ? null : String(value));
+    }
+
+    // Bug #1, #2, #5 — clasificación por fila garantizada (P, Q, N, R).
+    const cls = resolveRowClassification(row, input.shared_fields, input.catalog_prefill);
+    writeCell(dataSheet, ROW_CLASSIFICATION_COL.tipo_unidad, xlsxRow, cls.tipoUnidad);
+    writeCell(dataSheet, ROW_CLASSIFICATION_COL.tipo_servicio, xlsxRow, cls.tipoServicio);
+    writeCell(dataSheet, ROW_CLASSIFICATION_COL.codigo_servicio, xlsxRow, cls.codigoServicio);
+    // Categoría (R) ya viene en ROW_COL, pero el writer la reescribe acá
+    // si quedó vacía después de la pasada anterior (fallback duro).
+    const categoriaCol = ROW_COL.categoria;
+    if (categoriaCol && (!row.categoria || row.categoria.trim() === "")) {
+      writeCell(dataSheet, categoriaCol, xlsxRow, cls.categoria);
+    }
+
+    // Bug #4 — Tipo Tarifa (Neta + Mayorista, regular y fin de semana).
+    // Si hay manual_fields explícito, respetarlo; si no, derivar del
+    // porcentaje de comisión.
+    const inferredRegular = inferTipoTarifa(row.porcentaje_comision);
+    const inferredFds = inferTipoTarifa(row.porcentaje_comision_fds);
+    const tarifaCells: Array<[string, string | null | undefined, "1" | "2"]> = [
+      ["X", input.manual_fields?.tipo_tarifa_neta, inferredRegular],
+      ["AA", input.manual_fields?.tipo_tarifa_mayorista, inferredRegular],
+      ["AC", input.manual_fields?.tipo_tarifa_fds, inferredFds],
+      ["AD", input.manual_fields?.t_tar_neta_fds, inferredFds],
+      ["AG", input.manual_fields?.tipo_tarifa_mayorista_fds, inferredFds],
+    ];
+    for (const [col, manualVal, inferred] of tarifaCells) {
+      const trimmed = manualVal?.trim();
+      writeCell(dataSheet, col, xlsxRow, trimmed && trimmed !== "" ? trimmed : inferred);
+    }
+
+    // Bug #6 — vuelco de notas a AK (others_payment_cancel) cuando la
+    // celda manual está vacía.
+    if (resolvedNotes) {
+      writeCell(dataSheet, NOTES_COL, xlsxRow, resolvedNotes);
     }
   }
 

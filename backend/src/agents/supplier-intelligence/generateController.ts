@@ -81,6 +81,9 @@ function coerceRow(input: unknown, index: number): ContractRow {
   return {
     product_name: stringOrNull(r.product_name),
     categoria: stringOrNull(r.categoria),
+    tipo_servicio: stringOrNull(r.tipo_servicio),
+    tipo_unidad: coerceTipoUnidad(r.tipo_unidad),
+    codigo_servicio: stringOrNull(r.codigo_servicio),
     ocupacion: stringOrNull(r.ocupacion),
     season_name: stringOrNull(r.season_name),
     season_starts: stringOrNull(r.season_starts),
@@ -165,8 +168,9 @@ function parseGenerateInput(body: unknown): GenerateXlsxInput {
 
   const catalog_prefill = coerceCatalogPrefill(b.catalog_prefill);
   const manual_fields = coerceManualFields(b.manual_fields);
+  const notes = stringOrNull(b.notes);
 
-  return { shared_fields, rows, catalog_prefill, manual_fields };
+  return { shared_fields, rows, catalog_prefill, manual_fields, notes };
 }
 
 export async function generateXlsxHandler(

@@ -52,6 +52,41 @@ REGLA DE ORO PARA \`rows\`:
   Si el contrato cubre solo UN producto y UNA temporada, devuelve un solo
   elemento en \`rows\`. El array nunca puede estar vacío.
 
+DOCUMENTOS COMPAÑEROS — TOURS / EXPERIENCES / ACTIVIDADES (Bug #1):
+
+  Cuando el bundle de archivos incluye un documento secundario tipo
+  "Experiences Book", "Activities Guide", "Tour List", "Excursions
+  Catalog", catálogo de actividades o similar, ESE documento es PARTE
+  del contrato y sus servicios DEBEN aparecer en \`rows\`. El error
+  histórico fue ignorar ese segundo documento y procesar solo las
+  tarifas de habitaciones — corregido.
+
+  Por cada tour / actividad listado:
+    - Una fila por (tour × temporada/disponibilidad). Si el tour no
+      distingue temporadas, una sola fila.
+    - product_name = nombre exacto del tour ("Whale & Dolphin Watching",
+      "Corcovado Nature Hike", "Canopy Tour", etc.).
+    - tipo_servicio (POR FILA) = "TO" (TOURS).
+    - tipo_unidad (POR FILA) = "S" (por servicio / por persona).
+    - categoria = "UNI" (UNIDADES).
+    - codigo_servicio = abreviación corta en MAYÚSCULAS derivada del
+      nombre del tour (8-12 chars máx). Ejemplos:
+        "Whale & Dolphin Watching" → "WHALEDOL"
+        "Corcovado Nature Hike"    → "CORCOHIKE"
+        "Mangrove Boat Tour"       → "MANGTOUR"
+        "Sunset Catamaran"         → "SUNSETCAT"
+    - season_starts / season_ends = vigencia del contrato o disponibilidad
+      del tour si está especificada (YYYY-MM-DD).
+    - precios_neto_iva = precio neto por persona tal como aparece (si el
+      documento dice "incluye impuestos", asumir que sí; reflejarlo en
+      \`feeds_adicionales\` si el documento detalla otra cosa).
+
+  Si un mismo bundle incluye HOTEL + TOURS, el contrato se modela como
+  UNA extracción con \`shared_fields.tipo_servicio\` = "HO" (el primario)
+  y las filas de tours overrideando con \`tipo_servicio\` = "TO" en cada
+  una. Hace exactamente lo mismo con \`tipo_unidad\` ("N" shared, "S"
+  por fila para tours).
+
 POLÍTICAS POR FILA:
 
   Las políticas (cancellation_policy, range_payment_policy, kids_policy,
@@ -160,17 +195,57 @@ REGLAS POR CAMPO (rows[])
     "Vista Suites", "Penthouse", "Canopy Tour"). Una fila por cada producto.
 
 15. "categoria": código del catálogo Utopía válido para el tipo_servicio
-    shared. Mapear el producto del contrato al código más cercano:
-    - "Standard" / "Garden" / "Tropical" → "STD" (a menos que el contrato
-      distinga claramente otra cosa)
-    - "Premium" → "PRM"
-    - "Vista Suites" / "Junior Suite" → "JUN" o "SUI"
+    de ESTA fila (override) o, en su defecto, el tipo_servicio shared.
+    NUNCA dejar null: usar "STD" como último recurso para HO y "UNI"
+    para todo lo demás. Mapear el producto al código más cercano:
+    - "Standard" / "Garden" / "Tropical" → "STD"
+    - "Premium" (sin "Suite") → "PRM"
+    - "Vista Suites" / cualquier "Suite" no específica → "SUI"
+    - "Junior Suite" → "JUN"
     - "Master Suite" / "Vista Master Suite" → "MAS"
     - "Family Suite" / "Family Room" → "FAM"
     - "Penthouse" → "PNT"
     - "Ocean View" → "OCV"
-    - "Deluxe" → "DLX"
-    Si no hay categoría específica → "UNI" (UNIDADES, opción genérica).
+    - "Deluxe" / "Deluxe Suite" → "DLX"
+    - "Superior" → "SUP"
+    - "Villa" → "VIL"
+    - "Bungalow" → "BUN"
+    - Nombres de aves o naturaleza (Cotinga, Motmot, Toucanet, ...) → "STD"
+    - Tours / actividades / transfers / comidas → "UNI"
+
+15b. "tipo_servicio" (POR FILA, columna Q — Bug #1 / #5): código del tipo
+    de servicio que aplica a ESTA fila específica. Override del shared
+    cuando el contrato mezcla servicios. Hoteles/lodges → "HO", tours
+    → "TO", transfers → "TR", comidas → "AL", rent a car → "RE". Si la
+    fila comparte el mismo valor que el shared, devolver null y dejar que
+    el writer use el shared. NUNCA dejar la columna en blanco — el writer
+    aplica un fallback heurístico si shared+row son ambos null, pero la
+    extracción debe intentar siempre identificar el código correcto.
+
+15c. "tipo_unidad" (POR FILA — Bug #5): "N" si la tarifa de esta fila es
+    por noche (hospedajes), "S" si es por servicio (tours, transfers,
+    comidas, rent a car por día). Si coincide con el shared, devolver null.
+
+15d. "codigo_servicio" (POR FILA, columna N — Bug #2): código corto en
+    MAYÚSCULAS DERIVADO DEL NOMBRE DEL PRODUCTO de ESTA fila. NO copies
+    un único valor a todas las filas (ese era el bug). Reglas (en orden
+    de prioridad):
+      • "Master Suite" / "Vista Master Suite"     → "MAS"
+      • "Penthouse"                                → "PNT"
+      • "Family Suite" / "Family Room"             → "FAM"
+      • "Deluxe Suite"                             → "DLX"
+      • "Junior Suite"                             → "JUN"
+      • "Infinity Suite" / "Vista Suite" /
+        cualquier otra "... Suite"                 → "SUI"
+      • "Premium" (sin "Suite")                    → "PRM"
+      • "Standard" / "Garden" / "Tropical" /
+        nombre de ave o naturaleza                 → "STD"
+      • "Superior"                                 → "SUP"
+      • "Villa"                                    → "VIL"
+      • "Bungalow"                                 → "BUN"
+      • Tour / actividad / transfer / comida       → "UNI"
+      • Cualquier otro hospedaje no reconocido     → "STD"
+    Si tenés dudas, marcar el caso en \`notes\` con "[REVIEW NEEDED]".
 
 16. "ocupacion": código corto típico ('DBL' = doble, 'SGL' = single, 'TPL'
     = triple, 'CPL' = cuádruple, 'FAM' = familiar). Si el contrato dice
@@ -197,6 +272,40 @@ REGLAS POR CAMPO (rows[])
 21. Políticas: resumir a 1-2 oraciones cada una. Si varían por temporada,
     poner la política de ESA temporada (la fila a la que pertenece). Si no
     varían, copiar el mismo valor en todas las filas (la UI lo colapsa).
+
+═══════════════════════════════════════════════════════════════════════════
+FORMATO DE FECHAS — OBLIGATORIO YYYY-MM-DD (Bug #3)
+═══════════════════════════════════════════════════════════════════════════
+
+TODAS las fechas que devuelvas — \`fecha\`, \`contract_starts\`,
+\`contract_ends\`, \`season_starts\`, \`season_ends\` — DEBEN salir en
+formato ISO YYYY-MM-DD como string. NO uses M/D/YYYY, D/M/YYYY,
+"January 6, 2026", "06-Jan-2026", ni timestamps con hora. Ejemplo
+correcto: "2026-01-06". Si una fecha no se encuentra y no es inferible,
+devolver el string literal "NOT AVAILABLE" (no null, no blank).
+
+═══════════════════════════════════════════════════════════════════════════
+NOTES — CLÁUSULAS NO MAPEABLES (Bug #6)
+═══════════════════════════════════════════════════════════════════════════
+
+Después de llenar todas las columnas, BARRER el contrato en busca de
+cláusulas relevantes que no encajen en ninguna columna del schema:
+restricciones de edad mínima/máxima, requisitos de booking (prepago,
+garantía con tarjeta, presentar ID), notas sobre alérgenos o
+restricciones alimentarias, exclusiones, condiciones de force majeure,
+límites de equipaje en transfers, pesos/edades en tours acuáticos, etc.
+
+  - Si son ESPECÍFICAS de una fila (ej: "este tour requiere edad
+    mínima 8"), agregar al final del campo más cercano (other_included
+    o feeds_adicionales) la marca \`[NOTE: <texto>]\`.
+  - Si son GLOBALES del contrato, juntarlas en el campo top-level
+    \`notes\` separadas por punto y coma. NO inventar contenido — si
+    no hay nada relevante, devolver null.
+
+El writer copia \`notes\` a la columna AK ("OTHERS IN PAYMENT OR
+CANCELLATION") cuando el usuario no la haya llenado manualmente, así
+que NO repetir info que ya está en cancellation_policy o
+range_payment_policy.
 
 ═══════════════════════════════════════════════════════════════════════════
 METADATOS Y TRAZABILIDAD

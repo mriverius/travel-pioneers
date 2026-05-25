@@ -205,6 +205,12 @@ export interface ApprovedPayload {
   rows: ExtractedContractRow[];
   catalogPrefill: GenerateXlsxCatalogPrefill | null;
   manualFields: GenerateXlsxManualFields | null;
+  /**
+   * Notas globales (Bug #6) — pasadas a generate-xlsx para que el backend
+   * las vuelque a AK cuando manual_fields.others_payment_cancel está
+   * vacío. Se reenvían tal cual desde la respuesta de extract.
+   */
+  notes: string | null;
 }
 
 export function SupplierWorkflow() {
@@ -627,7 +633,7 @@ export function SupplierWorkflow() {
     </section>
 
     <div className="text-center mt-4 space-y-1">
-      <p className="text-[11px] text-muted-foreground/60">Version 1.1.0 - Mayo 21</p>
+      <p className="text-[11px] text-muted-foreground/60">Version 1.2.0 - Mayo 24</p>
       <a
         href="https://forms.gle/GANUbdcuAS3P7szS8"
         target="_blank"
@@ -1438,6 +1444,9 @@ function ReviewStep({
       const blank: ExtractedContractRow = {
         product_name: last?.product_name ?? null,
         categoria: last?.categoria ?? null,
+        tipo_servicio: last?.tipo_servicio ?? null,
+        tipo_unidad: last?.tipo_unidad ?? null,
+        codigo_servicio: last?.codigo_servicio ?? null,
         ocupacion: last?.ocupacion ?? null,
         season_name: null,
         season_starts: null,
@@ -1534,6 +1543,7 @@ function ReviewStep({
       rows,
       catalogPrefill: finalCatalogPrefill,
       manualFields: finalManualFields,
+      notes: data.notes ?? null,
     });
   };
 
@@ -2091,6 +2101,7 @@ function DownloadStep({
           rows: payload.rows,
           catalog_prefill: payload.catalogPrefill,
           manual_fields: payload.manualFields,
+          notes: payload.notes,
         });
 
         const objectUrl = URL.createObjectURL(blob);

@@ -43,10 +43,9 @@ export const SHARED_COL: Partial<Record<SharedFieldKey, string>> = {
   type_of_business: "K",
   contract_starts: "L",
   contract_ends: "M",
-  // tipo_unidad y tipo_servicio son shared en el modelo, también son shared
-  // en el xlsx (cada fila tiene el mismo valor)
-  tipo_unidad: "P",
-  tipo_servicio: "Q",
+  // tipo_unidad (P) y tipo_servicio (Q) ya NO viven aquí — son per-row
+  // (Bug #1, #5). El writer los resuelve combinando shared + override de
+  // la fila + fallback heurístico, y los escribe directamente.
   reservations_email: "AO",
   // Cuenta bancaria 1
   numero_cuenta: "AR",
@@ -54,6 +53,29 @@ export const SHARED_COL: Partial<Record<SharedFieldKey, string>> = {
   tipo_moneda: "AT",
   // telefono: sin columna — se extrae para validación pero no se escribe.
 };
+
+/**
+ * Columnas escritas por fila pero RESUELTAS combinando shared + override
+ * por fila + fallback heurístico (Bug #1, #5). El writer las maneja a
+ * mano, no por iteración sobre ROW_COL.
+ */
+export const ROW_CLASSIFICATION_COL = {
+  tipo_unidad: "P",
+  tipo_servicio: "Q",
+  /** Cod.Servicio — Bug #2: per-row code derivado del product_name. */
+  codigo_servicio: "N",
+} as const;
+
+/** Fechas que requieren normalización a YYYY-MM-DD (Bug #3). */
+export const DATE_SHARED_FIELDS = ["fecha", "contract_starts", "contract_ends"] as const;
+export const DATE_ROW_FIELDS = ["season_starts", "season_ends"] as const;
+
+/** Columnas auto-llenadas por el writer en función de porcentaje_comision (Bug #4). */
+export const TIPO_TARIFA_REGULAR_COLS = ["X", "AA"] as const; // tipo_tarifa_neta, tipo_tarifa_mayorista
+export const TIPO_TARIFA_FDS_COLS = ["AC", "AD", "AG"] as const; // tipo_tarifa_fds, t_tar_neta_fds, tipo_tarifa_mayorista_fds
+
+/** Columna donde se vuelcan las notas del contrato (Bug #6). */
+export const NOTES_COL = "AK"; // others_payment_cancel
 
 /**
  * Columnas para los campos "manual" que no extrae la IA pero existen en la
@@ -77,10 +99,17 @@ export const MANUAL_COL: Record<ManualFieldKey, string> = {
   moneda_3: "AZ",
 };
 
-/** Columnas para los campos por fila. */
-export const ROW_COL: Record<RowFieldKey, string> = {
+/**
+ * Columnas para los campos por fila. NOTA: tipo_unidad (P), tipo_servicio
+ * (Q) y codigo_servicio (N) tienen entradas en `ContractRow` pero el
+ * writer los maneja con resolución especial (override por fila + fallback
+ * a shared / heurística) — ver `ROW_CLASSIFICATION_COL` arriba. Por eso
+ * NO viven en este map: la iteración genérica los saltearía sin aplicar
+ * los fallbacks.
+ */
+export const ROW_COL: Partial<Record<RowFieldKey, string>> = {
   product_name: "O",
-  // P (tipo_unidad) y Q (tipo_servicio) son shared
+  // P (tipo_unidad), Q (tipo_servicio) y N (codigo_servicio) → ROW_CLASSIFICATION_COL
   categoria: "R",
   ocupacion: "S",
   season_name: "T",

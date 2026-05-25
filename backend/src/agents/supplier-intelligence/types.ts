@@ -62,6 +62,27 @@ export interface SharedFields {
 export interface ContractRow {
   product_name: string | null;
   categoria: string | null;
+  /**
+   * Override por fila de `tipo_servicio` (Bug #1 / #5). Cuando el contrato
+   * mezcla servicios (ej: hotel + tours en un Experiences Book), cada fila
+   * puede declarar su propio código (HO, TO, TR, AL...). Si null, el writer
+   * cae en `shared_fields.tipo_servicio` y luego en una heurística por
+   * tipo de producto.
+   */
+  tipo_servicio: string | null;
+  /**
+   * Override por fila de `tipo_unidad`. Hoteles → "N" (por noche); tours,
+   * transfers y comidas → "S" (por servicio). Mismo fallback que
+   * `tipo_servicio`.
+   */
+  tipo_unidad: TipoUnidad | null;
+  /**
+   * Código corto por fila ("Cod.Servicio", columna N). Bug #2: antes se
+   * tomaba un único código del catálogo (típicamente "MASTER") y se
+   * replicaba a todas las filas; ahora cada fila lleva su propio código
+   * derivado del nombre del producto.
+   */
+  codigo_servicio: string | null;
   ocupacion: string | null;
   // Temporada
   season_name: string | null;
@@ -125,6 +146,14 @@ export interface ExtractedContract {
   rows: ContractRow[];
   confianza: Confianza;
   campos_faltantes: string[];
+  /**
+   * Cláusulas significativas del contrato que no encajan en ninguna columna
+   * del schema (restricciones de edad, condiciones especiales, notas de
+   * reserva, etc.). Bug #6: antes se descartaban silenciosamente; ahora se
+   * acumulan acá y el writer las copia a la columna "OTHERS IN PAYMENT OR
+   * CANCELLATION" del xlsx.
+   */
+  notes: string | null;
   paginas_origen_shared: Record<string, SourcePage>;
   paginas_origen_rows: Record<string, SourcePage>[];
 }

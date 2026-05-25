@@ -309,6 +309,9 @@ function coerceRow(input: unknown): ContractRow {
   return {
     product_name: stringOrNull(r.product_name),
     categoria: stringOrNull(r.categoria),
+    tipo_servicio: stringOrNull(r.tipo_servicio),
+    tipo_unidad: coerceTipoUnidad(r.tipo_unidad),
+    codigo_servicio: stringOrNull(r.codigo_servicio),
     ocupacion: stringOrNull(r.ocupacion),
     season_name: stringOrNull(r.season_name),
     season_starts: stringOrNull(r.season_starts),
@@ -371,6 +374,8 @@ function coerceExtraction(input: unknown): ExtractedContract {
     ? r.campos_faltantes.filter((x): x is string => typeof x === "string")
     : [];
 
+  const notes = stringOrNull(r.notes);
+
   const paginas_origen_shared = coercePaginasOrigen(r.paginas_origen_shared);
 
   // paginas_origen_rows debe ser un array paralelo a rows.
@@ -386,6 +391,7 @@ function coerceExtraction(input: unknown): ExtractedContract {
     rows,
     confianza,
     campos_faltantes,
+    notes,
     paginas_origen_shared,
     paginas_origen_rows,
   };

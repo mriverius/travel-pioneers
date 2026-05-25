@@ -62,23 +62,37 @@ export function phoneDigitCountInRange(raw: string): boolean {
 
 /**
  * Limpia una fila en sitio: si la categoría no pertenece al tipo_servicio
- * shared, devolvemos la fila con categoria=null y un mensaje de warning. No
- * mutamos — devolvemos una copia.
+ * efectivo (override por fila > shared), devolvemos la fila con
+ * categoria=null y un mensaje de warning. No mutamos — devolvemos una
+ * copia.
+ *
+ * Bug #1 / #5 — el tipo_servicio puede ser un override por fila ahora,
+ * así que validamos contra el efectivo, no el shared.
  */
 function sanitizeRow(
   row: ContractRow,
-  tipoServicio: string | null,
+  sharedTipoServicio: string | null,
   rowIndex: number,
   warnings: string[],
 ): ContractRow {
   if (!row.categoria) return row;
-  if (!tipoServicio) {
+  // Override por fila tiene prioridad. Si el override está fuera del
+  // catálogo, lo tratamos como inválido y limpiamos la categoría.
+  const effectiveTipoServicio =
+    row.tipo_servicio?.trim() || sharedTipoServicio || null;
+  if (!effectiveTipoServicio) {
     warnings.push(
       `Fila ${rowIndex + 1}: se devolvió 'categoria' pero 'tipo_servicio' es null — categoria ignorada.`,
     );
     return { ...row, categoria: null };
   }
-  const validCats = CATEGORIAS_BY_TIPO_SERVICIO[tipoServicio];
+  if (!TIPO_SERVICIO_CODES.includes(effectiveTipoServicio)) {
+    warnings.push(
+      `Fila ${rowIndex + 1}: tipo_servicio "${effectiveTipoServicio}" no está en el catálogo — categoria ignorada.`,
+    );
+    return { ...row, categoria: null, tipo_servicio: null };
+  }
+  const validCats = CATEGORIAS_BY_TIPO_SERVICIO[effectiveTipoServicio];
   const ok =
     Array.isArray(validCats) &&
     validCats.some((c) => c.codigo === row.categoria);
@@ -86,7 +100,7 @@ function sanitizeRow(
     warnings.push(
       `Fila ${rowIndex + 1} (${row.product_name ?? "?"} / ${row.season_name ?? "?"}): ` +
         `categoría "${row.categoria}" no es válida para tipo_servicio ` +
-        `"${tipoServicio}" — se ignoró.`,
+        `"${effectiveTipoServicio}" — se ignoró.`,
     );
     return { ...row, categoria: null };
   }

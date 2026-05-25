@@ -75,6 +75,9 @@ function coerceRow(input: unknown, index: number): ContractRow {
   return {
     product_name: stringOrNull(r.product_name),
     categoria: stringOrNull(r.categoria),
+    tipo_servicio: stringOrNull(r.tipo_servicio),
+    tipo_unidad: coerceTipoUnidad(r.tipo_unidad),
+    codigo_servicio: stringOrNull(r.codigo_servicio),
     ocupacion: stringOrNull(r.ocupacion),
     season_name: stringOrNull(r.season_name),
     season_starts: stringOrNull(r.season_starts),

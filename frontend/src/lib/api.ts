@@ -484,6 +484,19 @@ export interface ExtractedSharedFields {
 export interface ExtractedContractRow {
   product_name: string | null;
   categoria: string | null;
+  /**
+   * Override por fila del tipo_servicio shared (Bug #1 / #5). Permite
+   * que un mismo contrato mezcle hotel + tours en filas distintas.
+   */
+  tipo_servicio: string | null;
+  /** Override por fila del tipo_unidad shared. */
+  tipo_unidad: ExtractionTipoUnidad | null;
+  /**
+   * Código corto por fila para columna N (Bug #2). Antes era único por
+   * contrato y producía "MASTER" para todo; ahora la IA lo deriva del
+   * nombre del producto de cada fila.
+   */
+  codigo_servicio: string | null;
   ocupacion: string | null;
   season_name: string | null;
   season_starts: string | null;
@@ -514,6 +527,12 @@ export interface ExtractedContract {
   rows: ExtractedContractRow[];
   confianza: ExtractionConfianza;
   campos_faltantes: string[];
+  /**
+   * Cláusulas globales del contrato que no encajaron en ninguna columna
+   * del schema (Bug #6). El backend las copia a la columna AK del xlsx
+   * cuando el usuario no llenó manualmente others_payment_cancel.
+   */
+  notes: string | null;
   /** Map of shared-field key -> source page. */
   paginas_origen_shared: Record<string, ExtractionSourcePage>;
   /** Per-row source pages, parallel to `rows`. */
@@ -606,6 +625,12 @@ export interface GenerateXlsxInput {
   rows: ExtractedContractRow[];
   catalog_prefill?: GenerateXlsxCatalogPrefill | null;
   manual_fields?: GenerateXlsxManualFields | null;
+  /**
+   * Notas globales (Bug #6) — cláusulas no mapeadas que extrajo la IA y
+   * que el backend vuelca a AK si manual_fields.others_payment_cancel
+   * está vacío. Opcional por compat con clientes viejos.
+   */
+  notes?: string | null;
 }
 
 /* --- match-supplier (fallback IA del lookup contra el catálogo) --- */
