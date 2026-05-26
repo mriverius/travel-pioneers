@@ -331,29 +331,68 @@ evita ruido en warnings y se conserva información ambigua que el
 backstop podría perder.
 
 ═══════════════════════════════════════════════════════════════════════════
-NOTES — CLÁUSULAS NO MAPEABLES (Bug #6)
+NOTES — "BOOKING NOTES" / CLÁUSULAS NO MAPEABLES (Bug #6)
 ═══════════════════════════════════════════════════════════════════════════
 
-Después de llenar todas las columnas, BARRER el contrato en busca de
-cláusulas relevantes que no encajen en ninguna columna del schema:
-restricciones de edad mínima/máxima, requisitos de booking (prepago,
-garantía con tarjeta, presentar ID), notas sobre alérgenos o
-restricciones alimentarias, exclusiones, condiciones de force majeure,
-límites de equipaje en transfers, pesos/edades en tours acuáticos, etc.
+Los contratos turísticos suelen incluir una sección al final con un
+listado de bullets / cláusulas operacionales — típicamente bajo títulos
+como "BOOKING NOTES", "GENERAL CONDITIONS", "TERMS & CONDITIONS",
+"NOTAS DE RESERVA", "OBSERVACIONES GENERALES" o equivalente. ESE
+listado es la fuente principal de \`shared_fields.notes\`. Ejemplo
+real (Kurà Boutique Hotel 2026):
 
-  - Si son ESPECÍFICAS de una fila (ej: "este tour requiere edad
-    mínima 8"), agregar al final del campo más cercano (other_included
-    o feeds_adicionales) la marca \`[NOTE: <texto>]\`.
-  - Si son GLOBALES del contrato, juntarlas en el campo
-    \`shared_fields.notes\` separadas por punto y coma. NO inventar
-    contenido — si no hay nada relevante, devolver null.
+  BOOKING NOTES:
+    · Rates are in US$ and do not include 13% government taxes.
+    · Room rates are per night and based on double occupancy.
+    · Minimum age for staying at Kurà is 18 years old.
+    · The maximum occupancy per Suite is 2 guests in a king size bed.
+    · Check-in time is at 3:00 pm and check-out at 11:00 am.
+    · A minimum-night policy may apply for bookings that create a
+      single-night stand, on any season.
+    · Minimum stay during Holiday Season is 4 nights.
+    · Full Resort bookings are allowed on Wildlife Season or on a
+      case-by-case basis.
+    · Existing credit conditions do not apply for Holiday Season
+      bookings.
+    · Group reservations are allowed special payment and
+      cancellations policies.
+    · For more information & bookings please contact: travel@…
+
+Reglas para llenar \`shared_fields.notes\`:
+
+  1. Si encuentras una sección "BOOKING NOTES" / "GENERAL CONDITIONS"
+     / equivalente, copiá CADA bullet como un item separado, en el
+     mismo orden en que aparece. Une los items con " ; " (espacio
+     punto-y-coma espacio). Mantené la frase original casi literal —
+     solo recortala si tiene >180 chars o si repite info que ya
+     escribiste en otra columna. NO inventes ni resumas a 1-2
+     oraciones; el operador necesita ver el detalle.
+
+  2. Además, BARRÉ el resto del contrato en busca de cláusulas
+     sueltas que no encajen en ninguna columna del schema:
+     restricciones de edad mínima/máxima, requisitos de booking
+     (prepago, garantía con tarjeta, presentar ID), notas sobre
+     alérgenos / restricciones alimentarias, exclusiones, condiciones
+     de force majeure, límites de equipaje, pesos/edades en tours
+     acuáticos, etc. Agregá esos items al MISMO listado, también
+     separados por " ; ".
+
+  3. Si una cláusula es ESPECÍFICA de una fila (ej. "este tour requiere
+     edad mínima 8"), agregala al final del campo más cercano de la
+     fila (\`other_included\` o \`feeds_adicionales\`) con la marca
+     \`[NOTE: <texto>]\`. NO la dupliques en \`shared_fields.notes\`.
+
+  4. NO inventes contenido. Si no hay sección de booking notes y no
+     encontrás cláusulas sueltas relevantes, devolvé null.
+
+  5. NO repetir info que ya está en cancellation_policy,
+     range_payment_policy o en los campos manuales
+     (others_payment_cancel es un campo separado de la UI — no se
+     mezcla con notas).
 
 El writer del xlsx escribe \`shared_fields.notes\` a la columna BA
-("NOTAS") — su columna dedicada, replicada en cada fila como cualquier
-otro campo shared (igual que \`proveedor\` o \`nombre_comercial\`). NO
-repetir info que ya está en cancellation_policy o range_payment_policy
-ni en los campos manuales (others_payment_cancel sigue siendo un campo
-separado de la UI, no se mezcla con notas).
+("NOTAS"), replicada en cada fila como cualquier otro campo shared
+(igual que \`proveedor\` o \`nombre_comercial\`).
 
 ═══════════════════════════════════════════════════════════════════════════
 METADATOS Y TRAZABILIDAD

@@ -57,13 +57,29 @@ const dateOrNull = (v: unknown): string | null => {
  * "Tipo Tarifa" sólo acepta los códigos "1" (FIJA) o "2" (PORCENTUAL) —
  * los mismos que emite `inferTipoTarifa` cuando no hay valor manual.
  * Cualquier otro string se transforma a null para que el generator caiga
- * al fallback inferido.
+ * al fallback inferido. Aplica a las cinco columnas tipo_tarifa_*
+ * (X / AA / AC / AD / AG).
  */
 const tipoTarifaCodeOrNull = (v: unknown): string | null => {
   const s = stringOrNull(v);
   if (s === null) return null;
   const trimmed = s.trim();
   return trimmed === "1" || trimmed === "2" ? trimmed : null;
+};
+
+/**
+ * "Condiciones Crédito" (col AP) sólo acepta:
+ *   - "1" → CONTADO
+ *   - "2" → CRÉDITO
+ *   - "3" → PREPAGO
+ * Cualquier free-text legacy ("30 días neto", etc.) se descarta — el
+ * plazo concreto vive en la columna AQ (`plazo`).
+ */
+const condCreditoCodeOrNull = (v: unknown): string | null => {
+  const s = stringOrNull(v);
+  if (s === null) return null;
+  const trimmed = s.trim();
+  return trimmed === "1" || trimmed === "2" || trimmed === "3" ? trimmed : null;
 };
 
 function coerceTipoUnidad(v: unknown): TipoUnidad | null {
@@ -136,12 +152,12 @@ function coerceManualFields(input: unknown): ManualFields | null {
   const r = input as Record<string, unknown>;
   return {
     tipo_tarifa_neta: tipoTarifaCodeOrNull(r.tipo_tarifa_neta),
-    tipo_tarifa_mayorista: stringOrNull(r.tipo_tarifa_mayorista),
-    tipo_tarifa_fds: stringOrNull(r.tipo_tarifa_fds),
-    t_tar_neta_fds: stringOrNull(r.t_tar_neta_fds),
-    tipo_tarifa_mayorista_fds: stringOrNull(r.tipo_tarifa_mayorista_fds),
+    tipo_tarifa_mayorista: tipoTarifaCodeOrNull(r.tipo_tarifa_mayorista),
+    tipo_tarifa_fds: tipoTarifaCodeOrNull(r.tipo_tarifa_fds),
+    t_tar_neta_fds: tipoTarifaCodeOrNull(r.t_tar_neta_fds),
+    tipo_tarifa_mayorista_fds: tipoTarifaCodeOrNull(r.tipo_tarifa_mayorista_fds),
     others_payment_cancel: stringOrNull(r.others_payment_cancel),
-    cond_credito: stringOrNull(r.cond_credito),
+    cond_credito: condCreditoCodeOrNull(r.cond_credito),
     plazo: stringOrNull(r.plazo),
     cuenta_bancaria_2: stringOrNull(r.cuenta_bancaria_2),
     banco_2: stringOrNull(r.banco_2),

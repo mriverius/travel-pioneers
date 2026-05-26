@@ -51,23 +51,41 @@ const dateOrNull = (v: unknown): string | null => {
 };
 
 /**
- * Coerce a "Tipo Tarifa" code (col X — `tipo_tarifa_neta`). El sistema
- * downstream (`xlsxGenerator.inferTipoTarifa`) usa estrictamente los
- * códigos:
+ * Coerce a "Tipo Tarifa" code (cols X, AA, AC, AD, AG — todos los
+ * `tipo_tarifa_*` y `t_tar_neta_fds`). El sistema downstream
+ * (`xlsxGenerator.inferTipoTarifa`) usa estrictamente los códigos:
  *   - "1" → FIJA
  *   - "2" → PORCENTUAL
  *
  * El dropdown de la UI ahora solo deja ingresar esos dos valores, pero
  * como backstop coercemos en el backend: cualquier otra cosa
- * (texto libre legacy como "Por persona", strings con espacios, null,
- * undefined) se transforma a null y deja que el generator infiera el
- * código a partir del % comisión.
+ * (texto libre legacy como "Por persona" / "Wholesale" / "Weekend",
+ * strings con espacios, null, undefined) se transforma a null y deja
+ * que el generator infiera el código a partir del % comisión.
  */
 const tipoTarifaCodeOrNull = (v: unknown): string | null => {
   const s = stringOrNull(v);
   if (s === null) return null;
   const trimmed = s.trim();
   return trimmed === "1" || trimmed === "2" ? trimmed : null;
+};
+
+/**
+ * Coerce a "Condiciones Crédito" code (col AP — `cond_credito`). El
+ * maestro Utopía usa los códigos:
+ *   - "1" → CONTADO
+ *   - "2" → CRÉDITO
+ *   - "3" → PREPAGO
+ *
+ * Cualquier free-text legacy ("30 días neto", "Net 30", etc.) se
+ * descarta para no contaminar la celda — esos detalles van a la
+ * columna AQ (`plazo`).
+ */
+const condCreditoCodeOrNull = (v: unknown): string | null => {
+  const s = stringOrNull(v);
+  if (s === null) return null;
+  const trimmed = s.trim();
+  return trimmed === "1" || trimmed === "2" || trimmed === "3" ? trimmed : null;
 };
 
 function coerceTipoUnidad(v: unknown): TipoUnidad | null {
@@ -139,12 +157,12 @@ function coerceManualFields(input: unknown): ManualFields | null {
   const r = input as Record<string, unknown>;
   return {
     tipo_tarifa_neta: tipoTarifaCodeOrNull(r.tipo_tarifa_neta),
-    tipo_tarifa_mayorista: stringOrNull(r.tipo_tarifa_mayorista),
-    tipo_tarifa_fds: stringOrNull(r.tipo_tarifa_fds),
-    t_tar_neta_fds: stringOrNull(r.t_tar_neta_fds),
-    tipo_tarifa_mayorista_fds: stringOrNull(r.tipo_tarifa_mayorista_fds),
+    tipo_tarifa_mayorista: tipoTarifaCodeOrNull(r.tipo_tarifa_mayorista),
+    tipo_tarifa_fds: tipoTarifaCodeOrNull(r.tipo_tarifa_fds),
+    t_tar_neta_fds: tipoTarifaCodeOrNull(r.t_tar_neta_fds),
+    tipo_tarifa_mayorista_fds: tipoTarifaCodeOrNull(r.tipo_tarifa_mayorista_fds),
     others_payment_cancel: stringOrNull(r.others_payment_cancel),
-    cond_credito: stringOrNull(r.cond_credito),
+    cond_credito: condCreditoCodeOrNull(r.cond_credito),
     plazo: stringOrNull(r.plazo),
     cuenta_bancaria_2: stringOrNull(r.cuenta_bancaria_2),
     banco_2: stringOrNull(r.banco_2),

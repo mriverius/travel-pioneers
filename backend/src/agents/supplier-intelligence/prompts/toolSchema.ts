@@ -161,15 +161,24 @@ const sharedFieldsSchema = {
     notes: {
       type: ["string", "null"],
       description:
-        "Columna BA — 'NOTAS'. Cláusulas significativas del contrato que " +
-        "NO encajan en ninguna otra columna del schema. Ejemplos: " +
-        "restricciones de edad mínima/máxima, condiciones especiales de " +
-        "pago, requisitos de booking (prepago, garantía con tarjeta, " +
-        "presentar ID), notas sobre alérgenos o restricciones " +
-        "alimentarias, exclusiones, force majeure, límites de equipaje en " +
-        "transfers, pesos/edades en tours acuáticos, etc. Es contract-" +
-        "wide: el writer del xlsx replica este valor en cada fila de la " +
-        "columna BA. Resumir en texto plano separado por punto y coma. " +
+        "Columna BA — 'NOTAS' (BOOKING NOTES). Listado de cláusulas " +
+        "operacionales del contrato. Fuente principal: la sección al final " +
+        "del contrato titulada 'BOOKING NOTES' / 'GENERAL CONDITIONS' / " +
+        "'TERMS & CONDITIONS' / 'NOTAS DE RESERVA' / 'OBSERVACIONES " +
+        "GENERALES' o equivalente — copiar CADA bullet como un item " +
+        "separado, en el mismo orden, casi literal. Agregar también " +
+        "cláusulas sueltas que estén en otras partes del contrato y no " +
+        "encajen en ninguna columna del schema (restricciones de edad, " +
+        "requisitos de booking — prepago, garantía con tarjeta, ID — " +
+        "alérgenos / restricciones alimentarias, exclusiones, force " +
+        "majeure, límites de equipaje, pesos/edades en tours acuáticos, " +
+        "etc.). Unir todos los items con ' ; ' (espacio punto-y-coma " +
+        "espacio). Ejemplo formato esperado: 'Rates are in US$ and do not " +
+        "include 13% government taxes ; Room rates are per night and " +
+        "based on double occupancy ; Minimum age for staying is 18 years " +
+        "old ; Check-in 3:00 pm, check-out 11:00 am ; Minimum stay during " +
+        "Holiday Season is 4 nights'. Es contract-wide: el writer del xlsx " +
+        "replica este valor en cada fila de la columna BA. NO inventar; " +
         "NO repetir info que ya está en cancellation_policy o " +
         "range_payment_policy. null si no hay nada que reportar.",
     },

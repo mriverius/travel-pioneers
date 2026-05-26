@@ -627,7 +627,7 @@ export function SupplierWorkflow() {
     </section>
 
     <div className="text-center mt-4 space-y-1">
-      <p className="text-[11px] text-muted-foreground/60">Version 1.2.0 - Mayo 24</p>
+      <p className="text-[11px] text-muted-foreground/60">Version 1.2.1 - Mayo 26</p>
       <a
         href="https://forms.gle/GANUbdcuAS3P7szS8"
         target="_blank"
@@ -750,10 +750,12 @@ function UploadStep({
           </span>
           {hasFiles ? " más archivos" : ""} en tu equipo
         </p>
-        <div className="mt-4 inline-flex items-center gap-2 text-[11px] text-muted-foreground/80">
+        <div className="mt-4 inline-flex flex-wrap items-center justify-center gap-1.5 text-[11px] text-muted-foreground/80">
           <Badge label="PDF" />
           <Badge label="DOCX" />
           <Badge label="XLSX" />
+          <Badge label="JPG" />
+          <Badge label="PNG" />
           <span className="opacity-60">
             · hasta 20 MB c/u · máx {MAX_FILES_PER_REQUEST} archivos
           </span>
@@ -1219,11 +1221,26 @@ const TIPO_UNIDAD_OPTIONS: ReadonlyArray<SelectOption> = [
  * "1" o "2" en esas celdas y la inferencia automática
  * (`inferTipoTarifa` en xlsxGenerator.ts) emite los mismos códigos —
  * mantener la UI restringida a "1"/"2" evita free-text como "Por
- * persona" o "Wholesale" que rompía la plantilla downstream.
+ * persona" o "Wholesale" que rompía la plantilla downstream. Las cinco
+ * columnas (regular X/AA + fin de semana AC/AD/AG) usan el MISMO set
+ * de opciones.
  */
 const TIPO_TARIFA_OPTIONS: ReadonlyArray<SelectOption> = [
   { codigo: "1", descripcion: "Fija" },
   { codigo: "2", descripcion: "Porcentual" },
+];
+
+/**
+ * Opciones para "Condiciones Crédito" (columna AP). El maestro espera
+ * literalmente el código numérico:
+ *   "1" = CONTADO, "2" = CRÉDITO, "3" = PREPAGO
+ * El usuario elige la modalidad y el plazo concreto ("30 días neto",
+ * etc.) va en la columna AQ (`plazo`).
+ */
+const COND_CREDITO_OPTIONS: ReadonlyArray<SelectOption> = [
+  { codigo: "1", descripcion: "Contado" },
+  { codigo: "2", descripcion: "Crédito" },
+  { codigo: "3", descripcion: "Prepago" },
 ];
 
 /**
@@ -1287,24 +1304,29 @@ export const ALL_COLUMNS: ColumnDef[] = [
   // valor que termina en el xlsx sale de `rows[i].codigo_servicio`.
   { excelCol: "N",  key: "codigo_servicio",   label: "Cod. Servicio",      scope: { kind: "row" },                       minWidth: 130, placeholder: "Ej: MAS, SUI…" },
   { excelCol: "O",  key: "product_name",      label: "Product Name",       scope: { kind: "row" },                       minWidth: 170, placeholder: "Garden, Suites…" },
-  { excelCol: "P",  key: "tipo_unidad",       label: "Tipo Unidad",        scope: { kind: "shared", source: "ai" },      minWidth: 130, options: () => TIPO_UNIDAD_OPTIONS },
-  { excelCol: "Q",  key: "tipo_servicio",     label: "Tipo Servicio",      scope: { kind: "shared", source: "ai" },      minWidth: 140, options: () => TIPOS_SERVICIO },
+  // tipo_unidad / tipo_servicio son POR FILA (Bug #1 / #5) — permiten
+  // mixed bundles (hotel "HO"/"N" + tours "TO"/"S" en el mismo contrato).
+  // El backend modela ambos como shared + override per-row; la UI los trata
+  // como row para que cada fila muestre su valor efectivo y el usuario
+  // pueda editar los overrides. Igual que codigo_servicio.
+  { excelCol: "P",  key: "tipo_unidad",       label: "Tipo Unidad",        scope: { kind: "row" },                       minWidth: 130, options: () => TIPO_UNIDAD_OPTIONS },
+  { excelCol: "Q",  key: "tipo_servicio",     label: "Tipo Servicio",      scope: { kind: "row" },                       minWidth: 140, options: () => TIPOS_SERVICIO },
   { excelCol: "R",  key: "categoria",         label: "Categoría",          scope: { kind: "row" },                       minWidth: 140, options: ({ tipoServicio }) => tipoServicio ? (CATEGORIAS_BY_TIPO_SERVICIO[tipoServicio] ?? []) : [] },
   { excelCol: "S",  key: "ocupacion",         label: "Ocupación",          scope: { kind: "row" },                       minWidth: 100, placeholder: "DBL, SGL…" },
   { excelCol: "T",  key: "season_name",       label: "Season Name",        scope: { kind: "row" },                       minWidth: 120, placeholder: "ALTA, BAJA…" },
   { excelCol: "U",  key: "season_starts",     label: "Season Starts",      scope: { kind: "row" },                       minWidth: 140, inputType: "date" },
   { excelCol: "V",  key: "season_ends",       label: "Season Ends",        scope: { kind: "row" },                       minWidth: 140, inputType: "date" },
   { excelCol: "W",  key: "meals_included",    label: "Meals Included",     scope: { kind: "row" },                       minWidth: 140, placeholder: "BREAKFAST…" },
-  { excelCol: "X",  key: "tipo_tarifa_neta",  label: "Tipo Tarifa Neta",   scope: { kind: "shared", source: "manual" },  minWidth: 140, options: () => TIPO_TARIFA_OPTIONS },
+  { excelCol: "X",  key: "tipo_tarifa_neta",  label: "Tipo Tarifa Neta",   scope: { kind: "shared", source: "manual" },  minWidth: 140, options: () => TIPO_TARIFA_OPTIONS, placeholder: "1=Fija, 2=Porcentual" },
   { excelCol: "Y",  key: "precios_neto_iva",  label: "Precios Neto c/IVA", scope: { kind: "row" },                       minWidth: 110, placeholder: "295", currency: true },
   { excelCol: "Z",  key: "precio_rack_iva",   label: "Precio Rack c/IVA",  scope: { kind: "row" },                       minWidth: 110, placeholder: "295", currency: true },
-  { excelCol: "AA", key: "tipo_tarifa_mayorista",     label: "Tipo Tarifa Mayorista",     scope: { kind: "shared", source: "manual" }, minWidth: 150, placeholder: "Ej: Wholesale" },
+  { excelCol: "AA", key: "tipo_tarifa_mayorista",     label: "Tipo Tarifa Mayorista",     scope: { kind: "shared", source: "manual" }, minWidth: 150, options: () => TIPO_TARIFA_OPTIONS, placeholder: "1=Fija, 2=Porcentual" },
   { excelCol: "AB", key: "porcentaje_comision",       label: "% Comisión",                scope: { kind: "row" },                      minWidth: 90,  placeholder: "0 / 25" },
-  { excelCol: "AC", key: "tipo_tarifa_fds",           label: "Tipo Tarifa Fin Semana",    scope: { kind: "shared", source: "manual" }, minWidth: 150, placeholder: "Ej: Weekend" },
-  { excelCol: "AD", key: "t_tar_neta_fds",            label: "T.Tar Neta Fin Semana",     scope: { kind: "shared", source: "manual" }, minWidth: 150 },
+  { excelCol: "AC", key: "tipo_tarifa_fds",           label: "Tipo Tarifa Fin Semana",    scope: { kind: "shared", source: "manual" }, minWidth: 150, options: () => TIPO_TARIFA_OPTIONS, placeholder: "1=Fija, 2=Porcentual" },
+  { excelCol: "AD", key: "t_tar_neta_fds",            label: "T.Tar Neta Fin Semana",     scope: { kind: "shared", source: "manual" }, minWidth: 150, options: () => TIPO_TARIFA_OPTIONS, placeholder: "1=Fija, 2=Porcentual" },
   { excelCol: "AE", key: "precios_neto_iva_fds",      label: "Precios Neto FdS",          scope: { kind: "row" },                      minWidth: 110, placeholder: "295", currency: true },
   { excelCol: "AF", key: "precio_rack_iva_fds",       label: "Precio Rack FdS",           scope: { kind: "row" },                      minWidth: 110, placeholder: "295", currency: true },
-  { excelCol: "AG", key: "tipo_tarifa_mayorista_fds", label: "Tipo Tarifa Mayor. FdS",    scope: { kind: "shared", source: "manual" }, minWidth: 150 },
+  { excelCol: "AG", key: "tipo_tarifa_mayorista_fds", label: "Tipo Tarifa Mayor. FdS",    scope: { kind: "shared", source: "manual" }, minWidth: 150, options: () => TIPO_TARIFA_OPTIONS, placeholder: "1=Fija, 2=Porcentual" },
   { excelCol: "AH", key: "porcentaje_comision_fds",   label: "% Comisión FdS",            scope: { kind: "row" },                      minWidth: 100, placeholder: "0 / 25" },
   { excelCol: "AI", key: "cancellation_policy",       label: "Cancelation Policy",        scope: { kind: "row" },                      minWidth: 280, multiline: true },
   { excelCol: "AJ", key: "range_payment_policy",      label: "Range Payment Policy",      scope: { kind: "row" },                      minWidth: 220, multiline: true },
@@ -1313,7 +1335,7 @@ export const ALL_COLUMNS: ColumnDef[] = [
   { excelCol: "AM", key: "other_included",            label: "Other Included",            scope: { kind: "row" },                      minWidth: 200, multiline: true },
   { excelCol: "AN", key: "feeds_adicionales",         label: "Fees Adicionales",          scope: { kind: "row" },                      minWidth: 180, multiline: true },
   { excelCol: "AO", key: "reservations_email",        label: "Reservations Email",        scope: { kind: "shared", source: "ai" },     minWidth: 200, inputType: "email" },
-  { excelCol: "AP", key: "cond_credito",              label: "Condiciones Crédito",       scope: { kind: "shared", source: "manual" }, minWidth: 150, placeholder: "30 días neto" },
+  { excelCol: "AP", key: "cond_credito",              label: "Condiciones Crédito",       scope: { kind: "shared", source: "manual" }, minWidth: 150, options: () => COND_CREDITO_OPTIONS, placeholder: "1=Contado, 2=Crédito, 3=Prepago" },
   { excelCol: "AQ", key: "plazo",                     label: "Plazo",                     scope: { kind: "shared", source: "manual" }, minWidth: 120, placeholder: "30 días" },
   { excelCol: "AR", key: "numero_cuenta",             label: "Cuenta Bancaria 1",         scope: { kind: "shared", source: "ai" },     minWidth: 200, placeholder: "IBAN preferido" },
   { excelCol: "AS", key: "banco",                     label: "Banco 1",                   scope: { kind: "shared", source: "ai" },     minWidth: 150, placeholder: "Ej: BAC" },
@@ -1332,11 +1354,17 @@ export const ALL_COLUMNS: ColumnDef[] = [
 
 /** Keys del backend ExtractedSharedFields que tienen columna en el xlsx
  *  (telefono se extrae para validación pero NO tiene columna). */
+// tipo_unidad / tipo_servicio NO viven en AI_SHARED_KEYS porque la UI los
+// trata como row-scoped (ver comentario en ALL_COLUMNS arriba). El valor
+// shared original del backend se preserva en `data.shared_fields` y se
+// reenvía intacto en handleApprove para mantener el contrato de tipos
+// ExtractedSharedFields del backend; los overrides editados viajan en
+// `rows[i].tipo_unidad` / `tipo_servicio`.
 const AI_SHARED_KEYS: ExtractedSharedFieldKey[] = [
   "fecha", "proveedor", "nombre_comercial", "cedula", "direccion",
   "pais", "state_province", "type_of_business",
   "contract_starts", "contract_ends", "reservations_email",
-  "tipo_unidad", "tipo_servicio", "tipo_moneda", "numero_cuenta", "banco",
+  "tipo_moneda", "numero_cuenta", "banco",
   "notes",
 ];
 
@@ -1407,7 +1435,9 @@ function buildInitialSharedValues(
   prefill: CatalogPrefill | null,
 ): Record<SharedKey, string | null> {
   const out: Record<string, string | null> = {};
-  // 17 AI keys con columna (16 originales + notes/BA)
+  // 15 AI shared keys con columna shared en la UI. tipo_unidad y
+  // tipo_servicio NO están acá — son row-scoped, se inicializan en el
+  // estado `rows` (ver useState abajo).
   for (const k of AI_SHARED_KEYS) {
     out[k] = data.shared_fields[k];
   }
@@ -1443,8 +1473,17 @@ function ReviewStep({
     setSharedValues((prev) => ({ ...prev, [key]: value }));
   };
 
-  // Per-row state (one ContractRow per combinación)
-  const [rows, setRows] = useState<ExtractedContractRow[]>(() => data.rows);
+  // Per-row state (one ContractRow per combinación). tipo_unidad y
+  // tipo_servicio se hidratan con el shared default cuando la fila llegó
+  // con null — así cada celda muestra su valor efectivo. El override
+  // se preserva si la IA lo envió diferente al shared (mixed bundles).
+  const [rows, setRows] = useState<ExtractedContractRow[]>(() =>
+    data.rows.map((r) => ({
+      ...r,
+      tipo_unidad: r.tipo_unidad ?? data.shared_fields.tipo_unidad,
+      tipo_servicio: r.tipo_servicio ?? data.shared_fields.tipo_servicio,
+    })),
+  );
   const setRowField = (
     rowIdx: number,
     key: ExtractedRowFieldKey,
@@ -1507,11 +1546,13 @@ function ReviewStep({
       contract_starts: sharedValues.contract_starts,
       contract_ends: sharedValues.contract_ends,
       reservations_email: sharedValues.reservations_email,
-      tipo_unidad:
-        sharedValues.tipo_unidad === "N" || sharedValues.tipo_unidad === "S"
-          ? sharedValues.tipo_unidad
-          : null,
-      tipo_servicio: sharedValues.tipo_servicio,
+      // tipo_unidad y tipo_servicio ya no son editables como shared (cada
+      // fila tiene el suyo en row scope). Preservamos el valor original
+      // del backend en `shared_fields` por compat de tipos — el writer del
+      // xlsx (`resolveRowClassification`) usa el row value como fuente
+      // primaria y este shared como fallback.
+      tipo_unidad: data.shared_fields.tipo_unidad,
+      tipo_servicio: data.shared_fields.tipo_servicio,
       tipo_moneda: sharedValues.tipo_moneda,
       numero_cuenta: sharedValues.numero_cuenta,
       banco: sharedValues.banco,
@@ -1707,8 +1748,6 @@ function FullTable({
   onAddRow: () => void;
   onRemoveRow: (rowIdx: number) => void;
 }) {
-  const tipoServicio = sharedValues.tipo_servicio;
-
   return (
     <section className="rounded-xl border border-border bg-card/60 overflow-hidden">
       <header className="flex items-center justify-between px-4 py-3 border-b border-border/60 gap-3">
@@ -1860,8 +1899,12 @@ function FullTable({
                     col.scope.source === "ai" &&
                     camposFaltantes.includes(col.key);
 
+                  // Categoria (R) depende del tipo_servicio efectivo de
+                  // ESTA fila (mixed bundles: hotel "HO" + tours "TO" en
+                  // el mismo contrato necesitan listas de categorías
+                  // distintas por fila).
                   const opts = col.options
-                    ? col.options({ tipoServicio })
+                    ? col.options({ tipoServicio: row.tipo_servicio })
                     : undefined;
                   return (
                     <td
