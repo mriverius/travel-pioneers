@@ -241,17 +241,64 @@ function normalizeDate(input: unknown): string {
 }
 
 /**
- * Bug #4 — Tipo Tarifa. Si hay porcentaje de comisión > 0 → "2"
- * (PORCENTUAL); si es 0/null/ausente → "1" (FIJA). Acepta strings con %,
- * espacios o coma decimal.
+ * Tipo de tarifa por columna: las columnas "neta" siempre van "1" y las
+ * "mayorista" siempre "2" (regla de negocio, incluye sus variantes de fin
+ * de semana). Un override manual explícito 1/2 desde step 2 gana.
  */
-function inferTipoTarifa(porcentaje: string | null | undefined): "1" | "2" {
-  if (porcentaje === null || porcentaje === undefined) return "1";
-  const cleaned = String(porcentaje).trim().replace(/%/g, "").replace(",", ".");
-  if (cleaned === "") return "1";
-  const num = Number(cleaned);
-  if (!Number.isFinite(num) || num <= 0) return "1";
-  return "2";
+const TIPO_TARIFA_FIXED: Record<string, "1" | "2"> = {
+  X: "1", // Tipo Tarifa Neta
+  AA: "2", // Tipo Tarifa Mayorista
+  AC: "1", // Tipo Tarifa Fin Semana (neta)
+  AD: "1", // T.Tar Neta Fin Semana
+  AG: "2", // Tipo Tarifa Mayorista Fin de Semana
+};
+
+/** Convierte "1,644.15", "$70", "25%" → 70 / 25 etc. null si no es numérico. */
+function parseAmount(raw: string | null | undefined): number | null {
+  if (raw == null) return null;
+  const cleaned = String(raw).replace(/[^\d.-]/g, "");
+  if (cleaned === "" || cleaned === "-" || cleaned === ".") return null;
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Quita el símbolo "%" y deja solo el número. */
+function stripPercent(raw: string | null): string | null {
+  if (raw == null) return null;
+  const v = raw.replace(/%/g, "").trim();
+  return v === "" ? null : v;
+}
+
+/**
+ * La tarifa neta (precio a la agencia) siempre es ≤ que la rack (precio
+ * público). Si vienen invertidas, las intercambia.
+ */
+function orderNetRack(
+  neto: string | null,
+  rack: string | null,
+): [string | null, string | null] {
+  const n = parseAmount(neto);
+  const r = parseAmount(rack);
+  if (n !== null && r !== null && n > r) return [rack, neto];
+  return [neto, rack];
+}
+
+/** Corrige precios neto/rack invertidos y limpia el "%" de las comisiones. */
+function normalizeRowFinancials(row: ContractRow): ContractRow {
+  const [neto, rack] = orderNetRack(row.precios_neto_iva, row.precio_rack_iva);
+  const [netoFds, rackFds] = orderNetRack(
+    row.precios_neto_iva_fds,
+    row.precio_rack_iva_fds,
+  );
+  return {
+    ...row,
+    precios_neto_iva: neto,
+    precio_rack_iva: rack,
+    precios_neto_iva_fds: netoFds,
+    precio_rack_iva_fds: rackFds,
+    porcentaje_comision: stripPercent(row.porcentaje_comision),
+    porcentaje_comision_fds: stripPercent(row.porcentaje_comision_fds),
+  };
 }
 
 /**
@@ -426,8 +473,9 @@ export function generateContractXlsx(
   // Escribimos cada fila con shared + row data.
   for (let i = 0; i < input.rows.length; i++) {
     const xlsxRow = TEMPLATE_DATA_START_ROW + i;
-    const row = input.rows[i];
-    if (!row) continue; // unreachable per length check, but TS noUncheckedIndexedAccess requires it
+    const rawRow = input.rows[i];
+    if (!rawRow) continue; // unreachable per length check, but TS noUncheckedIndexedAccess requires it
+    const row = normalizeRowFinancials(rawRow);
 
     // Catalog prefill (A, B, C) — opcional. NOTA: la columna N
     // (codigo_servicio) ya NO se escribe acá — se resuelve más abajo
@@ -492,21 +540,18 @@ export function generateContractXlsx(
       writeCell(dataSheet, categoriaCol, xlsxRow, cls.categoria);
     }
 
-    // Bug #4 — Tipo Tarifa (Neta + Mayorista, regular y fin de semana).
-    // Si hay manual_fields explícito, respetarlo; si no, derivar del
-    // porcentaje de comisión.
-    const inferredRegular = inferTipoTarifa(row.porcentaje_comision);
-    const inferredFds = inferTipoTarifa(row.porcentaje_comision_fds);
-    const tarifaCells: Array<[string, string | null | undefined, "1" | "2"]> = [
-      ["X", input.manual_fields?.tipo_tarifa_neta, inferredRegular],
-      ["AA", input.manual_fields?.tipo_tarifa_mayorista, inferredRegular],
-      ["AC", input.manual_fields?.tipo_tarifa_fds, inferredFds],
-      ["AD", input.manual_fields?.t_tar_neta_fds, inferredFds],
-      ["AG", input.manual_fields?.tipo_tarifa_mayorista_fds, inferredFds],
-    ];
-    for (const [col, manualVal, inferred] of tarifaCells) {
-      const trimmed = manualVal?.trim();
-      writeCell(dataSheet, col, xlsxRow, trimmed && trimmed !== "" ? trimmed : inferred);
+    // Tipo Tarifa: neta → "1", mayorista → "2" (fijo). Un override manual
+    // explícito 1/2 desde step 2 gana sobre el valor por defecto.
+    const tarifaManual: Record<string, string | null | undefined> = {
+      X: input.manual_fields?.tipo_tarifa_neta,
+      AA: input.manual_fields?.tipo_tarifa_mayorista,
+      AC: input.manual_fields?.tipo_tarifa_fds,
+      AD: input.manual_fields?.t_tar_neta_fds,
+      AG: input.manual_fields?.tipo_tarifa_mayorista_fds,
+    };
+    for (const [col, fixed] of Object.entries(TIPO_TARIFA_FIXED)) {
+      const m = tarifaManual[col]?.trim();
+      writeCell(dataSheet, col, xlsxRow, m === "1" || m === "2" ? m : fixed);
     }
 
     // Las notas (`shared_fields.notes`) se escriben a la columna BA por

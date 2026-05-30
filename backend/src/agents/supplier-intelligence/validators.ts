@@ -1,6 +1,7 @@
 import type {
   ContractRow,
   ExtractedContract,
+  SourcePage,
   ValidationResult,
 } from "./types.js";
 import {
@@ -379,6 +380,153 @@ function policiesVaryByRow(
   return values.some((v) => v !== first);
 }
 
+/* -------------------------------------------------------------------------- */
+/*                 Occupancy expansion (triple / quadruple)                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Parse a price-ish string ("$1,234.50", "295", "51,98") into a Number.
+ * Devuelve null si no hay un número utilizable. Maneja separadores de miles
+ * (coma) y decimales (punto o coma) de forma tolerante porque los contratos
+ * mezclan convenciones.
+ */
+function parseAmount(raw: string | null): number | null {
+  if (raw == null) return null;
+  const cleaned = raw.replace(/[^0-9.,-]/g, "").trim();
+  if (cleaned === "") return null;
+  let normalized = cleaned;
+  if (normalized.includes(",") && normalized.includes(".")) {
+    // "1,234.50" → la coma es separador de miles.
+    normalized = normalized.replace(/,/g, "");
+  } else if (normalized.includes(",")) {
+    // "51,98" → coma decimal.
+    normalized = normalized.replace(",", ".");
+  }
+  const n = Number(normalized);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Formatea un monto a 2 decimales, redondeo half-up estable. */
+function fmtAmount(n: number): string {
+  return (Math.round((n + Number.EPSILON) * 100) / 100).toFixed(2);
+}
+
+const OCCUPANCY_MULTIPLIER: Record<"TPL" | "CPL", number> = {
+  TPL: 1, // tercera persona
+  CPL: 2, // tercera + cuarta persona
+};
+
+/**
+ * Ocupaciones "base" desde las que SÍ tiene sentido expandir a TPL/CPL.
+ * Si una fila ya es TPL/CPL (o algo ajeno a hospedaje), no la tocamos.
+ */
+const BASE_OCCUPANCIES = new Set(["", "SGL", "DBL", "FAM", "DOBLE", "SENCILLA"]);
+
+/**
+ * Construye una fila derivada de ocupación (TPL o CPL) a partir de una fila
+ * base, sumando la tarifa por persona adicional a los precios.
+ *
+ * - El adicional viene como precio RACK con IVA incluido (`addlRack`).
+ * - Para el precio NETO derivamos el adicional escalando por la razón
+ *   neto/rack de la propia fila base, así la relación comisión/IVA queda
+ *   consistente con lo que el modelo ya calculó (en vez de re-derivar la
+ *   comisión, que el modelo a veces redondea de forma no obvia).
+ * - Se aplica a la tarifa estándar y a la de fin de semana (_fds).
+ */
+function buildOccupancyRow(
+  base: ContractRow,
+  occ: "TPL" | "CPL",
+  addlRack: number,
+): ContractRow {
+  const mult = OCCUPANCY_MULTIPLIER[occ];
+
+  const computePair = (
+    neto: string | null,
+    rack: string | null,
+  ): { neto: string | null; rack: string | null } => {
+    const baseRack = parseAmount(rack);
+    const baseNeto = parseAmount(neto);
+    const extraRack = mult * addlRack;
+    const newRack = baseRack !== null ? fmtAmount(baseRack + extraRack) : rack;
+    let newNeto = neto;
+    if (baseNeto !== null) {
+      const ratio =
+        baseRack !== null && baseRack !== 0 ? baseNeto / baseRack : 1;
+      newNeto = fmtAmount(baseNeto + extraRack * ratio);
+    }
+    return { neto: newNeto, rack: newRack };
+  };
+
+  const std = computePair(base.precios_neto_iva, base.precio_rack_iva);
+  const fds = computePair(base.precios_neto_iva_fds, base.precio_rack_iva_fds);
+
+  return {
+    ...base,
+    ocupacion: occ,
+    precios_neto_iva: std.neto,
+    precio_rack_iva: std.rack,
+    precios_neto_iva_fds: fds.neto,
+    precio_rack_iva_fds: fds.rack,
+    // Ya aplicada — evitar re-expansión y dejar limpio el campo auxiliar.
+    tarifa_persona_adicional: null,
+  };
+}
+
+/**
+ * Materializa filas de ocupación triple (TPL) y cuádruple (CPL) a partir de
+ * la tarifa por persona adicional que la IA dejó en `tarifa_persona_adicional`.
+ *
+ * Por cada fila base con un adicional > 0 y ocupación base (DBL/SGL/FAM/null),
+ * se insertan inmediatamente después dos filas calculadas (TPL y CPL). El
+ * campo auxiliar queda en null en TODAS las filas resultantes (base incluida)
+ * para que no quede colgando ni dispare una segunda expansión.
+ *
+ * Mantiene `paginas_origen_rows` en paralelo: las filas derivadas heredan el
+ * origen de la base con `ocupacion: "calculado"` para trazabilidad.
+ */
+function expandOccupancy(
+  extraction: ExtractedContract,
+  warnings: string[],
+): ExtractedContract {
+  const newRows: ContractRow[] = [];
+  const newPages: Record<string, SourcePage>[] = [];
+  let expanded = 0;
+
+  extraction.rows.forEach((row, i) => {
+    const pages = extraction.paginas_origen_rows[i] ?? {};
+    const addl = parseAmount(row.tarifa_persona_adicional);
+    const occ = (row.ocupacion ?? "").trim().toUpperCase();
+    const canExpand = addl !== null && addl > 0 && BASE_OCCUPANCIES.has(occ);
+
+    // Fila base: limpiamos el campo auxiliar (ya consumido).
+    newRows.push(
+      row.tarifa_persona_adicional == null
+        ? row
+        : { ...row, tarifa_persona_adicional: null },
+    );
+    newPages.push(pages);
+
+    if (!canExpand || addl === null) return;
+
+    for (const target of ["TPL", "CPL"] as const) {
+      newRows.push(buildOccupancyRow(row, target, addl));
+      newPages.push({ ...pages, ocupacion: "calculado" });
+      expanded += 1;
+    }
+  });
+
+  if (expanded === 0) return extraction;
+
+  warnings.push(
+    `Se generaron ${expanded} fila(s) de ocupación triple (TPL) y ` +
+      `cuádruple (CPL) calculadas a partir de la tarifa por persona ` +
+      `adicional (base + 1× para TPL, base + 2× para CPL). Revisá los ` +
+      `montos en Step 2.`,
+  );
+
+  return { ...extraction, rows: newRows, paginas_origen_rows: newPages };
+}
+
 /**
  * Run all post-extraction checks and collect warnings. Downgrades `confianza`
  * to "baja" when the IBAN checksum fails (that's the one signal we're very
@@ -458,6 +606,12 @@ export function validateExtraction(
       extraction = { ...extraction, rows: normalizedRows };
     }
   }
+
+  // Expansión de ocupación: materializa filas TPL/CPL desde la tarifa por
+  // persona adicional ANTES del resto de las validaciones, para que las
+  // filas derivadas también pasen por las verificaciones de categoría,
+  // precio, duplicados, etc.
+  extraction = expandOccupancy(extraction, warnings);
 
   // numero_cuenta — if it looks like an IBAN (starts with two letters), check it.
   const accountNumber = extraction.shared_fields.numero_cuenta;
@@ -615,10 +769,12 @@ export function validateExtraction(
   // que la IA generó la misma fila dos veces.
   const seenKeys = new Set<string>();
   extraction.rows.forEach((r, i) => {
-    const key = `${r.product_name ?? ""}__${r.season_name ?? ""}`;
+    // Incluye ocupación en la clave: TPL/CPL comparten product_name y
+    // season_name con la fila base pero NO son duplicados.
+    const key = `${r.product_name ?? ""}__${r.season_name ?? ""}__${r.ocupacion ?? ""}`;
     if (seenKeys.has(key) && r.product_name && r.season_name) {
       warnings.push(
-        `Fila ${i + 1}: combinación duplicada (${r.product_name} × ${r.season_name}).`,
+        `Fila ${i + 1}: combinación duplicada (${r.product_name} × ${r.season_name} × ${r.ocupacion ?? "?"}).`,
       );
     }
     seenKeys.add(key);

@@ -327,6 +327,7 @@ function coerceRow(input: unknown): ContractRow {
     tipo_unidad: coerceTipoUnidad(r.tipo_unidad),
     codigo_servicio: stringOrNull(r.codigo_servicio),
     ocupacion: stringOrNull(r.ocupacion),
+    tarifa_persona_adicional: numericAsString(r.tarifa_persona_adicional),
     season_name: stringOrNull(r.season_name),
     season_starts: stringOrNull(r.season_starts),
     season_ends: stringOrNull(r.season_ends),

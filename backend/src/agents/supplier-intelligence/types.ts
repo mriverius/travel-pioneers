@@ -95,6 +95,17 @@ export interface ContractRow {
    */
   codigo_servicio: string | null;
   ocupacion: string | null;
+  /**
+   * Campo AUXILIAR (no tiene columna en el xlsx). Cuando el contrato define
+   * una "tarifa por persona adicional" (ej. "Tarifa persona adicional $46 +
+   * imp"), la IA pone aquí ese monto YA expresado como precio RACK con IVA
+   * incluido (misma convención que `precio_rack_iva`). El servidor lo usa
+   * para materializar deterministicamente filas de ocupación TPL (triple) y
+   * CPL (cuádruple) a partir de la fila base — ver `expandOccupancy` en
+   * validators.ts. Una vez expandida, el campo queda en null en todas las
+   * filas resultantes. Si el contrato no menciona persona adicional → null.
+   */
+  tarifa_persona_adicional: string | null;
   // Temporada
   season_name: string | null;
   season_starts: string | null;

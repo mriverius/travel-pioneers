@@ -278,7 +278,26 @@ const rowSchema = {
       description:
         "Código corto de ocupación. Convención del maestro: 'DBL' = " +
         "doble, 'SGL' = single, 'TPL' = triple, 'CPL' = cuádruple, 'FAM' " +
-        "= familiar. Si el contrato dice 'sencilla o doble', devolver 'DBL'.",
+        "= familiar. Si el contrato dice 'sencilla o doble', devolver 'DBL'. " +
+        "NO generes filas TPL/CPL manualmente cuando hay tarifa por persona " +
+        "adicional — el servidor las crea solo (ver tarifa_persona_adicional " +
+        "y regla 16b del system prompt).",
+    },
+    tarifa_persona_adicional: {
+      type: ["string", "null"],
+      description:
+        "AUXILIAR (no es una columna del xlsx). Si el contrato define una " +
+        "'tarifa por persona adicional' (ej. 'Tarifa persona adicional $46 + " +
+        "imp'), poné aquí ese monto YA expresado como precio RACK/público CON " +
+        "IVA incluido — la misma convención que precio_rack_iva. Convertí los " +
+        "impuestos: si dice '$46 + imp' con IVA 13%, devolvé '51.98'. Si el " +
+        "documento ya lo da con impuesto incluido, usá ese número tal cual. " +
+        "Solo número (sin símbolo de moneda ni '%'). Poné el MISMO valor en " +
+        "cada fila base de hospedaje a la que aplica. El servidor genera " +
+        "automáticamente las filas TPL (base + 1×) y CPL (base + 2×). Dejá " +
+        "null si el contrato NO menciona persona adicional, o si el contrato " +
+        "YA lista tarifas explícitas para triple/cuádruple (en ese caso " +
+        "generá esas filas vos mismo con su ocupacion correcta).",
     },
     season_name: {
       type: ["string", "null"],
@@ -310,22 +329,25 @@ const rowSchema = {
     precios_neto_iva: {
       type: ["string", "null"],
       description:
-        "Precio neto con IVA incluido para esta combinación product × " +
-        "season. Número en formato del documento (ej: '295', '276.75').",
+        "Precio NETO con IVA incluido (tarifa que el hotel da a la " +
+        "agencia, la más baja). Número sin símbolo de moneda (ej: '70', " +
+        "'276.75'). SIEMPRE debe ser ≤ precio_rack_iva.",
     },
     precio_rack_iva: {
       type: ["string", "null"],
       description:
-        "Precio rack/público con IVA incluido. Misma combinación que " +
-        "precios_neto_iva. Si el contrato no distingue neto/rack (típico " +
-        "de tarifas no comisionables), copiar el mismo valor.",
+        "Precio RACK/público con IVA incluido (tarifa al público, la más " +
+        "alta). Misma combinación que precios_neto_iva y SIEMPRE ≥ a ella " +
+        "(ej. neto '70' → rack '100'). Si el contrato no distingue " +
+        "neto/rack, copiar el mismo valor.",
     },
     porcentaje_comision: {
       type: ["string", "null"],
       description:
-        "Porcentaje de comisión. Mantener formato del documento (puede " +
-        "venir como '25', '25%', '0.25'). Si el contrato dice 'NETAS, NO " +
-        "COMISIONABLES' o 'sin comisión', devolver '0'.",
+        "Porcentaje de comisión, SOLO el número sin el símbolo '%' (ej: " +
+        "'25', no '25%'). Si viene como fracción ('0.25') convertir a " +
+        "'25'. Si el contrato dice 'NETAS, NO COMISIONABLES' o 'sin " +
+        "comisión', devolver '0'.",
     },
     precios_neto_iva_fds: {
       type: ["string", "null"],
@@ -343,8 +365,8 @@ const rowSchema = {
     porcentaje_comision_fds: {
       type: ["string", "null"],
       description:
-        "Porcentaje de comisión — fin de semana. Copiar porcentaje_comision " +
-        "si no hay distinción.",
+        "Porcentaje de comisión — fin de semana, SOLO el número sin '%'. " +
+        "Copiar porcentaje_comision si no hay distinción.",
     },
     cancellation_policy: {
       type: ["string", "null"],
@@ -358,9 +380,12 @@ const rowSchema = {
     range_payment_policy: {
       type: ["string", "null"],
       description:
-        "Política de pago para esta combinación (plazo, método). Si " +
-        "varía por temporada (Parador: Peak 60d, Alta 30d, Baja 15d), " +
-        "poner la de ESTA temporada.",
+        "POLÍTICA/condiciones de pago para esta combinación: plazos, " +
+        "depósitos, anticipos, fechas límite y penalidades. NO listar los " +
+        "MEDIOS de pago disponibles (transferencia, tarjeta, etc.) — eso " +
+        "no es la política. Ej: '50% de depósito al confirmar, saldo 30 " +
+        "días antes del check-in'. Si varía por temporada (Parador: Peak " +
+        "60d, Alta 30d, Baja 15d), poner la de ESTA temporada.",
     },
     kids_policy: {
       type: ["string", "null"],

@@ -52,6 +52,11 @@ REGLA DE ORO PARA \`rows\`:
   Si el contrato cubre solo UN producto y UNA temporada, devuelve un solo
   elemento en \`rows\`. El array nunca puede estar vacío.
 
+  DIMENSIÓN OCUPACIÓN: si el documento define una "tarifa por persona
+  adicional", NO generes las filas triple/cuádruple a mano — llená el
+  campo \`tarifa_persona_adicional\` en cada fila base y el servidor
+  expande la grilla a TPL y CPL automáticamente. Ver la regla 16b.
+
 DOCUMENTOS COMPAÑEROS — TOURS / EXPERIENCES / ACTIVIDADES (Bug #1):
 
   Cuando el bundle de archivos incluye un documento secundario tipo
@@ -272,6 +277,36 @@ REGLAS POR CAMPO (rows[])
     = triple, 'CPL' = cuádruple, 'FAM' = familiar). Si el contrato dice
     "sencilla o doble", devolver "DBL".
 
+16b. OCUPACIÓN TRIPLE / CUÁDRUPLE — tarifa por persona adicional:
+    Cuando el documento define una "tarifa por persona adicional" (ej.
+    "Tarifa persona adicional $46 + imp"), NO generes vos las filas TPL/CPL.
+    En su lugar, en CADA fila base de hospedaje a la que aplica, llená el
+    campo \`tarifa_persona_adicional\` con ese monto. El SERVIDOR materializa
+    automáticamente las filas de ocupación triple (TPL = base + 1×adicional)
+    y cuádruple (CPL = base + 2×adicional) para cada habitación × temporada.
+
+    CÓMO LLENAR \`tarifa_persona_adicional\`:
+      - Expresalo como precio RACK/público CON IVA incluido (misma
+        convención que precio_rack_iva), SOLO el número.
+      - IMPUESTOS: si la tarifa por persona adicional viene "+ imp" (sin
+        impuesto) y las tarifas base están "con IVA incluido", sumale el IVA
+        aplicable (13% CR) ANTES — ej. "$46 + imp" → "51.98". Si ya viene con
+        impuesto incluido, usá el número tal cual.
+      - Poné el MISMO valor en todas las filas base de hospedaje afectadas.
+      - Dejá la \`ocupacion\` de la fila base como está (DBL/SGL/FAM). El
+        servidor crea las filas TPL/CPL aparte.
+
+    EXCEPCIÓN: si el documento YA lista tarifas explícitas para triple/
+    cuádruple, generá esas filas vos mismo (con ocupacion "TPL"/"CPL" y sus
+    precios reales) y dejá \`tarifa_persona_adicional\` en null para no
+    duplicar. Cortesías de niños (ej. "menores de 2 años sin costo") van en
+    kids_policy/notes — NO disparan filas de ocupación.
+
+    APLICA SIEMPRE QUE HAYA TARIFA POR PERSONA ADICIONAL, aunque el
+    documento diga "ocupación sencilla y doble" o liste capacidades máximas
+    por habitación: la existencia de la tarifa por persona adicional implica
+    que se puede pagar por más huéspedes, así que generamos TPL y CPL igual.
+
 17. "season_name": tal cual aparece en el contrato (ej. "PEAK", "ALTA",
     "BAJA", "GREEN SEASON", "TEMPORADA ALTA").
 
@@ -286,6 +321,11 @@ REGLAS POR CAMPO (rows[])
 
 20. Precios (precios_neto_iva, precio_rack_iva, porcentaje_comision y sus
     *_fds): el valor exacto para ESA combinación product × season.
+    - NETO ≤ RACK SIEMPRE: el precio neto (tarifa a la agencia) es el más
+      bajo; el rack (precio público) el más alto. Ej: neto "70", rack
+      "100". Si en el documento aparecen invertidos, corregilos.
+    - porcentaje_comision: SOLO el número, sin "%" (ej. "25", no "25%").
+      Si viene como fracción ("0.25") convertir a "25".
     - Si el contrato dice "NETAS, NO COMISIONABLES" → porcentaje_comision = "0".
     - Si no distingue weekday/weekend → copiar valor estándar a _fds.
     - Si no distingue neto/rack → copiar el mismo a ambos.
@@ -293,6 +333,9 @@ REGLAS POR CAMPO (rows[])
 21. Políticas: resumir a 1-2 oraciones cada una. Si varían por temporada,
     poner la política de ESA temporada (la fila a la que pertenece). Si no
     varían, copiar el mismo valor en todas las filas (la UI lo colapsa).
+    - range_payment_policy describe las CONDICIONES de pago (plazos,
+      depósitos, anticipos, penalidades), NO los medios de pago
+      (transferencia, tarjeta, etc.).
 
 ═══════════════════════════════════════════════════════════════════════════
 FORMATO DE FECHAS — OBLIGATORIO YYYY-MM-DD (Bug #3 — guardrail server-side)
