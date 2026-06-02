@@ -339,9 +339,14 @@ const rowSchema = {
     meals_included: {
       type: ["string", "null"],
       description:
-        "Comidas incluidas en la tarifa. Convención del maestro (en " +
-        "MAYÚSCULAS): 'BREAKFAST', 'MAP' (modified american plan), 'AP' " +
-        "(american plan), 'ALL INCLUSIVE', 'NONE'.",
+        "Comidas incluidas en la tarifa, en MAYÚSCULAS, usando los NOMBRES " +
+        "de las comidas. Valores válidos: 'BREAKFAST', 'LUNCH', 'DINNER', " +
+        "'ALL INCLUSIVE', 'NONE'. NO uses códigos de plan tipo 'AP'/'MAP' — " +
+        "no existen; traducí el plan a las comidas que cubre. Si hay varias, " +
+        "separalas por coma en orden desayuno→almuerzo→cena. Ejemplos: " +
+        "'incluye desayuno' → 'BREAKFAST'; media pensión → 'BREAKFAST, " +
+        "DINNER'; pensión completa (desayuno, almuerzo y cena) → 'BREAKFAST, " +
+        "LUNCH, DINNER'; todo incluido → 'ALL INCLUSIVE'; sin comidas → 'NONE'.",
     },
     precios_neto_iva: {
       type: ["string", "null"],

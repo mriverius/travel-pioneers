@@ -357,10 +357,18 @@ REGLAS POR CAMPO (rows[])
     rangos múltiples, usar el PRIMER rango (ej. "ALTA: 4-ene al 30-abr,
     1-jul al 31-ago" → starts=2026-01-04, ends=2026-04-30).
 
-19. "meals_included": en MAYÚSCULAS según convención del maestro:
-    'BREAKFAST', 'MAP' (modified american plan), 'AP' (american plan),
-    'ALL INCLUSIVE', 'NONE'. Si el contrato dice "tarifas incluyen
-    desayuno" → "BREAKFAST".
+19. "meals_included": en MAYÚSCULAS, usando los NOMBRES DE LAS COMIDAS
+    incluidas. Valores válidos: 'BREAKFAST', 'LUNCH', 'DINNER', 'ALL
+    INCLUSIVE', 'NONE'. NO uses 'AP', 'MAP', 'FAP' ni otros códigos de
+    plan — no existen en el maestro; traducí el plan a las comidas que
+    cubre. Si incluye varias comidas, listalas separadas por coma en el
+    orden desayuno → almuerzo → cena. Mapeos:
+      - "incluye desayuno" → "BREAKFAST"
+      - "desayuno y cena" / media pensión → "BREAKFAST, DINNER"
+      - "pensión completa (desayuno, almuerzo y cena)" / full board →
+        "BREAKFAST, LUNCH, DINNER"
+      - "todo incluido" / all inclusive → "ALL INCLUSIVE"
+      - sin comidas incluidas → "NONE"
 
 20. Precios (precios_neto_iva, precio_rack_iva, porcentaje_comision y sus
     *_fds): el valor exacto para ESA combinación product × season.
