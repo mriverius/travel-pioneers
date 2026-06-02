@@ -411,19 +411,19 @@ function fmtAmount(n: number): string {
   return (Math.round((n + Number.EPSILON) * 100) / 100).toFixed(2);
 }
 
-const OCCUPANCY_MULTIPLIER: Record<"TPL" | "CPL", number> = {
+const OCCUPANCY_MULTIPLIER: Record<"TPL" | "QDP", number> = {
   TPL: 1, // tercera persona
-  CPL: 2, // tercera + cuarta persona
+  QDP: 2, // tercera + cuarta persona
 };
 
 /**
- * Ocupaciones "base" desde las que SÍ tiene sentido expandir a TPL/CPL.
- * Si una fila ya es TPL/CPL (o algo ajeno a hospedaje), no la tocamos.
+ * Ocupaciones "base" desde las que SÍ tiene sentido expandir a TPL/QDP.
+ * Si una fila ya es TPL/QDP (o algo ajeno a hospedaje), no la tocamos.
  */
 const BASE_OCCUPANCIES = new Set(["", "SGL", "DBL", "FAM", "DOBLE", "SENCILLA"]);
 
 /**
- * Construye una fila derivada de ocupación (TPL o CPL) a partir de una fila
+ * Construye una fila derivada de ocupación (TPL o QDP) a partir de una fila
  * base, sumando la tarifa por persona adicional a los precios.
  *
  * - El adicional viene como precio RACK con IVA incluido (`addlRack`).
@@ -435,7 +435,7 @@ const BASE_OCCUPANCIES = new Set(["", "SGL", "DBL", "FAM", "DOBLE", "SENCILLA"])
  */
 function buildOccupancyRow(
   base: ContractRow,
-  occ: "TPL" | "CPL",
+  occ: "TPL" | "QDP",
   addlRack: number,
 ): ContractRow {
   const mult = OCCUPANCY_MULTIPLIER[occ];
@@ -473,11 +473,11 @@ function buildOccupancyRow(
 }
 
 /**
- * Materializa filas de ocupación triple (TPL) y cuádruple (CPL) a partir de
+ * Materializa filas de ocupación triple (TPL) y cuádruple (QDP) a partir de
  * la tarifa por persona adicional que la IA dejó en `tarifa_persona_adicional`.
  *
  * Por cada fila base con un adicional > 0 y ocupación base (DBL/SGL/FAM/null),
- * se insertan inmediatamente después dos filas calculadas (TPL y CPL). El
+ * se insertan inmediatamente después dos filas calculadas (TPL y QDP). El
  * campo auxiliar queda en null en TODAS las filas resultantes (base incluida)
  * para que no quede colgando ni dispare una segunda expansión.
  *
@@ -508,7 +508,7 @@ function expandOccupancy(
 
     if (!canExpand || addl === null) return;
 
-    for (const target of ["TPL", "CPL"] as const) {
+    for (const target of ["TPL", "QDP"] as const) {
       newRows.push(buildOccupancyRow(row, target, addl));
       newPages.push({ ...pages, ocupacion: "calculado" });
       expanded += 1;
@@ -519,8 +519,8 @@ function expandOccupancy(
 
   warnings.push(
     `Se generaron ${expanded} fila(s) de ocupación triple (TPL) y ` +
-      `cuádruple (CPL) calculadas a partir de la tarifa por persona ` +
-      `adicional (base + 1× para TPL, base + 2× para CPL). Revisá los ` +
+      `cuádruple (QDP) calculadas a partir de la tarifa por persona ` +
+      `adicional (base + 1× para TPL, base + 2× para QDP). Revisá los ` +
       `montos en Step 2.`,
   );
 
@@ -607,7 +607,7 @@ export function validateExtraction(
     }
   }
 
-  // Expansión de ocupación: materializa filas TPL/CPL desde la tarifa por
+  // Expansión de ocupación: materializa filas TPL/QDP desde la tarifa por
   // persona adicional ANTES del resto de las validaciones, para que las
   // filas derivadas también pasen por las verificaciones de categoría,
   // precio, duplicados, etc.
@@ -769,7 +769,7 @@ export function validateExtraction(
   // que la IA generó la misma fila dos veces.
   const seenKeys = new Set<string>();
   extraction.rows.forEach((r, i) => {
-    // Incluye ocupación en la clave: TPL/CPL comparten product_name y
+    // Incluye ocupación en la clave: TPL/QDP comparten product_name y
     // season_name con la fila base pero NO son duplicados.
     const key = `${r.product_name ?? ""}__${r.season_name ?? ""}__${r.ocupacion ?? ""}`;
     if (seenKeys.has(key) && r.product_name && r.season_name) {

@@ -158,6 +158,22 @@ const sharedFieldsSchema = {
         "Nombre del banco. Ejemplo: 'Banco Nacional de Costa Rica', 'BAC " +
         "Credomatic'.",
     },
+    others_payment_cancel: {
+      type: ["string", "null"],
+      description:
+        "Columna AK — 'OTHERS IN PAYMENT OR CANCELLATION'. Reglas de PAGO o " +
+        "CANCELACIÓN que aplican SOLO a PERIODOS ESPECIALES y se salen de la " +
+        "política general (que va en cancellation_policy / " +
+        "range_payment_policy). Casos típicos: temporada navideña / fin de " +
+        "año, Semana Santa, feriados, eventos, fechas pico con prepago " +
+        "anticipado o cancelación más estricta. Ejemplo real: 'Periodo " +
+        "Navideño: reservas que incluyan fechas entre 15-dic-2025 y " +
+        "15-ene-2026 deben prepagarse el 14-oct-2025; cancelación 30 días " +
+        "antes de la llegada'. Si hay varios periodos especiales, unilos con " +
+        "' ; '. Es contract-wide: el writer replica este valor en TODAS las " +
+        "filas (columna AK). NO repitas acá la política general de pago/" +
+        "cancelación. null si el contrato no define periodos especiales.",
+    },
     notes: {
       type: ["string", "null"],
       description:
@@ -201,6 +217,7 @@ const sharedFieldsSchema = {
     "tipo_moneda",
     "numero_cuenta",
     "banco",
+    "others_payment_cancel",
     "notes",
   ],
 } as const;
@@ -277,9 +294,9 @@ const rowSchema = {
       type: ["string", "null"],
       description:
         "Código corto de ocupación. Convención del maestro: 'DBL' = " +
-        "doble, 'SGL' = single, 'TPL' = triple, 'CPL' = cuádruple, 'FAM' " +
+        "doble, 'SGL' = single, 'TPL' = triple, 'QDP' = cuádruple, 'FAM' " +
         "= familiar. Si el contrato dice 'sencilla o doble', devolver 'DBL'. " +
-        "NO generes filas TPL/CPL manualmente cuando hay tarifa por persona " +
+        "NO generes filas TPL/QDP manualmente cuando hay tarifa por persona " +
         "adicional — el servidor las crea solo (ver tarifa_persona_adicional " +
         "y regla 16b del system prompt).",
     },
@@ -294,7 +311,7 @@ const rowSchema = {
         "documento ya lo da con impuesto incluido, usá ese número tal cual. " +
         "Solo número (sin símbolo de moneda ni '%'). Poné el MISMO valor en " +
         "cada fila base de hospedaje a la que aplica. El servidor genera " +
-        "automáticamente las filas TPL (base + 1×) y CPL (base + 2×). Dejá " +
+        "automáticamente las filas TPL (base + 1×) y QDP (base + 2×). Dejá " +
         "null si el contrato NO menciona persona adicional, o si el contrato " +
         "YA lista tarifas explícitas para triple/cuádruple (en ese caso " +
         "generá esas filas vos mismo con su ocupacion correcta).",

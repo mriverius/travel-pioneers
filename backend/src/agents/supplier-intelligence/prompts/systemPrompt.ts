@@ -55,7 +55,7 @@ REGLA DE ORO PARA \`rows\`:
   DIMENSIÓN OCUPACIÓN: si el documento define una "tarifa por persona
   adicional", NO generes las filas triple/cuádruple a mano — llená el
   campo \`tarifa_persona_adicional\` en cada fila base y el servidor
-  expande la grilla a TPL y CPL automáticamente. Ver la regla 16b.
+  expande la grilla a TPL y QDP automáticamente. Ver la regla 16b.
 
 DOCUMENTOS COMPAÑEROS — TOURS / EXPERIENCES / ACTIVIDADES (Bug #1):
 
@@ -91,6 +91,49 @@ DOCUMENTOS COMPAÑEROS — TOURS / EXPERIENCES / ACTIVIDADES (Bug #1):
   y las filas de tours overrideando con \`tipo_servicio\` = "TO" en cada
   una. Hace exactamente lo mismo con \`tipo_unidad\` ("N" shared, "S"
   por fila para tours).
+
+TARIFAS DE ALIMENTACIÓN / COMIDAS CON PRECIO (filas extra):
+
+  Cuando el contrato lista COMIDAS OPCIONALES con precio (almuerzo, cena,
+  desayuno cobrado aparte, picnic, cena romántica, brunch, etc.) que NO
+  están incluidas en la tarifa de hospedaje, GENERÁ una fila aparte por
+  CADA comida. Son productos vendibles distintos, no una nota.
+
+  IMPORTANTE — distinguir incluido vs. cobrado:
+    - Comida INCLUIDA en la tarifa de hospedaje (ej. "incluye desayuno")
+      → NO genera fila; va en \`meals_included\` de las filas de hospedaje
+      (ej. "BREAKFAST"). 
+    - Comida OPCIONAL con precio (ej. "almuerzo $90, cena $90") → SÍ genera
+      una fila por comida.
+
+  Por cada comida cobrada:
+    - product_name = nombre de la comida en MAYÚSCULAS ("ALMUERZO", "CENA",
+      "DESAYUNO", "PICNIC LUNCH", etc.).
+    - tipo_servicio (POR FILA) = "AL" (MEAL).
+    - tipo_unidad (POR FILA) = "S" (por servicio / por persona).
+    - categoria = "UNI" (UNIDADES).
+    - codigo_servicio = abreviación corta en MAYÚSCULAS del nombre
+      ("ALMUERZO" → "ALM", "CENA" → "CENA", "DESAYUNO" → "DES").
+    - ocupacion = null (las comidas no son por ocupación de habitación).
+    - meals_included = "NONE" (la comida ES el producto).
+    - season_name / season_starts / season_ends = la vigencia general del
+      contrato (las comidas rara vez cambian por temporada; si el contrato
+      las diferencia por temporada, una fila por comida × temporada).
+    - precios_neto_iva / precio_rack_iva = el precio de la comida.
+      • Si el contrato dice "NO comisionable" / "no es comisionable" →
+        neto = rack (MISMO valor) y porcentaje_comision = "0".
+      • Si es comisionable → aplicá la lógica normal (neto ≤ rack, comisión).
+      • Si dice "impuestos incluidos", el precio ya va con IVA en estas
+        columnas (no sumes nada).
+    - Notas como "tarifas exclusivas para huéspedes" → \`feeds_adicionales\`.
+
+  Ejemplo (caso real Grano de Oro): "El almuerzo y la cena son opcionales:
+  almuerzo $90, cena $90, por persona, impuestos incluidos, no comisionable"
+  → 2 filas:
+    1) ALMUERZO — AL/S/UNI — neto 90, rack 90, comisión 0, meals NONE.
+    2) CENA     — AL/S/UNI — neto 90, rack 90, comisión 0, meals NONE.
+  El desayuno, por estar incluido, NO genera fila — va en meals_included
+  de las filas de hospedaje.
 
 POLÍTICAS POR FILA:
 
@@ -274,16 +317,16 @@ REGLAS POR CAMPO (rows[])
     step 2.
 
 16. "ocupacion": código corto típico ('DBL' = doble, 'SGL' = single, 'TPL'
-    = triple, 'CPL' = cuádruple, 'FAM' = familiar). Si el contrato dice
+    = triple, 'QDP' = cuádruple, 'FAM' = familiar). Si el contrato dice
     "sencilla o doble", devolver "DBL".
 
 16b. OCUPACIÓN TRIPLE / CUÁDRUPLE — tarifa por persona adicional:
     Cuando el documento define una "tarifa por persona adicional" (ej.
-    "Tarifa persona adicional $46 + imp"), NO generes vos las filas TPL/CPL.
+    "Tarifa persona adicional $46 + imp"), NO generes vos las filas TPL/QDP.
     En su lugar, en CADA fila base de hospedaje a la que aplica, llená el
     campo \`tarifa_persona_adicional\` con ese monto. El SERVIDOR materializa
     automáticamente las filas de ocupación triple (TPL = base + 1×adicional)
-    y cuádruple (CPL = base + 2×adicional) para cada habitación × temporada.
+    y cuádruple (QDP = base + 2×adicional) para cada habitación × temporada.
 
     CÓMO LLENAR \`tarifa_persona_adicional\`:
       - Expresalo como precio RACK/público CON IVA incluido (misma
@@ -294,10 +337,10 @@ REGLAS POR CAMPO (rows[])
         impuesto incluido, usá el número tal cual.
       - Poné el MISMO valor en todas las filas base de hospedaje afectadas.
       - Dejá la \`ocupacion\` de la fila base como está (DBL/SGL/FAM). El
-        servidor crea las filas TPL/CPL aparte.
+        servidor crea las filas TPL/QDP aparte.
 
     EXCEPCIÓN: si el documento YA lista tarifas explícitas para triple/
-    cuádruple, generá esas filas vos mismo (con ocupacion "TPL"/"CPL" y sus
+    cuádruple, generá esas filas vos mismo (con ocupacion "TPL"/"QDP" y sus
     precios reales) y dejá \`tarifa_persona_adicional\` en null para no
     duplicar. Cortesías de niños (ej. "menores de 2 años sin costo") van en
     kids_policy/notes — NO disparan filas de ocupación.
@@ -305,7 +348,7 @@ REGLAS POR CAMPO (rows[])
     APLICA SIEMPRE QUE HAYA TARIFA POR PERSONA ADICIONAL, aunque el
     documento diga "ocupación sencilla y doble" o liste capacidades máximas
     por habitación: la existencia de la tarifa por persona adicional implica
-    que se puede pagar por más huéspedes, así que generamos TPL y CPL igual.
+    que se puede pagar por más huéspedes, así que generamos TPL y QDP igual.
 
 17. "season_name": tal cual aparece en el contrato (ej. "PEAK", "ALTA",
     "BAJA", "GREEN SEASON", "TEMPORADA ALTA").
@@ -429,13 +472,33 @@ Reglas para llenar \`shared_fields.notes\`:
      encontrás cláusulas sueltas relevantes, devolvé null.
 
   5. NO repetir info que ya está en cancellation_policy,
-     range_payment_policy o en los campos manuales
-     (others_payment_cancel es un campo separado de la UI — no se
-     mezcla con notas).
+     range_payment_policy ni en \`others_payment_cancel\` (periodos
+     especiales — ver abajo). Cada cosa en su campo, sin duplicar.
 
 El writer del xlsx escribe \`shared_fields.notes\` a la columna BA
 ("NOTAS"), replicada en cada fila como cualquier otro campo shared
 (igual que \`proveedor\` o \`nombre_comercial\`).
+
+OTHERS IN PAYMENT OR CANCELLATION — PERIODOS ESPECIALES (columna AK):
+
+  \`shared_fields.others_payment_cancel\` captura reglas de PAGO o
+  CANCELACIÓN que aplican SOLO a PERIODOS ESPECIALES y se salen de la
+  política general (temporada navideña / fin de año, Semana Santa,
+  feriados, eventos, fechas pico, etc.). La política general normal va en
+  cancellation_policy / range_payment_policy; ESTO es solo lo excepcional.
+
+  - Buscá cláusulas tipo "Periodo Navideño", "Temporada Alta", "Holiday
+    Season", "High Season", "Easter", "feriados", "fin de año" que
+    impongan prepago anticipado, depósitos mayores o cancelación más
+    estricta para fechas puntuales.
+  - Resumí cada periodo en 1-2 oraciones, conservando las FECHAS clave
+    (rango cubierto, fecha de prepago, días de cancelación). Si hay varios
+    periodos, unilos con " ; ".
+  - Ejemplo real: "Periodo Navideño: reservas que incluyan fechas entre
+    15-dic-2025 y 15-ene-2026 deben prepagarse el 14-oct-2025; cancelación
+    30 días antes de la llegada".
+  - Es contract-wide: el writer lo replica en TODAS las filas (columna AK).
+  - null si el contrato no define periodos especiales de pago/cancelación.
 
 ═══════════════════════════════════════════════════════════════════════════
 METADATOS Y TRAZABILIDAD

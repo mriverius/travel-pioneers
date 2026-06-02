@@ -1330,7 +1330,7 @@ export const ALL_COLUMNS: ColumnDef[] = [
   { excelCol: "AH", key: "porcentaje_comision_fds",   label: "% Comisión FdS",            scope: { kind: "row" },                      minWidth: 100, placeholder: "0 / 25" },
   { excelCol: "AI", key: "cancellation_policy",       label: "Cancelation Policy",        scope: { kind: "row" },                      minWidth: 280, multiline: true },
   { excelCol: "AJ", key: "range_payment_policy",      label: "Range Payment Policy",      scope: { kind: "row" },                      minWidth: 220, multiline: true },
-  { excelCol: "AK", key: "others_payment_cancel",     label: "Others in Payment / Cancel",scope: { kind: "shared", source: "manual" }, minWidth: 180, multiline: true },
+  { excelCol: "AK", key: "others_payment_cancel",     label: "Others in Payment / Cancel",scope: { kind: "shared", source: "ai" }, minWidth: 220, multiline: true, placeholder: "Periodos especiales (Navidad, etc.)" },
   { excelCol: "AL", key: "kids_policy",               label: "Kids Policy",               scope: { kind: "row" },                      minWidth: 220, multiline: true },
   { excelCol: "AM", key: "other_included",            label: "Other Included",            scope: { kind: "row" },                      minWidth: 200, multiline: true },
   { excelCol: "AN", key: "feeds_adicionales",         label: "Fees Adicionales",          scope: { kind: "row" },                      minWidth: 180, multiline: true },
@@ -1365,6 +1365,7 @@ const AI_SHARED_KEYS: ExtractedSharedFieldKey[] = [
   "pais", "state_province", "type_of_business",
   "contract_starts", "contract_ends", "reservations_email",
   "tipo_moneda", "numero_cuenta", "banco",
+  "others_payment_cancel",
   "notes",
 ];
 
@@ -1375,7 +1376,7 @@ type CatalogKey = (typeof CATALOG_KEYS)[number];
 
 const MANUAL_KEYS = [
   "tipo_tarifa_neta", "tipo_tarifa_mayorista", "tipo_tarifa_fds",
-  "t_tar_neta_fds", "tipo_tarifa_mayorista_fds", "others_payment_cancel",
+  "t_tar_neta_fds", "tipo_tarifa_mayorista_fds",
   "cond_credito", "plazo",
   "cuenta_bancaria_2", "banco_2", "moneda_2",
   "cuenta_bancaria_3", "banco_3", "moneda_3",
@@ -1556,6 +1557,7 @@ function ReviewStep({
       tipo_moneda: sharedValues.tipo_moneda,
       numero_cuenta: sharedValues.numero_cuenta,
       banco: sharedValues.banco,
+      others_payment_cancel: sharedValues.others_payment_cancel,
       notes: sharedValues.notes,
     };
 
@@ -1590,7 +1592,6 @@ function ReviewStep({
           tipo_tarifa_fds: sharedValues.tipo_tarifa_fds,
           t_tar_neta_fds: sharedValues.t_tar_neta_fds,
           tipo_tarifa_mayorista_fds: sharedValues.tipo_tarifa_mayorista_fds,
-          others_payment_cancel: sharedValues.others_payment_cancel,
           cond_credito: sharedValues.cond_credito,
           plazo: sharedValues.plazo,
           cuenta_bancaria_2: sharedValues.cuenta_bancaria_2,

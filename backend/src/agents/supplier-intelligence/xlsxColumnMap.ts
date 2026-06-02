@@ -47,6 +47,10 @@ export const SHARED_COL: Partial<Record<SharedFieldKey, string>> = {
   // (Bug #1, #5). El writer los resuelve combinando shared + override de
   // la fila + fallback heurístico, y los escribe directamente.
   reservations_email: "AO",
+  // Columna AK — OTHERS IN PAYMENT OR CANCELLATION. Políticas de periodos
+  // especiales (Navidad, etc.) extraídas por IA y replicadas en cada fila.
+  // Antes era manual; ahora es shared (ver SharedFields.others_payment_cancel).
+  others_payment_cancel: "AK",
   // Cuenta bancaria 1
   numero_cuenta: "AR",
   banco: "AS",
@@ -91,7 +95,6 @@ export const MANUAL_COL: Record<ManualFieldKey, string> = {
   tipo_tarifa_fds: "AC",
   t_tar_neta_fds: "AD",
   tipo_tarifa_mayorista_fds: "AG",
-  others_payment_cancel: "AK",
   cond_credito: "AP",
   plazo: "AQ",
   cuenta_bancaria_2: "AU",
@@ -131,7 +134,7 @@ export const ROW_COL: Partial<Record<RowFieldKey, string>> = {
   porcentaje_comision_fds: "AH",
   cancellation_policy: "AI",
   range_payment_policy: "AJ",
-  // AK (others_payment_cancel) es manual
+  // AK (others_payment_cancel) → ahora shared AI (ver SHARED_COL)
   kids_policy: "AL",
   other_included: "AM",
   feeds_adicionales: "AN",

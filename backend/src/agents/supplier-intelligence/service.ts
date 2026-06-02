@@ -311,6 +311,7 @@ function coerceSharedFields(input: unknown): SharedFields {
     tipo_moneda: stringOrNull(r.tipo_moneda),
     numero_cuenta: stringOrNull(r.numero_cuenta),
     banco: stringOrNull(r.banco),
+    others_payment_cancel: stringOrNull(r.others_payment_cancel),
     notes: stringOrNull(r.notes),
   };
 }

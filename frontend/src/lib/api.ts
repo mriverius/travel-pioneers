@@ -475,6 +475,13 @@ export interface ExtractedSharedFields {
   numero_cuenta: string | null;
   banco: string | null;
   /**
+   * Columna AK — "OTHERS IN PAYMENT OR CANCELLATION". Reglas de pago/
+   * cancelación de PERIODOS ESPECIALES (Navidad, Semana Santa, fechas pico).
+   * Antes era manual; ahora la IA la extrae y el writer la replica en cada
+   * fila (columna AK).
+   */
+  others_payment_cancel: string | null;
+  /**
    * Columna BA — "NOTAS". Cláusulas globales del contrato que no
    * encajan en ninguna otra columna (restricciones de edad, requisitos
    * de booking, alérgenos, condiciones especiales, etc.). El backend
@@ -611,7 +618,6 @@ export interface GenerateXlsxManualFields {
   tipo_tarifa_fds: string | null;
   t_tar_neta_fds: string | null;
   tipo_tarifa_mayorista_fds: string | null;
-  others_payment_cancel: string | null;
   cond_credito: string | null;
   plazo: string | null;
   cuenta_bancaria_2: string | null;

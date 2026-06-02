@@ -49,6 +49,17 @@ export interface SharedFields {
   numero_cuenta: string | null;
   banco: string | null;
   /**
+   * Columna AK — "OTHERS IN PAYMENT OR CANCELLATION". Políticas de PERIODOS
+   * ESPECIALES (Navidad / Semana Santa / fin de año / high season) que
+   * cambian las reglas de prepago o cancelación para fechas puntuales —
+   * ej. "Reservas que incluyan 15-dic al 15-ene deben prepagarse el 14-oct;
+   * cancelación 30 días antes". Es contract-wide: la IA la extrae una vez y
+   * el writer la replica en cada fila (columna AK). Antes era un campo
+   * manual (lo llenaba el usuario en step 2); ahora la IA lo pre-llena y el
+   * usuario puede ajustarlo.
+   */
+  others_payment_cancel: string | null;
+  /**
    * Columna BA — "NOTAS". Cláusulas significativas del contrato que no
    * encajan en ninguna otra columna (restricciones de edad mínima,
    * requisitos de booking, condiciones especiales, alérgenos, etc.).
@@ -101,7 +112,7 @@ export interface ContractRow {
    * imp"), la IA pone aquí ese monto YA expresado como precio RACK con IVA
    * incluido (misma convención que `precio_rack_iva`). El servidor lo usa
    * para materializar deterministicamente filas de ocupación TPL (triple) y
-   * CPL (cuádruple) a partir de la fila base — ver `expandOccupancy` en
+   * QDP (cuádruple) a partir de la fila base — ver `expandOccupancy` en
    * validators.ts. Una vez expandida, el campo queda en null en todas las
    * filas resultantes. Si el contrato no menciona persona adicional → null.
    */
@@ -133,8 +144,9 @@ export interface ContractRow {
  * usuario puede llenarlos en step 2. Se replican en cada fila del xlsx igual
  * que los shared_fields.
  *
- * Columnas correspondientes: X, AA, AC, AD, AG, AK, AP, AQ, AU, AV, AW, AX,
- * AY, AZ (14 columnas).
+ * Columnas correspondientes: X, AA, AC, AD, AG, AP, AQ, AU, AV, AW, AX,
+ * AY, AZ (13 columnas). NOTA: AK (others_payment_cancel) dejó de ser manual
+ * — ahora la IA lo extrae como shared field (periodos especiales).
  */
 export interface ManualFields {
   tipo_tarifa_neta: string | null;
@@ -142,7 +154,6 @@ export interface ManualFields {
   tipo_tarifa_fds: string | null;
   t_tar_neta_fds: string | null;
   tipo_tarifa_mayorista_fds: string | null;
-  others_payment_cancel: string | null;
   cond_credito: string | null;
   plazo: string | null;
   cuenta_bancaria_2: string | null;

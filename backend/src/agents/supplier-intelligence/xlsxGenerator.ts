@@ -337,6 +337,12 @@ function deriveCodigoServicioFromProduct(product: string | null): string {
     p.includes("transfer") ||
     p.includes("breakfast") ||
     p.includes("dinner") ||
+    p.includes("lunch") ||
+    p.includes("almuerzo") ||
+    p.includes("cena") ||
+    p.includes("desayuno") ||
+    p.includes("comida") ||
+    p.includes("picnic") ||
     p.includes("canopy") ||
     p.includes("kayak") ||
     p.includes("zip") ||
@@ -368,7 +374,17 @@ function inferTipoServicioFromProduct(product: string | null): string {
   ) {
     return "TO";
   }
-  if (p.includes("breakfast") || p.includes("dinner") || p.includes("lunch") || p.includes("meal")) {
+  if (
+    p.includes("breakfast") ||
+    p.includes("dinner") ||
+    p.includes("lunch") ||
+    p.includes("meal") ||
+    p.includes("almuerzo") ||
+    p.includes("cena") ||
+    p.includes("desayuno") ||
+    p.includes("comida") ||
+    p.includes("picnic")
+  ) {
     return "AL";
   }
   if (p.includes("rent a car") || p.includes("car rental")) return "RE";
@@ -502,8 +518,8 @@ export function generateContractXlsx(
     // Manual fields — replicados en cada fila (igual que shared, pero el
     // usuario los llena directamente en la UI ya que no salen del contrato).
     // Las columnas X/AA/AC/AD/AG (tipos de tarifa) las maneja Bug #4 abajo.
-    // others_payment_cancel (AK) sale por el loop genérico — ya no se
-    // combina con notes porque éstas viven en su propia columna BA.
+    // NOTA: others_payment_cancel (AK) dejó de ser manual — ahora la IA lo
+    // extrae como shared field y se escribe por el loop de SHARED_COL arriba.
     if (input.manual_fields) {
       const tipoTarifaCols = new Set<string>([
         ...TIPO_TARIFA_REGULAR_COLS,
@@ -538,6 +554,14 @@ export function generateContractXlsx(
     const categoriaCol = ROW_COL.categoria;
     if (categoriaCol && (!row.categoria || row.categoria.trim() === "")) {
       writeCell(dataSheet, categoriaCol, xlsxRow, cls.categoria);
+    }
+
+    // Comidas (tipo_servicio AL): el campo es la comida en sí, no un plan
+    // incluido — meals_included SIEMPRE "NONE". Se fuerza acá (autoridad
+    // final) sobre lo que haya escrito el loop genérico de ROW_COL.
+    if (cls.tipoServicio === "AL") {
+      const mealsCol = ROW_COL.meals_included;
+      if (mealsCol) writeCell(dataSheet, mealsCol, xlsxRow, "NONE");
     }
 
     // Tipo Tarifa: neta → "1", mayorista → "2" (fijo). Un override manual

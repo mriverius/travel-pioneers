@@ -110,6 +110,7 @@ function coerceSharedFields(input: unknown): SharedFields {
     tipo_moneda: stringOrNull(r.tipo_moneda),
     numero_cuenta: stringOrNull(r.numero_cuenta),
     banco: stringOrNull(r.banco),
+    others_payment_cancel: stringOrNull(r.others_payment_cancel),
     notes: stringOrNull(r.notes),
   };
 }
@@ -157,7 +158,6 @@ function coerceManualFields(input: unknown): ManualFields | null {
     tipo_tarifa_fds: tipoTarifaCodeOrNull(r.tipo_tarifa_fds),
     t_tar_neta_fds: tipoTarifaCodeOrNull(r.t_tar_neta_fds),
     tipo_tarifa_mayorista_fds: tipoTarifaCodeOrNull(r.tipo_tarifa_mayorista_fds),
-    others_payment_cancel: stringOrNull(r.others_payment_cancel),
     cond_credito: condCreditoCodeOrNull(r.cond_credito),
     plazo: stringOrNull(r.plazo),
     cuenta_bancaria_2: stringOrNull(r.cuenta_bancaria_2),
