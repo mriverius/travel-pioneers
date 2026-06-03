@@ -1478,6 +1478,9 @@ function buildInitialSharedValues(
     out.cuenta_bancaria_3 = bankPrefill.cuenta_bancaria_3 ?? null;
     out.banco_3 = bankPrefill.banco_3 ?? null;
     out.moneda_3 = bankPrefill.moneda_3 ?? null;
+    // Condición de crédito (1/2/3) + plazo, extraídos de los términos de pago.
+    out.cond_credito = bankPrefill.cond_credito ?? null;
+    out.plazo = bankPrefill.plazo ?? null;
   }
   return out as Record<SharedKey, string | null>;
 }

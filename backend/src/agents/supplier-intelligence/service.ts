@@ -17,7 +17,7 @@ import {
   renderContractBriefBlock,
   SUPPLIER_INTELLIGENCE_SYSTEM_PROMPT,
 } from "./prompts/index.js";
-import { validateExtraction } from "./validators.js";
+import { validateExtraction, normalizeCurrency } from "./validators.js";
 import type {
   Confianza,
   ContractBrief,
@@ -25,6 +25,7 @@ import type {
   ContractBriefBankAccount,
   ContractRow,
   ExtractedContract,
+  PaymentTerms,
   PreparedDocument,
   SharedFields,
   SourcePage,
@@ -520,6 +521,18 @@ function coerceExtraction(input: unknown): ExtractedContract {
     campos_faltantes,
     paginas_origen_shared,
     paginas_origen_rows,
+    bank_accounts: coerceBankAccounts(r.bank_accounts),
+    payment_terms: coercePaymentTerms(r.payment_terms),
+  };
+}
+
+function coercePaymentTerms(v: unknown): PaymentTerms | null {
+  if (!v || typeof v !== "object") return null;
+  const r = v as Record<string, unknown>;
+  return {
+    condition: stringOrNull(r.condition),
+    term_days: numberOrNull(r.term_days),
+    term_note: stringOrNull(r.term_note),
   };
 }
 
@@ -687,6 +700,40 @@ export interface ManualBankPrefill {
   cuenta_bancaria_3: string | null;
   banco_3: string | null;
   moneda_3: string | null;
+  /** cond_credito (col AP): "1"=CONTADO, "2"=CRÉDITO, "3"=PREPAGO. */
+  cond_credito: string | null;
+  /** plazo (col AQ): días de crédito o detalle del prepago. */
+  plazo: string | null;
+}
+
+/**
+ * Mapea los `payment_terms` extraídos a los campos manuales cond_credito /
+ * plazo. cond_credito: "1"=CONTADO, "2"=CRÉDITO, "3"=PREPAGO.
+ */
+export function derivePaymentPrefill(
+  extraction: ExtractedContract,
+): { cond_credito: string | null; plazo: string | null } {
+  const pt = extraction.payment_terms;
+  if (!pt) return { cond_credito: null, plazo: null };
+
+  const cond = (pt.condition ?? "").toUpperCase();
+  let code: string | null = null;
+  if (cond.includes("PREPAG") || cond.includes("PREPAID") || cond.includes("ADVANCE") || cond.includes("ANTICIP")) {
+    code = "3";
+  } else if (cond.includes("CRÉDIT") || cond.includes("CREDIT")) {
+    code = "2";
+  } else if (cond.includes("CONTADO") || cond.includes("CASH") || cond.includes("INMEDIAT") || cond.includes("IMMEDIAT")) {
+    code = "1";
+  }
+
+  let plazo: string | null = null;
+  if (pt.term_days !== null && Number.isFinite(pt.term_days)) {
+    plazo = String(pt.term_days);
+  } else {
+    plazo = cleanStr(pt.term_note);
+  }
+
+  return { cond_credito: code, plazo };
 }
 
 const cleanStr = (s: string | null | undefined): string | null => {
@@ -697,88 +744,105 @@ const cleanStr = (s: string | null | undefined): string | null => {
 const normalizeAccountNumber = (s: string | null | undefined): string =>
   (s ?? "").replace(/\s+/g, "").toLowerCase();
 
+type BankAcct = { bank: string | null; num: string | null; cur: string | null };
+
+/** Solo los 6 campos bancarios del prefill (cuentas 2 y 3). */
+type BankPrefill = Pick<
+  ManualBankPrefill,
+  "cuenta_bancaria_2" | "banco_2" | "moneda_2" | "cuenta_bancaria_3" | "banco_3" | "moneda_3"
+>;
+
 /**
- * Reconcilia las cuentas bancarias del brief con la cuenta primaria que trajo
- * la extracción principal. Devuelve:
- *   - `sharedPatch`: rellena numero_cuenta / banco / tipo_moneda primarios si
- *     la extracción principal los dejó vacíos (usa la 1ra cuenta del brief).
- *   - `manualPrefill`: cuentas 2 y 3 (las que NO son la primaria), listas para
- *     pre-llenar los campos manuales de la UI. `null` si no hay extra.
+ * Reconcilia TODAS las cuentas bancarias del contrato. Fuentes (en orden de
+ * confianza): la extracción principal (Opus, lee todo el documento) y, como
+ * complemento, el brief (Fase 1). Devuelve:
+ *   - `sharedPatch`: cuenta 1 → numero_cuenta / banco / tipo_moneda (MONEDA 1),
+ *     siempre con la moneda normalizada a USD/LOC.
+ *   - `bankPrefill`: cuentas 2 y 3 (cols AU-AZ) para pre-llenar Step 2.
+ *
+ * La plantilla soporta MÁXIMO 3 cuentas: si el contrato lista más, se toman
+ * solo las 3 PRIMERAS en orden del documento (las extra se ignoran).
  */
 export function reconcileBankAccounts(
   extraction: ExtractedContract,
   brief: ContractBrief | null,
-): { sharedPatch: Partial<ExtractedContract["shared_fields"]>; manualPrefill: ManualBankPrefill | null } {
-  const raw = (brief?.bank_accounts ?? [])
-    .map((a) => ({
-      bank: cleanStr(a.bank),
-      num: cleanStr(a.account_number),
-      cur: cleanStr(a.currency),
-    }))
-    .filter((a) => a.num !== null || a.bank !== null);
+): { sharedPatch: Partial<ExtractedContract["shared_fields"]>; bankPrefill: BankPrefill | null } {
+  const sf = extraction.shared_fields;
 
-  if (raw.length === 0) return { sharedPatch: {}, manualPrefill: null };
+  const toAcct = (a: { bank: string | null; account_number: string | null; currency: string | null }): BankAcct => ({
+    bank: cleanStr(a.bank),
+    num: cleanStr(a.account_number),
+    cur: cleanStr(a.currency),
+  });
 
-  // Dedupe por número de cuenta normalizado (o por banco si no hay número).
+  // Orden canónico: primero las de la extracción principal (orden del
+  // documento), luego las del brief que no estén ya presentes.
+  const candidates: BankAcct[] = [
+    ...(extraction.bank_accounts ?? []).map(toAcct),
+    ...(brief?.bank_accounts ?? []).map(toAcct),
+  ].filter((a) => a.num !== null || a.bank !== null);
+
+  // Dedupe por número de cuenta normalizado (o banco si no hay número),
+  // conservando el primer avistamiento (orden del documento).
   const seen = new Set<string>();
-  const deduped: typeof raw = [];
-  for (const a of raw) {
+  let ordered: BankAcct[] = [];
+  for (const a of candidates) {
     const key = a.num ? `n:${normalizeAccountNumber(a.num)}` : `b:${(a.bank ?? "").toLowerCase()}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    deduped.push(a);
+    ordered.push(a);
   }
 
-  const sf = extraction.shared_fields;
   const sharedPatch: Partial<ExtractedContract["shared_fields"]> = {};
-  let primaryNum = cleanStr(sf.numero_cuenta);
-  let pool = deduped;
+  const primaryNum = cleanStr(sf.numero_cuenta);
 
-  if (!primaryNum) {
-    // La extracción principal no trajo cuenta primaria → promovemos la 1ra
-    // del brief a shared_fields.
-    const a0 = deduped[0]!;
-    sharedPatch.numero_cuenta = a0.num;
-    if (!cleanStr(sf.banco)) sharedPatch.banco = a0.bank;
-    if (!cleanStr(sf.tipo_moneda) && a0.cur) sharedPatch.tipo_moneda = a0.cur;
-    primaryNum = a0.num;
-    pool = deduped.slice(1);
-  } else {
-    // Quitamos del pool la cuenta que coincide con la primaria ya extraída.
-    const pn = normalizeAccountNumber(primaryNum);
-    pool = deduped.filter((a) => normalizeAccountNumber(a.num) !== pn);
+  if (ordered.length === 0) {
+    // No detectamos cuentas estructuradas — al menos normalizamos la moneda
+    // de la cuenta 1 que ya traía la extracción principal.
+    const normCur = normalizeCurrency(sf.tipo_moneda);
+    if (normCur && normCur !== sf.tipo_moneda) sharedPatch.tipo_moneda = normCur;
+    return { sharedPatch, bankPrefill: null };
   }
 
-  if (pool.length === 0) return { sharedPatch, manualPrefill: null };
+  // Anclamos la cuenta 1 a la que ya eligió la extracción principal (si
+  // coincide con alguna detectada); si no, a la primera del orden del doc.
+  if (primaryNum) {
+    const idx = ordered.findIndex(
+      (a) => normalizeAccountNumber(a.num) === normalizeAccountNumber(primaryNum),
+    );
+    if (idx > 0) {
+      ordered = [ordered[idx]!, ...ordered.filter((_, i) => i !== idx)];
+    } else if (idx < 0) {
+      // La primaria no apareció en la lista estructurada → la anteponemos
+      // sintetizándola desde shared_fields para no perderla.
+      ordered = [{ bank: cleanStr(sf.banco), num: primaryNum, cur: cleanStr(sf.tipo_moneda) }, ...ordered];
+    }
+  }
 
-  const a2 = pool[0];
-  const a3 = pool[1];
-  const manualPrefill: ManualBankPrefill = {
+  // Solo las 3 primeras caben en la plantilla.
+  const top3 = ordered.slice(0, 3);
+  const a1 = top3[0]!;
+  const a2 = top3[1];
+  const a3 = top3[2];
+
+  // Cuenta 1 → shared. MONEDA 1 (tipo_moneda) normalizada a USD/LOC.
+  sharedPatch.numero_cuenta = a1.num;
+  if (a1.bank) sharedPatch.banco = a1.bank;
+  const moneda1 = normalizeCurrency(a1.cur) ?? normalizeCurrency(sf.tipo_moneda);
+  if (moneda1) sharedPatch.tipo_moneda = moneda1;
+
+  if (!a2 && !a3) return { sharedPatch, bankPrefill: null };
+
+  const bankPrefill: BankPrefill = {
     cuenta_bancaria_2: a2?.num ?? null,
     banco_2: a2?.bank ?? null,
-    moneda_2: a2?.cur ?? null,
+    moneda_2: normalizeCurrency(a2?.cur),
     cuenta_bancaria_3: a3?.num ?? null,
     banco_3: a3?.bank ?? null,
-    moneda_3: a3?.cur ?? null,
+    moneda_3: normalizeCurrency(a3?.cur),
   };
 
-  // Overflow: la plantilla solo tiene 3 slots (primaria + 2 manuales). Si el
-  // contrato lista 4+ cuentas, las extra no caben — las anexamos a `notes`
-  // (col BA) para no perderlas. El usuario decide qué hacer con ellas.
-  const overflow = pool.slice(2);
-  if (overflow.length > 0) {
-    const lines = overflow.map((a) => {
-      const parts = [a.bank, a.num, a.cur].filter((x): x is string => !!x);
-      return `  - ${parts.join(" · ")}`;
-    });
-    const note =
-      `Cuentas bancarias adicionales (no caben en la plantilla, ` +
-      `máximo 3):\n${lines.join("\n")}`;
-    const existing = cleanStr(extraction.shared_fields.notes);
-    sharedPatch.notes = existing ? `${existing}\n\n${note}` : note;
-  }
-
-  return { sharedPatch, manualPrefill };
+  return { sharedPatch, bankPrefill };
 }
 
 export interface ExtractionResult {
@@ -960,14 +1024,32 @@ export async function extractContract(
 
   const { extraction, validation } = validateExtraction(raw);
 
-  // Reconciliación de cuentas bancarias: la extracción principal suele traer
-  // solo la cuenta primaria. El brief (Fase 1) captura todas — rellenamos la
-  // primaria si faltó y exponemos las cuentas 2 y 3 como prefill manual.
-  const { sharedPatch, manualPrefill } = reconcileBankAccounts(extraction, brief);
+  // Reconciliación de cuentas bancarias + términos de pago: la extracción
+  // principal trae todas las cuentas y los payment_terms. Rellenamos la cuenta
+  // 1 (con MONEDA normalizada) y armamos el prefill de los campos manuales
+  // (cuentas 2/3 + cond_credito + plazo) para pre-llenar Step 2.
+  const { sharedPatch, bankPrefill } = reconcileBankAccounts(extraction, brief);
   const data =
     Object.keys(sharedPatch).length > 0
       ? { ...extraction, shared_fields: { ...extraction.shared_fields, ...sharedPatch } }
       : extraction;
+
+  const payment = derivePaymentPrefill(extraction);
+  const manualPrefillCandidate: ManualBankPrefill = {
+    cuenta_bancaria_2: bankPrefill?.cuenta_bancaria_2 ?? null,
+    banco_2: bankPrefill?.banco_2 ?? null,
+    moneda_2: bankPrefill?.moneda_2 ?? null,
+    cuenta_bancaria_3: bankPrefill?.cuenta_bancaria_3 ?? null,
+    banco_3: bankPrefill?.banco_3 ?? null,
+    moneda_3: bankPrefill?.moneda_3 ?? null,
+    cond_credito: payment.cond_credito,
+    plazo: payment.plazo,
+  };
+  const manualPrefill: ManualBankPrefill | null = Object.values(
+    manualPrefillCandidate,
+  ).some((v) => v !== null)
+    ? manualPrefillCandidate
+    : null;
 
   // Usage = brief (Fase 1, Sonnet) + extracción principal (Fase 2, Opus). Cada
   // pasada se cobra con la tarifa de su modelo; `sumUsage` agrega los totales.

@@ -93,8 +93,10 @@ export interface ContractRow {
    */
   tipo_servicio: string | null;
   /**
-   * Override por fila de `tipo_unidad`. Hoteles → "N" (por noche); tours,
-   * transfers y comidas → "S" (por servicio). Mismo fallback que
+   * Override por fila de `tipo_unidad`. Hospedaje por noche → "N"; tours,
+   * transfers, comidas → "S". CASO ESPECIAL: una tarifa de hospedaje que es
+   * un PAQUETE de varias noches a precio fijo por habitación (ej. "2N/3D" con
+   * el neto total por las 2 noches) → "S", no "N". Mismo fallback que
    * `tipo_servicio`.
    */
   tipo_unidad: TipoUnidad | null;
@@ -181,6 +183,35 @@ export interface ExtractedContract {
   campos_faltantes: string[];
   paginas_origen_shared: Record<string, SourcePage>;
   paginas_origen_rows: Record<string, SourcePage>[];
+  /**
+   * TODAS las cuentas bancarias listadas en el contrato (campo AUXILIAR — no
+   * tiene columna propia). La extracción principal (Opus) la llena leyendo
+   * todo el documento, así que es la fuente confiable de cuentas aunque el
+   * brief (Fase 1) falle. El servidor la reconcilia con la cuenta primaria de
+   * `shared_fields` y materializa las cuentas 2 y 3 como prefill de los campos
+   * manuales (ver `reconcileBankAccounts`). La plantilla soporta máximo 3.
+   */
+  bank_accounts?: ContractBriefBankAccount[];
+  /**
+   * Condición de crédito + plazo del contrato (campo AUXILIAR — alimenta los
+   * campos manuales cond_credito (col AP) y plazo (col AQ)). La IA lo extrae de
+   * la sección de forma de pago / términos comerciales.
+   */
+  payment_terms?: PaymentTerms | null;
+}
+
+/**
+ * Términos de pago globales del contrato. Alimentan dos columnas manuales:
+ *   - cond_credito (AP): "1"=CONTADO, "2"=CRÉDITO, "3"=PREPAGO.
+ *   - plazo (AQ): días de crédito o descripción del prepago requerido.
+ */
+export interface PaymentTerms {
+  /** "CONTADO" | "CREDITO" | "PREPAGO" — texto crudo, el server lo mapea a 1/2/3. */
+  condition: string | null;
+  /** Días de crédito si aplica (ej. 30). null si no es a crédito. */
+  term_days: number | null;
+  /** Detalle del plazo/prepago en texto (ej. "prepago 14-oct para Navidad"). */
+  term_note: string | null;
 }
 
 export interface ValidationResult {

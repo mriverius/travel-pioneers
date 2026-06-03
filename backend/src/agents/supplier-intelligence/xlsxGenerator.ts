@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import * as XLSX from "xlsx";
 import type { WorkBook, WorkSheet } from "xlsx";
 import type { ContractRow, ManualFields, SharedFields, TipoUnidad } from "./types.js";
-import { isFoodBeverageProduct } from "./validators.js";
+import { isFoodBeverageProduct, normalizeCurrency } from "./validators.js";
 import {
   CATALOG_PREFILL_COL,
   DATE_ROW_FIELDS,
@@ -604,6 +604,18 @@ export function generateContractXlsx(
     for (const [col, fixed] of Object.entries(TIPO_TARIFA_FIXED)) {
       const m = tarifaManual[col]?.trim();
       writeCell(dataSheet, col, xlsxRow, m === "1" || m === "2" ? m : fixed);
+    }
+
+    // Guardrail de MONEDA (cols AT / AW / AZ): siempre USD (dólares) o LOC
+    // (colones), nunca "CRC", "dólares", "$", etc. Cubre todas las rutas
+    // (IA, prefill del brief, edición manual del usuario en Step 2).
+    {
+      const moneda1 = normalizeCurrency(input.shared_fields.tipo_moneda);
+      if (moneda1) writeCell(dataSheet, SHARED_COL.tipo_moneda!, xlsxRow, moneda1);
+      const moneda2 = normalizeCurrency(input.manual_fields?.moneda_2);
+      if (moneda2) writeCell(dataSheet, MANUAL_COL.moneda_2, xlsxRow, moneda2);
+      const moneda3 = normalizeCurrency(input.manual_fields?.moneda_3);
+      if (moneda3) writeCell(dataSheet, MANUAL_COL.moneda_3, xlsxRow, moneda3);
     }
 
     // Las notas (`shared_fields.notes`) se escriben a la columna BA por

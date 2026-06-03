@@ -228,8 +228,10 @@ REGLAS POR CAMPO (shared_fields)
     original con espacios (ej: "CR39 0151 0221 0026 0000 48").
 
 12. "tipo_unidad" (shared, normalmente igual para todo el contrato):
-    - "N" si la tarifa es POR NOCHE (hospedajes, lodges, B&B).
-    - "S" si es POR SERVICIO (tours, transfers, comidas).
+    - "N" si la tarifa es POR NOCHE (hospedajes, lodges, B&B donde el
+      precio es el costo de UNA noche).
+    - "S" si es POR SERVICIO (tours, transfers, comidas) o si la tarifa
+      es un PAQUETE de varias noches vendido como bloque (ver regla 15c).
 
 13. "tipo_servicio" (shared): debe ser EXACTAMENTE uno de los códigos
     listados al final del prompt. HO=hotel, TO=tour, TR=transfer,
@@ -270,9 +272,20 @@ REGLAS POR CAMPO (rows[])
     aplica un fallback heurístico si shared+row son ambos null, pero la
     extracción debe intentar siempre identificar el código correcto.
 
-15c. "tipo_unidad" (POR FILA — Bug #5): "N" si la tarifa de esta fila es
-    por noche (hospedajes), "S" si es por servicio (tours, transfers,
-    comidas, rent a car por día). Si coincide con el shared, devolver null.
+15c. "tipo_unidad" (POR FILA — Bug #5):
+    - "N" = POR NOCHE: el precio es el costo de UNA noche por habitación
+      (hospedajes estándar). Multiplicás noches × tarifa para el total.
+    - "S" = POR SERVICIO / PAQUETE: el precio NO es por noche, sino el
+      total cerrado del servicio o del paquete completo.
+    CASO PAQUETE (¡IMPORTANTE!): cuando el contrato vende un PAQUETE de
+    varias noches a un precio fijo por habitación (ej. encabezado "2N/3D"
+    = 2 noches / 3 días, y el neto $1,987.30 YA es el total por las 2
+    noches para esa habitación doble), el tipo_unidad es "S", NO "N" —
+    aunque sea una habitación de hotel. La señal es que el precio cubre
+    toda la estadía / el paquete, no una sola noche. Lo mismo para
+    "honeymoon package", "3 nights all inclusive", etc.
+    Si la tarifa es claramente por noche → "N". Si coincide con el shared,
+    devolver null.
 
 15d. "codigo_servicio" (POR FILA, columna N — Bug #2): código corto en
     MAYÚSCULAS DERIVADO DEL NOMBRE DEL PRODUCTO de ESTA fila. NO copies

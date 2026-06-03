@@ -340,6 +340,42 @@ export function isFoodBeverageProduct(product: string | null): boolean {
 }
 
 /**
+ * Normaliza el código de moneda al convenio del maestro Utopía:
+ *   - dólares → "USD"
+ *   - colones → "LOC" (local)
+ *   - cualquier otra (EUR, MXN, …) → el código en mayúsculas tal cual.
+ * `null` si no hay valor. Se usa para MONEDA 1/2/3 (cols AT/AW/AZ) tanto en la
+ * reconciliación de cuentas (service) como en el guardrail final del xlsx.
+ */
+export function normalizeCurrency(v: string | null | undefined): string | null {
+  const raw = (v ?? "").trim();
+  if (raw === "") return null;
+  const s = raw.toLowerCase();
+  if (
+    s.includes("usd") ||
+    s.includes("dol") ||
+    s.includes("dól") ||
+    s.includes("$") ||
+    s.includes("united states") ||
+    s.includes("american")
+  ) {
+    return "USD";
+  }
+  if (
+    s.includes("crc") ||
+    s === "loc" ||
+    s.includes("colon") ||
+    s.includes("colón") ||
+    s.includes("₡") ||
+    s.includes("costarric") ||
+    s.includes("local")
+  ) {
+    return "LOC";
+  }
+  return raw.toUpperCase();
+}
+
+/**
  * Limpia una fila en sitio: si la categoría no pertenece al tipo_servicio
  * efectivo (override por fila > shared), devolvemos la fila con
  * categoria=null y un mensaje de warning. No mutamos — devolvemos una

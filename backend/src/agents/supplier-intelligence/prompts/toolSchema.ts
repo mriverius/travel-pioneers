@@ -262,8 +262,12 @@ const rowSchema = {
       type: ["string", "null"],
       enum: [...TIPO_UNIDAD_CODES, null],
       description:
-        "Tipo de unidad POR FILA (columna P). 'N' por noche (hospedajes); " +
-        "'S' por servicio (tours, transfers, comidas, rent a car por día). " +
+        "Tipo de unidad POR FILA (columna P). 'N' = POR NOCHE: el precio es " +
+        "el costo de UNA noche por habitación (hospedajes estándar). 'S' = " +
+        "POR SERVICIO o PAQUETE: tours, transfers, comidas, rent a car por " +
+        "día, O una tarifa de hospedaje que es un PAQUETE de varias noches a " +
+        "precio fijo por habitación (ej. encabezado '2N/3D' donde el neto ya " +
+        "es el total por las 2 noches, no por noche) → 'S' aunque sea hotel. " +
         "Si coincide con el shared, devolver null.",
     },
     codigo_servicio: {
@@ -477,6 +481,74 @@ export const EXTRAER_DATOS_CONTRATO_TOOL: Tool = {
           "Generar TODAS las combinaciones explícitas — no resumir.",
         items: rowSchema,
       },
+      bank_accounts: {
+        type: "array",
+        description:
+          "TODAS las cuentas bancarias del contrato. Es MUY común que haya " +
+          "varias (USD y CRC, banco principal y secundario, por monto de " +
+          "transacción). Capturá CADA UNA por separado — NO resumas ni " +
+          "devuelvas solo la primera. Incluí también la que pusiste en " +
+          "shared_fields (numero_cuenta/banco). Ejemplo: un contrato con " +
+          "cuenta BCR-USD, BCR-CRC, LAFISE-USD y LAFISE-CRC son 4 entradas.",
+        items: {
+          type: "object",
+          properties: {
+            bank: {
+              type: ["string", "null"],
+              description: "Nombre del banco. Ej: 'Banco de Costa Rica (BCR)'.",
+            },
+            account_number: {
+              type: ["string", "null"],
+              description:
+                "IBAN o número de cuenta tal cual aparece. Ej: " +
+                "'CR20015201001050148756'.",
+            },
+            currency: {
+              type: ["string", "null"],
+              description: "Moneda de la cuenta: USD, CRC, EUR, etc.",
+            },
+            note: {
+              type: ["string", "null"],
+              description:
+                "Condición de uso si la hay, ej. 'para transacciones < $49k' " +
+                "o 'cuenta principal'.",
+            },
+          },
+          required: ["bank", "account_number", "currency"],
+          additionalProperties: false,
+        },
+      },
+      payment_terms: {
+        type: "object",
+        description:
+          "Términos de pago / condición de crédito GLOBAL del contrato. " +
+          "Buscar en la sección de forma de pago / términos comerciales.",
+        properties: {
+          condition: {
+            type: ["string", "null"],
+            description:
+              "Una de: 'CONTADO' (pago inmediato / sin crédito), 'CREDITO' " +
+              "(el proveedor da plazo de crédito, ej. 30 días neto), o " +
+              "'PREPAGO' (hay que prepagar antes de la llegada / por " +
+              "anticipado). null si el contrato no lo especifica.",
+          },
+          term_days: {
+            type: ["number", "null"],
+            description:
+              "Días de crédito cuando condition='CREDITO' (ej. 30, 15). " +
+              "null si no aplica.",
+          },
+          term_note: {
+            type: ["string", "null"],
+            description:
+              "Detalle del plazo o del prepago requerido en texto corto " +
+              "(ej. 'prepago al confirmar', '50% al reservar, 50% a 30 días'). " +
+              "null si no hay detalle.",
+          },
+        },
+        required: ["condition", "term_days", "term_note"],
+        additionalProperties: false,
+      },
       confianza: {
         type: "string",
         enum: ["alta", "media", "baja"],
@@ -516,6 +588,8 @@ export const EXTRAER_DATOS_CONTRATO_TOOL: Tool = {
     required: [
       "shared_fields",
       "rows",
+      "bank_accounts",
+      "payment_terms",
       "confianza",
       "campos_faltantes",
       "paginas_origen_shared",

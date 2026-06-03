@@ -589,6 +589,10 @@ export interface ManualBankPrefill {
   cuenta_bancaria_3: string | null;
   banco_3: string | null;
   moneda_3: string | null;
+  /** cond_credito (col AP): "1"=CONTADO, "2"=CRÉDITO, "3"=PREPAGO. */
+  cond_credito: string | null;
+  /** plazo (col AQ): días de crédito o detalle del prepago. */
+  plazo: string | null;
 }
 
 export interface ExtractContractResponse {
