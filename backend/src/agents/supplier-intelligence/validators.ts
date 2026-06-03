@@ -551,19 +551,54 @@ function buildOccupancyRow(
  * Mantiene `paginas_origen_rows` en paralelo: las filas derivadas heredan el
  * origen de la base con `ocupacion: "calculado"` para trazabilidad.
  */
+/** Clave de agrupación product × season (case/space-insensitive). */
+function occupancyGroupKey(row: ContractRow): string {
+  const product = (row.product_name ?? "").trim().toLowerCase();
+  const season = (row.season_name ?? "").trim().toLowerCase();
+  return `${product}__${season}`;
+}
+
+const DOUBLE_OCCUPANCIES = new Set(["DBL", "DOBLE"]);
+
 function expandOccupancy(
   extraction: ExtractedContract,
   warnings: string[],
 ): ExtractedContract {
+  // PASO 1 — elegir UNA sola fila ancla por grupo product × season desde la
+  // que se expande a TPL/QDP. Antes expandíamos por CADA fila base (SGL y
+  // DBL), lo que duplicaba TPL/QDP. La ancla correcta es la DOBLE (triple =
+  // doble + 1 persona, cuádruple = doble + 2); si no hay DBL en el grupo,
+  // usamos la primera fila base expandible como respaldo.
+  const anchorByGroup = new Map<string, number>();
+  extraction.rows.forEach((row, i) => {
+    const addl = parseAmount(row.tarifa_persona_adicional);
+    const occ = (row.ocupacion ?? "").trim().toUpperCase();
+    if (addl === null || addl <= 0 || !BASE_OCCUPANCIES.has(occ)) return;
+
+    const key = occupancyGroupKey(row);
+    const current = anchorByGroup.get(key);
+    if (current === undefined) {
+      anchorByGroup.set(key, i);
+      return;
+    }
+    // Si ya hay candidata pero NO es doble y ésta sí, preferimos la doble.
+    const currentRow = extraction.rows[current]!;
+    const currentIsDouble = DOUBLE_OCCUPANCIES.has(
+      (currentRow.ocupacion ?? "").trim().toUpperCase(),
+    );
+    if (!currentIsDouble && DOUBLE_OCCUPANCIES.has(occ)) {
+      anchorByGroup.set(key, i);
+    }
+  });
+
+  // PASO 2 — reconstruir filas: cada base limpia su campo auxiliar; solo la
+  // fila ancla de cada grupo materializa TPL + QDP justo después de sí misma.
   const newRows: ContractRow[] = [];
   const newPages: Record<string, SourcePage>[] = [];
   let expanded = 0;
 
   extraction.rows.forEach((row, i) => {
     const pages = extraction.paginas_origen_rows[i] ?? {};
-    const addl = parseAmount(row.tarifa_persona_adicional);
-    const occ = (row.ocupacion ?? "").trim().toUpperCase();
-    const canExpand = addl !== null && addl > 0 && BASE_OCCUPANCIES.has(occ);
 
     // Fila base: limpiamos el campo auxiliar (ya consumido).
     newRows.push(
@@ -573,7 +608,10 @@ function expandOccupancy(
     );
     newPages.push(pages);
 
-    if (!canExpand || addl === null) return;
+    const isAnchor = anchorByGroup.get(occupancyGroupKey(row)) === i;
+    if (!isAnchor) return;
+    const addl = parseAmount(row.tarifa_persona_adicional);
+    if (addl === null || addl <= 0) return;
 
     for (const target of ["TPL", "QDP"] as const) {
       newRows.push(buildOccupancyRow(row, target, addl));
@@ -587,8 +625,8 @@ function expandOccupancy(
   warnings.push(
     `Se generaron ${expanded} fila(s) de ocupación triple (TPL) y ` +
       `cuádruple (QDP) calculadas a partir de la tarifa por persona ` +
-      `adicional (base + 1× para TPL, base + 2× para QDP). Revisá los ` +
-      `montos en Step 2.`,
+      `adicional (base doble + 1× para TPL, + 2× para QDP), una sola vez ` +
+      `por producto × temporada. Revisá los montos en Step 2.`,
   );
 
   return { ...extraction, rows: newRows, paginas_origen_rows: newPages };
