@@ -357,15 +357,21 @@ const rowSchema = {
       description:
         "Precio NETO con IVA incluido (tarifa que el hotel da a la " +
         "agencia, la más baja). Número sin símbolo de moneda (ej: '70', " +
-        "'276.75'). SIEMPRE debe ser ≤ precio_rack_iva.",
+        "'276.75'). SIEMPRE ≤ precio_rack_iva. Si el contrato da SOLO el " +
+        "rack + un % de comisión (sin neto explícito), CALCULALO: " +
+        "neto = rack × (1 − comisión/100). Ej: rack con IVA 155.94, " +
+        "comisión 10% → neto '140.35'. ⚠️ Si NO estás seguro del valor, " +
+        "dejá null (no inventes) — el precio es el dato más sensible.",
     },
     precio_rack_iva: {
       type: ["string", "null"],
       description:
         "Precio RACK/público con IVA incluido (tarifa al público, la más " +
         "alta). Misma combinación que precios_neto_iva y SIEMPRE ≥ a ella " +
-        "(ej. neto '70' → rack '100'). Si el contrato no distingue " +
-        "neto/rack, copiar el mismo valor.",
+        "(ej. neto '70' → rack '100'). Si el IVA NO está incluido en el " +
+        "documento (ej. '13% IVA no incluido'), SUMALO. Si el contrato no " +
+        "distingue neto/rack y no hay comisión, copiar el mismo valor. " +
+        "⚠️ Si NO estás seguro del valor, dejá null (no inventes).",
     },
     porcentaje_comision: {
       type: ["string", "null"],

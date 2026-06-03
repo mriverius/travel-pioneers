@@ -390,9 +390,38 @@ REGLAS POR CAMPO (rows[])
       "100". Si en el documento aparecen invertidos, corregilos.
     - porcentaje_comision: SOLO el número, sin "%" (ej. "25", no "25%").
       Si viene como fracción ("0.25") convertir a "25".
-    - Si el contrato dice "NETAS, NO COMISIONABLES" → porcentaje_comision = "0".
+
+    - IVA: si el contrato dice que el impuesto NO está incluido (ej. "13%
+      IVA no incluido", "precios + IVA"), SUMÁ el IVA a TODOS los precios
+      (neto Y rack). Si ya está incluido, dejá el valor tal cual.
+
+    - DERIVAR EL NETO DESDE LA COMISIÓN (caso frecuente): cuando el contrato
+      da SOLO el precio RACK/público + un % de comisión, pero NO da el neto
+      explícito, CALCULÁ vos el neto:
+          neto = rack × (1 − comisión/100)
+      Ejemplo real: tarifa rack $138 por persona, 10% de comisión, 13% IVA
+      no incluido →
+          rack_con_iva = 138 × 1.13 = 155.94
+          neto_con_iva = 155.94 × (1 − 0.10) = 140.35
+      (sumar IVA antes o después de la comisión da el mismo resultado).
+      Devolver: precio_rack_iva "155.94", precios_neto_iva "140.35",
+      porcentaje_comision "10".
+
+    - Si el contrato da neto Y rack EXPLÍCITOS, usalos tal cual — NO
+      recalcules nada.
+    - Si dice "NETAS, NO COMISIONABLES" / "no comisionable" →
+      porcentaje_comision = "0" y neto = rack (mismo valor).
+    - Si NO hay comisión ni neto explícito y solo hay un precio → copiar el
+      mismo valor a neto y rack.
     - Si no distingue weekday/weekend → copiar valor estándar a _fds.
-    - Si no distingue neto/rack → copiar el mismo a ambos.
+
+    - ⚠️ SEGURIDAD — los precios son el dato MÁS sensible del contrato:
+      si NO estás 100% seguro de un valor de precio (ambiguo, ilegible, no
+      sabés si incluye IVA, no distinguís a qué producto/temporada
+      corresponde, etc.), dejá ese campo en null y agregalo a
+      campos_faltantes. NUNCA inventes, adivines ni aproximes un precio.
+      Es preferible un campo vacío para revisión humana que un número
+      incorrecto.
 
 21. Políticas: resumir a 1-2 oraciones cada una. Si varían por temporada,
     poner la política de ESA temporada (la fila a la que pertenece). Si no
