@@ -6,15 +6,23 @@ import type {
 } from "@anthropic-ai/sdk/resources/messages.js";
 import ApiError from "../../utils/ApiError.js";
 import logger from "../../config/logger.js";
+import type { Message } from "@anthropic-ai/sdk/resources/messages.js";
 import { getAnthropicClient } from "./anthropicClient.js";
 import {
+  CONTRACT_BRIEF_INSTRUCTION,
   EXTRAER_DATOS_CONTRATO_TOOL,
   EXTRAER_DATOS_CONTRATO_TOOL_NAME,
+  REGISTRAR_BRIEF_CONTRATO_TOOL,
+  REGISTRAR_BRIEF_CONTRATO_TOOL_NAME,
+  renderContractBriefBlock,
   SUPPLIER_INTELLIGENCE_SYSTEM_PROMPT,
 } from "./prompts/index.js";
 import { validateExtraction } from "./validators.js";
 import type {
   Confianza,
+  ContractBrief,
+  ContractBriefAdditionalPerson,
+  ContractBriefBankAccount,
   ContractRow,
   ExtractedContract,
   PreparedDocument,
@@ -42,6 +50,21 @@ import type {
 export const SUPPLIER_INTELLIGENCE_MODEL = "claude-opus-4-7";
 
 /**
+ * Modelo de la pasada de BRIEF (Fase 1). Usamos Sonnet 4.6 (no Opus) a
+ * propósito: el brief es una tarea acotada (reglas globales + inventario, sin
+ * filas) que Sonnet resuelve con fidelidad de sobra, y es ~2x más rápido y
+ * ~40% más barato que Opus. Eso recorta la latencia agregada del flujo
+ * multi-pasada (que estaba haciendo timeout el front) sin sacrificar la
+ * calidad de la extracción principal, que sigue en Opus.
+ *
+ * Trade-off consciente: al usar un modelo distinto en cada pasada, el cache de
+ * prompt del documento NO se comparte entre ellas (el cache es por-modelo), así
+ * que retiramos el cache_control — el ahorro de costo del cache no aplica acá y
+ * la prioridad es latencia. ID verificado: NO existe `claude-sonnet-4-7`.
+ */
+export const SUPPLIER_INTELLIGENCE_BRIEF_MODEL = "claude-sonnet-4-6";
+
+/**
  * Pricing oficial de Claude Opus 4.7 (USD por millón de tokens).
  *
  * Fuente: https://www.anthropic.com/news/claude-opus-4-7 (abr 2026).
@@ -49,19 +72,85 @@ export const SUPPLIER_INTELLIGENCE_MODEL = "claude-opus-4-7";
  * cambia precios este es el único lugar donde editar — el cómputo de
  * `cost_usd` por extracción se hace abajo en `extractContract`.
  *
- * Nota: NO contemplamos prompt caching todavía. Cuando lo activemos, habrá
- * que distinguir entre cache_write / cache_hit (tarifas distintas) — por
- * ahora todo el input cuenta a precio plano.
+ * Pricing por modelo (USD por millón de tokens). El flujo usa DOS modelos
+ * (Sonnet 4.6 para el brief, Opus 4.7 para la extracción), así que el costo se
+ * calcula por-pasada con la tarifa del modelo correspondiente. Incluye los
+ * buckets de cache por si Anthropic los reporta, aunque hoy no activamos
+ * caching (ver `SUPPLIER_INTELLIGENCE_BRIEF_MODEL`).
+ *
+ * Fuente: platform.claude.com/docs/about-claude/pricing (jun 2026).
  */
-const PRICE_INPUT_PER_MTOK_USD = 5;
-const PRICE_OUTPUT_PER_MTOK_USD = 25;
+interface ModelPrices {
+  input: number;
+  output: number;
+  cacheWrite: number;
+  cacheRead: number;
+}
 
-function computeCostUsd(inputTokens: number, outputTokens: number): number {
-  const inputCost = (inputTokens / 1_000_000) * PRICE_INPUT_PER_MTOK_USD;
-  const outputCost = (outputTokens / 1_000_000) * PRICE_OUTPUT_PER_MTOK_USD;
-  // 6 decimales de precisión es overkill para mostrar pero útil para
-  // reportes agregados (sumar muchas extracciones baratas sin redondeo).
-  return Number((inputCost + outputCost).toFixed(6));
+const MODEL_PRICES: Record<string, ModelPrices> = {
+  "claude-opus-4-7": { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5 },
+  "claude-sonnet-4-6": { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.3 },
+};
+
+// Fallback a Opus (el más caro) si llegara un modelo desconocido — preferimos
+// sobre-estimar el costo que sub-reportarlo.
+const FALLBACK_PRICES: ModelPrices = MODEL_PRICES["claude-opus-4-7"]!;
+
+/**
+ * Telemetría de tokens normalizada a partir de un `Message` de Anthropic.
+ * `inputTokens` agrega todos los buckets de input (plano + cache write +
+ * cache read) para que el badge "Input" del historial muestre el total real
+ * procesado; `costUsd` se calcula con la tarifa del modelo de esta pasada.
+ */
+interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheWriteTokens: number;
+  cacheReadTokens: number;
+  costUsd: number;
+}
+
+function usageFromMessage(msg: Message, model: string): TokenUsage {
+  const prices = MODEL_PRICES[model] ?? FALLBACK_PRICES;
+  const u = msg.usage;
+  const plainInput = u?.input_tokens ?? 0;
+  const cacheWrite = u?.cache_creation_input_tokens ?? 0;
+  const cacheRead = u?.cache_read_input_tokens ?? 0;
+  const output = u?.output_tokens ?? 0;
+  const costUsd =
+    (plainInput / 1_000_000) * prices.input +
+    (cacheWrite / 1_000_000) * prices.cacheWrite +
+    (cacheRead / 1_000_000) * prices.cacheRead +
+    (output / 1_000_000) * prices.output;
+  return {
+    inputTokens: plainInput + cacheWrite + cacheRead,
+    outputTokens: output,
+    cacheWriteTokens: cacheWrite,
+    cacheReadTokens: cacheRead,
+    costUsd: Number(costUsd.toFixed(6)),
+  };
+}
+
+/** Suma la telemetría de varias pasadas (brief + extracción principal). */
+function sumUsage(parts: TokenUsage[]): TokenUsage {
+  const acc = parts.reduce(
+    (a, p) => ({
+      inputTokens: a.inputTokens + p.inputTokens,
+      outputTokens: a.outputTokens + p.outputTokens,
+      cacheWriteTokens: a.cacheWriteTokens + p.cacheWriteTokens,
+      cacheReadTokens: a.cacheReadTokens + p.cacheReadTokens,
+      costUsd: a.costUsd + p.costUsd,
+    }),
+    {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheReadTokens: 0,
+      costUsd: 0,
+    },
+  );
+  acc.costUsd = Number(acc.costUsd.toFixed(6));
+  return acc;
 }
 
 /**
@@ -185,10 +274,22 @@ export type PreparedDocumentInput = PreparedDocument & {
  * solo contrato lógico (caso típico: contrato principal + anexo + lista
  * de precios).
  */
+interface BuildUserMessageOpts {
+  context?: ExtractionContext;
+  /**
+   * "brief"   → Fase 1: pide solo el brief (reglas globales + inventario).
+   * "extract" → Fase 2: pide todas las filas, inyectando el brief ya extraído.
+   */
+  mode: "brief" | "extract";
+  /** Brief ya extraído — solo se usa (y se requiere) en mode "extract". */
+  brief?: ContractBrief | null;
+}
+
 function buildUserMessage(
   docs: PreparedDocumentInput[],
-  ctx?: ExtractionContext,
+  opts: BuildUserMessageOpts,
 ): MessageParam {
+  const { context: ctx, mode, brief } = opts;
   const content: ContentBlockParam[] = [];
 
   const contextBlock = buildContextBlock(ctx);
@@ -243,8 +344,7 @@ function buildUserMessage(
         },
       });
     } else {
-      const format =
-        doc.sourceFormat === "docx" ? "Word" : "Excel";
+      const format = doc.sourceFormat === "docx" ? "Word" : "Excel";
       content.push({
         type: "text",
         text:
@@ -254,16 +354,29 @@ function buildUserMessage(
     }
   });
 
+  if (mode === "brief") {
+    content.push({ type: "text", text: CONTRACT_BRIEF_INSTRUCTION });
+    return { role: "user", content };
+  }
+
+  // mode === "extract": inyectamos el brief (si lo tenemos) como contexto de
+  // prioridad alta ANTES de la instrucción final.
+  if (brief) {
+    content.push({ type: "text", text: renderContractBriefBlock(brief) });
+  }
+
   const closing =
     docs.length === 1
       ? "Extrae los datos del contrato adjunto usando el tool " +
         `"${EXTRAER_DATOS_CONTRATO_TOOL_NAME}". Genera TODAS las ` +
         "combinaciones product × season en `rows` — no resumas a una sola " +
-        "fila. Respeta las reglas del system prompt."
+        "fila. Respeta las reglas del system prompt y el CONTRACT BRIEF de " +
+        "arriba (impuestos, persona adicional, bancos, inventario)."
       : "Extrae los datos consolidados del conjunto de documentos usando el " +
         `tool "${EXTRAER_DATOS_CONTRATO_TOOL_NAME}". Genera TODAS las ` +
         "combinaciones product × season en `rows` — no resumas a una sola " +
-        "fila. Respeta las reglas del system prompt.";
+        "fila. Respeta las reglas del system prompt y el CONTRACT BRIEF de " +
+        "arriba (impuestos, persona adicional, bancos, inventario).";
   content.push({ type: "text", text: closing });
 
   return { role: "user", content };
@@ -410,6 +523,264 @@ function coerceExtraction(input: unknown): ExtractedContract {
   };
 }
 
+/* -------------------------------------------------------------------------- */
+/*                     Contract Brief (Fase 1) — coerce + call                */
+/* -------------------------------------------------------------------------- */
+
+const boolOrNull = (v: unknown): boolean | null =>
+  typeof v === "boolean" ? v : null;
+
+const numberOrNull = (v: unknown): number | null => {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v.replace(/[^0-9.,-]/g, "").replace(",", "."));
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+};
+
+const stringArray = (v: unknown): string[] =>
+  Array.isArray(v)
+    ? v.filter((x): x is string => typeof x === "string" && x.trim() !== "")
+    : [];
+
+function coerceBankAccounts(v: unknown): ContractBriefBankAccount[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .filter((x): x is Record<string, unknown> => !!x && typeof x === "object")
+    .map((r) => ({
+      bank: stringOrNull(r.bank),
+      account_number: stringOrNull(r.account_number),
+      currency: stringOrNull(r.currency),
+      swift: stringOrNull(r.swift),
+      note: stringOrNull(r.note),
+    }));
+}
+
+function coerceAdditionalPerson(
+  v: unknown,
+): ContractBriefAdditionalPerson[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .filter((x): x is Record<string, unknown> => !!x && typeof x === "object")
+    .map((r) => ({
+      scope: stringOrNull(r.scope),
+      applies_to: stringOrNull(r.applies_to),
+      rack: numericAsString(r.rack),
+      net: numericAsString(r.net),
+    }));
+}
+
+function coerceBrief(input: unknown): ContractBrief {
+  const r =
+    input && typeof input === "object"
+      ? (input as Record<string, unknown>)
+      : {};
+  return {
+    prices_include_tax: boolOrNull(r.prices_include_tax),
+    tax_rate_pct: numberOrNull(r.tax_rate_pct),
+    tax_note: stringOrNull(r.tax_note),
+    commission_summary: stringOrNull(r.commission_summary),
+    meal_plan_note: stringOrNull(r.meal_plan_note),
+    bank_accounts: coerceBankAccounts(r.bank_accounts),
+    additional_person: coerceAdditionalPerson(r.additional_person),
+    special_periods_note: stringOrNull(r.special_periods_note),
+    product_categories: stringArray(r.product_categories),
+    seasons: stringArray(r.seasons),
+    sections: stringArray(r.sections),
+    expected_row_estimate: numberOrNull(r.expected_row_estimate),
+    notes: stringOrNull(r.notes),
+  };
+}
+
+/**
+ * Cap de output del brief. El brief es chico (reglas + inventario), pero los
+ * arrays de bancos / persona adicional / inventario pueden sumar — 8k da
+ * margen de sobra sin permitir que se desboque.
+ */
+const BRIEF_MAX_TOKENS = 8_000;
+
+interface BriefResult {
+  brief: ContractBrief;
+  usage: TokenUsage;
+}
+
+/**
+ * Fase 1: pasada de BRIEF. Llamada chica y focalizada que captura las reglas
+ * globales + inventario del contrato. Comparte system + tools + documento con
+ * la pasada principal (mismo prefijo) para reusar el cache del documento.
+ *
+ * Best-effort: si Anthropic falla o devuelve algo raro, NO abortamos la
+ * extracción — devolvemos `null` y la pasada principal corre como antes (sin
+ * inyección de brief). El brief mejora la fidelidad; no es un bloqueante.
+ */
+async function extractContractBrief(
+  docs: PreparedDocumentInput[],
+  requestId: string | undefined,
+  context: ExtractionContext | undefined,
+): Promise<BriefResult | null> {
+  const client = getAnthropicClient();
+  let response: Message;
+  try {
+    response = await client.messages
+      .stream({
+        model: SUPPLIER_INTELLIGENCE_BRIEF_MODEL,
+        max_tokens: BRIEF_MAX_TOKENS,
+        system: SUPPLIER_INTELLIGENCE_SYSTEM_PROMPT,
+        // Solo el tool del brief: sin caching cross-modelo no hay razón para
+        // arrastrar el schema (grande) del tool de extracción en esta pasada.
+        tools: [REGISTRAR_BRIEF_CONTRATO_TOOL],
+        tool_choice: {
+          type: "tool",
+          name: REGISTRAR_BRIEF_CONTRATO_TOOL_NAME,
+        },
+        messages: [buildUserMessage(docs, { context, mode: "brief" })],
+      })
+      .finalMessage();
+  } catch (err) {
+    logger.warn("Contract brief pass failed — continuing without brief", {
+      requestId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+
+  const usage = usageFromMessage(response, SUPPLIER_INTELLIGENCE_BRIEF_MODEL);
+  logger.info("Contract brief completed", {
+    requestId,
+    model: SUPPLIER_INTELLIGENCE_BRIEF_MODEL,
+    stopReason: response.stop_reason,
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+  });
+
+  const toolUse = response.content.find(
+    (block): block is ToolUseBlock =>
+      block.type === "tool_use" &&
+      block.name === REGISTRAR_BRIEF_CONTRATO_TOOL_NAME,
+  );
+  if (!toolUse) {
+    logger.warn("Contract brief returned no tool_use — continuing", {
+      requestId,
+      stopReason: response.stop_reason,
+    });
+    // Aun sin brief usable, devolvemos el usage para no perder el costo
+    // (y el cache write ya quedó hecho, lo aprovechará la pasada principal).
+    return { brief: coerceBrief({}), usage };
+  }
+
+  return { brief: coerceBrief(toolUse.input), usage };
+}
+
+/**
+ * Prefill de cuentas bancarias 2 y 3 derivado del brief (Fase 1). La
+ * plantilla soporta 3 cuentas: la primaria vive en shared_fields
+ * (numero_cuenta / banco / tipo_moneda) y la 2da/3ra son campos "manuales"
+ * (cols AU-AZ). La extracción principal solía traer solo la primaria; el
+ * brief captura TODAS, así que reconciliamos acá y mandamos las extra al
+ * frontend para que pre-llene la tabla de Step 2.
+ */
+export interface ManualBankPrefill {
+  cuenta_bancaria_2: string | null;
+  banco_2: string | null;
+  moneda_2: string | null;
+  cuenta_bancaria_3: string | null;
+  banco_3: string | null;
+  moneda_3: string | null;
+}
+
+const cleanStr = (s: string | null | undefined): string | null => {
+  const t = (s ?? "").trim();
+  return t === "" ? null : t;
+};
+
+const normalizeAccountNumber = (s: string | null | undefined): string =>
+  (s ?? "").replace(/\s+/g, "").toLowerCase();
+
+/**
+ * Reconcilia las cuentas bancarias del brief con la cuenta primaria que trajo
+ * la extracción principal. Devuelve:
+ *   - `sharedPatch`: rellena numero_cuenta / banco / tipo_moneda primarios si
+ *     la extracción principal los dejó vacíos (usa la 1ra cuenta del brief).
+ *   - `manualPrefill`: cuentas 2 y 3 (las que NO son la primaria), listas para
+ *     pre-llenar los campos manuales de la UI. `null` si no hay extra.
+ */
+export function reconcileBankAccounts(
+  extraction: ExtractedContract,
+  brief: ContractBrief | null,
+): { sharedPatch: Partial<ExtractedContract["shared_fields"]>; manualPrefill: ManualBankPrefill | null } {
+  const raw = (brief?.bank_accounts ?? [])
+    .map((a) => ({
+      bank: cleanStr(a.bank),
+      num: cleanStr(a.account_number),
+      cur: cleanStr(a.currency),
+    }))
+    .filter((a) => a.num !== null || a.bank !== null);
+
+  if (raw.length === 0) return { sharedPatch: {}, manualPrefill: null };
+
+  // Dedupe por número de cuenta normalizado (o por banco si no hay número).
+  const seen = new Set<string>();
+  const deduped: typeof raw = [];
+  for (const a of raw) {
+    const key = a.num ? `n:${normalizeAccountNumber(a.num)}` : `b:${(a.bank ?? "").toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(a);
+  }
+
+  const sf = extraction.shared_fields;
+  const sharedPatch: Partial<ExtractedContract["shared_fields"]> = {};
+  let primaryNum = cleanStr(sf.numero_cuenta);
+  let pool = deduped;
+
+  if (!primaryNum) {
+    // La extracción principal no trajo cuenta primaria → promovemos la 1ra
+    // del brief a shared_fields.
+    const a0 = deduped[0]!;
+    sharedPatch.numero_cuenta = a0.num;
+    if (!cleanStr(sf.banco)) sharedPatch.banco = a0.bank;
+    if (!cleanStr(sf.tipo_moneda) && a0.cur) sharedPatch.tipo_moneda = a0.cur;
+    primaryNum = a0.num;
+    pool = deduped.slice(1);
+  } else {
+    // Quitamos del pool la cuenta que coincide con la primaria ya extraída.
+    const pn = normalizeAccountNumber(primaryNum);
+    pool = deduped.filter((a) => normalizeAccountNumber(a.num) !== pn);
+  }
+
+  if (pool.length === 0) return { sharedPatch, manualPrefill: null };
+
+  const a2 = pool[0];
+  const a3 = pool[1];
+  const manualPrefill: ManualBankPrefill = {
+    cuenta_bancaria_2: a2?.num ?? null,
+    banco_2: a2?.bank ?? null,
+    moneda_2: a2?.cur ?? null,
+    cuenta_bancaria_3: a3?.num ?? null,
+    banco_3: a3?.bank ?? null,
+    moneda_3: a3?.cur ?? null,
+  };
+
+  // Overflow: la plantilla solo tiene 3 slots (primaria + 2 manuales). Si el
+  // contrato lista 4+ cuentas, las extra no caben — las anexamos a `notes`
+  // (col BA) para no perderlas. El usuario decide qué hacer con ellas.
+  const overflow = pool.slice(2);
+  if (overflow.length > 0) {
+    const lines = overflow.map((a) => {
+      const parts = [a.bank, a.num, a.cur].filter((x): x is string => !!x);
+      return `  - ${parts.join(" · ")}`;
+    });
+    const note =
+      `Cuentas bancarias adicionales (no caben en la plantilla, ` +
+      `máximo 3):\n${lines.join("\n")}`;
+    const existing = cleanStr(extraction.shared_fields.notes);
+    sharedPatch.notes = existing ? `${existing}\n\n${note}` : note;
+  }
+
+  return { sharedPatch, manualPrefill };
+}
+
 export interface ExtractionResult {
   data: ExtractedContract;
   validation: ValidationResult;
@@ -424,6 +795,18 @@ export interface ExtractionResult {
     outputTokens: number;
     costUsd: number;
   };
+  /**
+   * Brief del contrato (Fase 1) si la pasada de pre-análisis corrió bien.
+   * `null` cuando no se pudo extraer (falla upstream) — la extracción sigue
+   * siendo válida, solo sin el contexto de reglas globales.
+   */
+  brief: ContractBrief | null;
+  /**
+   * Cuentas bancarias 2 y 3 detectadas por el brief (la primaria ya va en
+   * `data.shared_fields`). El frontend las usa para pre-llenar los campos
+   * manuales de Step 2. `null` si el contrato tiene una sola cuenta.
+   */
+  manualPrefill: ManualBankPrefill | null;
 }
 
 /**
@@ -432,6 +815,12 @@ export interface ExtractionResult {
  * bundle as a single logical contract (see `buildUserMessage`). Maps SDK
  * errors to `ApiError` with spec-aligned status codes (502 for upstream
  * failures, 422 for a missing tool_use block).
+ *
+ * Flujo multi-pasada (Fase 1):
+ *   1. BRIEF — pasada chica que captura reglas globales + inventario. Escribe
+ *      el cache del documento. Best-effort (no bloquea si falla).
+ *   2. EXTRACCIÓN — pasada principal que genera todas las filas, inyectando el
+ *      brief como contexto de prioridad alta y leyendo el cache del documento.
  */
 export async function extractContract(
   docs: PreparedDocumentInput[],
@@ -445,6 +834,14 @@ export async function extractContract(
 
   const client = getAnthropicClient();
 
+  // ── Fase 1: BRIEF ────────────────────────────────────────────────────────
+  // Pasada focalizada que captura las reglas globales que la pasada principal
+  // suele perder (impuestos, persona adicional, bancos) + un inventario. Es
+  // best-effort: si falla, `briefResult` es null y seguimos sin inyección.
+  const briefResult = await extractContractBrief(docs, requestId, context);
+  const brief = briefResult?.brief ?? null;
+
+  // ── Fase 2: EXTRACCIÓN PRINCIPAL ─────────────────────────────────────────
   // Streaming endpoint en lugar de `messages.create` no-stream: con
   // MAX_TOKENS alto (128k) y contratos densos, la generación puede tardar
   // 3-5 min y Anthropic recomienda streaming para evitar HTTP timeouts
@@ -452,7 +849,7 @@ export async function extractContract(
   // chunks y nos devuelve un `Message` con la misma forma que el endpoint
   // no-stream, así que el resto del flujo (búsqueda de tool_use, coerce,
   // validación) no cambia.
-  let response;
+  let response: Message;
   try {
     response = await client.messages
       .stream({
@@ -467,7 +864,7 @@ export async function extractContract(
           type: "tool",
           name: EXTRAER_DATOS_CONTRATO_TOOL_NAME,
         },
-        messages: [buildUserMessage(docs, context)],
+        messages: [buildUserMessage(docs, { context, mode: "extract", brief })],
       })
       .finalMessage();
   } catch (err) {
@@ -563,14 +960,32 @@ export async function extractContract(
 
   const { extraction, validation } = validateExtraction(raw);
 
-  const inputTokens = response.usage?.input_tokens ?? 0;
-  const outputTokens = response.usage?.output_tokens ?? 0;
-  const costUsd = computeCostUsd(inputTokens, outputTokens);
+  // Reconciliación de cuentas bancarias: la extracción principal suele traer
+  // solo la cuenta primaria. El brief (Fase 1) captura todas — rellenamos la
+  // primaria si faltó y exponemos las cuentas 2 y 3 como prefill manual.
+  const { sharedPatch, manualPrefill } = reconcileBankAccounts(extraction, brief);
+  const data =
+    Object.keys(sharedPatch).length > 0
+      ? { ...extraction, shared_fields: { ...extraction.shared_fields, ...sharedPatch } }
+      : extraction;
+
+  // Usage = brief (Fase 1, Sonnet) + extracción principal (Fase 2, Opus). Cada
+  // pasada se cobra con la tarifa de su modelo; `sumUsage` agrega los totales.
+  const mainUsage = usageFromMessage(response, SUPPLIER_INTELLIGENCE_MODEL);
+  const usage = sumUsage(
+    briefResult ? [briefResult.usage, mainUsage] : [mainUsage],
+  );
 
   return {
-    data: extraction,
+    data,
     validation,
     model: SUPPLIER_INTELLIGENCE_MODEL,
-    usage: { inputTokens, outputTokens, costUsd },
+    usage: {
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      costUsd: usage.costUsd,
+    },
+    brief,
+    manualPrefill,
   };
 }

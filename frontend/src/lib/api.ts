@@ -573,6 +573,22 @@ export interface ExtractionMeta {
   input_tokens?: number;
   output_tokens?: number;
   cost_usd?: number;
+  /**
+   * Prefill de cuentas bancarias 2 y 3 derivado del brief (Fase 1). La cuenta
+   * primaria ya viene en `data.shared_fields`; estas son las extra que el
+   * frontend usa para pre-llenar los campos manuales de Step 2. `null` cuando
+   * el contrato tiene una sola cuenta.
+   */
+  manual_prefill?: ManualBankPrefill | null;
+}
+
+export interface ManualBankPrefill {
+  cuenta_bancaria_2: string | null;
+  banco_2: string | null;
+  moneda_2: string | null;
+  cuenta_bancaria_3: string | null;
+  banco_3: string | null;
+  moneda_3: string | null;
 }
 
 export interface ExtractContractResponse {
@@ -862,14 +878,17 @@ export const api = {
       if (trimmed) {
         form.append("comments", trimmed);
       }
-      // AI extraction is slow (Claude reading a multi-page PDF, sometimes
-      // multiple docs together). Give the request a generous 8-minute ceiling
-      // — long enough for combined extractions, short enough that a stuck
-      // backend doesn't hang the UI forever.
+      // AI extraction is slow, and now runs in TWO sequential Anthropic
+      // passes: a focused "contract brief" (global rules + inventory) followed
+      // by the full grid-fill extraction. A dense contract (100+ rows) can
+      // spend ~7-8 min in the main pass alone, plus ~1 min for the brief, so
+      // an 8-minute ceiling now trips on exactly the documents that used to
+      // just barely fit. 15 minutes covers both passes with margin while still
+      // bounding a truly stuck backend.
       return requestForm<ExtractContractResponse>(
         "/api/supplier-intelligence/extract",
         form,
-        { timeoutMs: 8 * 60 * 1000 },
+        { timeoutMs: 15 * 60 * 1000 },
       );
     },
     /**

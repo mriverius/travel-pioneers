@@ -42,6 +42,7 @@ import {
   type ExtractionSourcePage,
   type GenerateXlsxCatalogPrefill,
   type GenerateXlsxManualFields,
+  type ManualBankPrefill,
 } from "@/lib/api";
 import {
   findSupplierByNameWithAI,
@@ -1070,9 +1071,17 @@ function Badge({ label }: { label: string }) {
   );
 }
 
+/**
+ * Fases mostradas durante el análisis. El % es una estimación temporal (no
+ * hay streaming del backend), pero los tramos reflejan el flujo real de dos
+ * pasadas: pre-análisis rápido (Sonnet 4.6) que detecta las reglas globales,
+ * y luego la extracción completa (Opus 4.7) que genera todas las filas — esta
+ * última es la que se lleva la mayor parte del tiempo, de ahí el tramo ancho.
+ */
 function analysisPhase(progress: number): string {
-  if (progress < 25) return "Preparando el documento…";
-  if (progress < 75) return "Extrayendo campos con IA…";
+  if (progress < 14) return "Preparando el documento…";
+  if (progress < 32) return "Analizando reglas globales del contrato…";
+  if (progress < 88) return "Extrayendo todas las tarifas con IA…";
   if (progress < 100) return "Validando datos extraídos…";
   return "Listo";
 }
@@ -1153,8 +1162,15 @@ function AnalysisProgressCard({
           {matchingPhase === "ai"
             ? "Pidiéndole a Claude que elija el proveedor del catálogo. Opus 4.7 puede tardar 30-60s para contratos con muchas combinaciones."
             : files.length > 1
-              ? `Opus 4.7 está consolidando ${files.length} documentos. Puede tardar varios minutos — mantén esta pestaña abierta.`
-              : "Opus 4.7 puede tardar entre 30 y 90 segundos para contratos con muchas filas (ej. 21 combinaciones)."}
+              ? `Corre en dos fases: un pre-análisis rápido (Sonnet 4.6) que ` +
+                `detecta las reglas globales y luego la extracción completa ` +
+                `(Opus 4.7) que consolida ${files.length} documentos. Puede ` +
+                `tardar varios minutos — mantené esta pestaña abierta.`
+              : "Corre en dos fases: un pre-análisis rápido (Sonnet 4.6) que " +
+                "detecta las reglas globales (impuestos, bancos, persona " +
+                "adicional) y luego la extracción completa (Opus 4.7). Los " +
+                "contratos densos pueden tardar varios minutos — mantené esta " +
+                "pestaña abierta."}
         </p>
       </div>
     </div>
@@ -1434,6 +1450,7 @@ const CONFIANZA_STYLES: Record<
 function buildInitialSharedValues(
   data: ExtractedContract,
   prefill: CatalogPrefill | null,
+  bankPrefill?: ManualBankPrefill | null,
 ): Record<SharedKey, string | null> {
   const out: Record<string, string | null> = {};
   // 15 AI shared keys con columna shared en la UI. tipo_unidad y
@@ -1447,9 +1464,20 @@ function buildInitialSharedValues(
   out.tipo_actividad = prefill?.tipo_actividad ?? null;
   out.zona_turismo = prefill?.zona_turismo ?? null;
   out.proveedor_codigo = prefill?.proveedor_codigo ?? null;
-  // 14 manual keys → null
+  // 14 manual keys → null por defecto.
   for (const k of MANUAL_KEYS) {
     out[k] = null;
+  }
+  // Pre-llenado de cuentas bancarias 2 y 3 desde el brief (Fase 1). El
+  // usuario las puede editar/borrar en Step 2, pero ya no tiene que
+  // tipearlas a mano cuando el contrato lista varias cuentas.
+  if (bankPrefill) {
+    out.cuenta_bancaria_2 = bankPrefill.cuenta_bancaria_2 ?? null;
+    out.banco_2 = bankPrefill.banco_2 ?? null;
+    out.moneda_2 = bankPrefill.moneda_2 ?? null;
+    out.cuenta_bancaria_3 = bankPrefill.cuenta_bancaria_3 ?? null;
+    out.banco_3 = bankPrefill.banco_3 ?? null;
+    out.moneda_3 = bankPrefill.moneda_3 ?? null;
   }
   return out as Record<SharedKey, string | null>;
 }
@@ -1469,7 +1497,7 @@ function ReviewStep({
   // Shared state (34 keys)
   const [sharedValues, setSharedValues] = useState<
     Record<SharedKey, string | null>
-  >(() => buildInitialSharedValues(data, catalogPrefill));
+  >(() => buildInitialSharedValues(data, catalogPrefill, meta.manual_prefill));
   const setSharedField = (key: SharedKey, value: string | null) => {
     setSharedValues((prev) => ({ ...prev, [key]: value }));
   };

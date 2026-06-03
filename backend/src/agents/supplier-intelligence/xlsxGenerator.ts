@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import * as XLSX from "xlsx";
 import type { WorkBook, WorkSheet } from "xlsx";
 import type { ContractRow, ManualFields, SharedFields, TipoUnidad } from "./types.js";
+import { isFoodBeverageProduct } from "./validators.js";
 import {
   CATALOG_PREFILL_COL,
   DATE_ROW_FIELDS,
@@ -156,10 +157,28 @@ function buildSheetName(shared: SharedFields): string {
   return `${trimmedBase}_${year}`;
 }
 
+/**
+ * Sello de tiempo compacto `YYYYMMDD-HHMMSS` (UTC) para hacer ÚNICO cada
+ * filename de descarga. Sin esto, dos descargas del mismo contrato comparten
+ * nombre (`proveedor-2027.xlsx`) y el navegador guarda la segunda como
+ * `... (1).xlsx`, dejando la PRIMERA (potencialmente desactualizada, ej. una
+ * corrida vieja con menos filas) bajo el nombre "canónico". El usuario abre la
+ * vieja creyendo que es la última → parece que faltan filas. El timestamp
+ * elimina la colisión: cada generación es un archivo distinto e identificable.
+ */
+function downloadTimestamp(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return (
+    `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}` +
+    `-${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}`
+  );
+}
+
 function buildFilename(shared: SharedFields): string {
   const name = shared.nombre_comercial?.trim() || shared.proveedor?.trim() || "contrato";
   const year = extractYear(shared);
-  return `${sanitizeFilename(name)}-${year}.xlsx`;
+  return `${sanitizeFilename(name)}-${year}-${downloadTimestamp()}.xlsx`;
 }
 
 /**
@@ -413,10 +432,19 @@ function resolveRowClassification(
   codigoServicio: string;
   categoria: string;
 } {
-  const tipoServicio =
+  let tipoServicio =
     row.tipo_servicio?.trim() ||
     shared.tipo_servicio?.trim() ||
     inferTipoServicioFromProduct(row.product_name);
+
+  // Guardrail amenidades de comida/bebida: la IA suele clasificar vino,
+  // champagne, frutas, chocolate, etc. como "OT" (otro). El usuario quiere
+  // que esas amenidades GASTRONÓMICAS salgan como "AL" (alimentación). Solo
+  // promovemos desde "OT" para no pisar tours (TO) ni transfers (TR) que
+  // mencionen comida de pasada (ej. "tour con almuerzo incluido").
+  if (tipoServicio === "OT" && isFoodBeverageProduct(row.product_name)) {
+    tipoServicio = "AL";
+  }
 
   const rowUnidad = row.tipo_unidad === "N" || row.tipo_unidad === "S" ? row.tipo_unidad : null;
   const sharedUnidad =

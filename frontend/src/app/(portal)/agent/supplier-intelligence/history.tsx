@@ -679,6 +679,37 @@ function HistoryDetailModal({
     setMounted(true);
   }, []);
 
+  // Descarga del xlsx desde el historial: regeneramos el archivo on-demand
+  // con los datos persistidos del run (mismo endpoint que Step 3). No
+  // guardamos el binario en BD, así que reconstruirlo desde shared/rows/
+  // manual/catalog es la fuente de verdad y siempre refleja el run guardado.
+  const [downloadState, setDownloadState] = useState<"idle" | "loading" | "error">(
+    "idle",
+  );
+  const handleDownload = async () => {
+    if (downloadState === "loading") return;
+    setDownloadState("loading");
+    try {
+      const { blob, filename } = await api.supplierIntelligence.generateXlsx({
+        shared_fields: entry.sharedFields,
+        rows: entry.rows,
+        catalog_prefill: entry.catalogPrefill,
+        manual_fields: entry.manualFields,
+      });
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(objectUrl);
+      setDownloadState("idle");
+    } catch {
+      setDownloadState("error");
+    }
+  };
+
   // Esc-to-close + body scroll lock while open.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -804,6 +835,24 @@ function HistoryDetailModal({
                   </span>
                 </>
               )}
+              <button
+                type="button"
+                onClick={handleDownload}
+                disabled={downloadState === "loading"}
+                title="Regenerar y descargar el Excel de este contrato"
+                className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full border border-emerald-500/40 bg-emerald-500/15 text-[10.5px] font-semibold uppercase tracking-wider text-emerald-300 transition-colors hover:bg-emerald-500/25 disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {downloadState === "loading" ? (
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                ) : (
+                  <FileSpreadsheet className="w-3 h-3" />
+                )}
+                {downloadState === "loading"
+                  ? "Generando…"
+                  : downloadState === "error"
+                    ? "Reintentar"
+                    : "Descargar Excel"}
+              </button>
             </div>
           </div>
           <button

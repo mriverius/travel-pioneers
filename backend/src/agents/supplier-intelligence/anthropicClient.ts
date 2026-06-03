@@ -21,6 +21,12 @@ export function getAnthropicClient(): Anthropic {
     );
   }
 
-  cached = new Anthropic({ apiKey });
+  // `timeout` explícito por request (cada pasada: brief y extracción
+  // principal). El default del SDK es 10 min; una extracción densa (52k+
+  // tokens de salida) puede acercarse a ese límite, y no queremos que el SDK
+  // aborte el stream justo antes de terminar. 14 min por llamada da headroom
+  // sin dejar que una llamada colgada corra para siempre. El ceiling del
+  // frontend (15 min, ver `api.ts`) cubre las dos pasadas en conjunto.
+  cached = new Anthropic({ apiKey, timeout: 14 * 60 * 1000 });
   return cached;
 }

@@ -309,6 +309,37 @@ export function phoneDigitCountInRange(raw: string): boolean {
 }
 
 /**
+ * Palabras inequívocamente gastronómicas (comida o bebida). Se usan para
+ * detectar amenidades que la IA suele dejar en "OT" y que el usuario quiere
+ * como "AL" (alimentación). NO incluye "botella" sola — hay amenidades como
+ * "Botella Fit Personalizada" (un termo) que no son bebida; las botellas de
+ * vino/champagne ya caen por "vino"/"champagne".
+ */
+const FOOD_BEVERAGE_KEYWORDS = [
+  // Comidas
+  "breakfast", "dinner", "lunch", "meal", "almuerzo", "cena", "desayuno",
+  "comida", "picnic", "merienda", "brunch", "postre", "dessert", "snack",
+  "tapas", "queso", "cheese", "fruta", "fruit", "fresa", "strawberr",
+  "chocolate", "del chef", "chef experience", "gastron",
+  // Bebidas
+  "vino", "wine", "champagne", "champa", "merlot", "chardonnay", "cabernet",
+  "sauvignon", "prosecco", "espumante", "cava", "cocktail", "coctel", "cóctel",
+  "cerveza", "beer", "jugo", "juice", "bebida", "drink", "licor", "ron",
+  "whisky", "vodka", "tequila", "mimosa", "sangria", "sangría",
+];
+
+/**
+ * `true` si el nombre del producto sugiere una amenidad de comida o bebida.
+ * Compartido por el validador (corrige la UI) y el generador de xlsx
+ * (guardrail final). Exportado para reusar sin duplicar la lista de keywords.
+ */
+export function isFoodBeverageProduct(product: string | null): boolean {
+  if (!product) return false;
+  const p = product.toLowerCase();
+  return FOOD_BEVERAGE_KEYWORDS.some((kw) => p.includes(kw));
+}
+
+/**
  * Limpia una fila en sitio: si la categoría no pertenece al tipo_servicio
  * efectivo (override por fila > shared), devolvemos la fila con
  * categoria=null y un mensaje de warning. No mutamos — devolvemos una
@@ -612,6 +643,32 @@ export function validateExtraction(
   // filas derivadas también pasen por las verificaciones de categoría,
   // precio, duplicados, etc.
   extraction = expandOccupancy(extraction, warnings);
+
+  // Guardrail amenidades de comida/bebida → AL. La IA tiende a clasificar
+  // vino, champagne, frutas, chocolate, etc. como "OT" (otro). El usuario
+  // quiere esas amenidades gastronómicas como "AL" (alimentación). Lo
+  // aplicamos acá (en la extracción) para que Step 2 muestre lo MISMO que el
+  // xlsx final y no haya sorpresa al descargar. Solo promovemos desde "OT"
+  // para no pisar tours (TO) ni transfers (TR) que mencionen comida de paso.
+  {
+    let promoted = 0;
+    const promotedRows = extraction.rows.map((row) => {
+      const effectiveTipoSrv =
+        row.tipo_servicio?.trim() || extraction.shared_fields.tipo_servicio?.trim();
+      if (effectiveTipoSrv === "OT" && isFoodBeverageProduct(row.product_name)) {
+        promoted += 1;
+        return { ...row, tipo_servicio: "AL" };
+      }
+      return row;
+    });
+    if (promoted > 0) {
+      extraction = { ...extraction, rows: promotedRows };
+      warnings.push(
+        `${promoted} amenidad(es) de comida/bebida se reclasificaron de OT a AL ` +
+          `(alimentación) por nombre de producto.`,
+      );
+    }
+  }
 
   // numero_cuenta — if it looks like an IBAN (starts with two letters), check it.
   const accountNumber = extraction.shared_fields.numero_cuenta;

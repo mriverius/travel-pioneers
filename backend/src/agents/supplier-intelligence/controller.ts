@@ -140,11 +140,8 @@ export async function extractContractHandler(
     hasComments: comments !== undefined,
   });
 
-  const { data, validation, model, usage } = await extractContract(
-    prepared,
-    req.id,
-    { comments, isExistingSupplier },
-  );
+  const { data, validation, model, usage, brief, manualPrefill } =
+    await extractContract(prepared, req.id, { comments, isExistingSupplier });
 
   const combinedFilename = combineFilenames(files);
 
@@ -157,6 +154,19 @@ export async function extractContractHandler(
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
     costUsd: usage.costUsd,
+    rowCount: data.rows.length,
+    // Brief (Fase 1): observabilidad de las reglas globales detectadas y de
+    // la meta de completitud vs. filas realmente generadas.
+    brief: brief
+      ? {
+          pricesIncludeTax: brief.prices_include_tax,
+          taxRatePct: brief.tax_rate_pct,
+          bankAccounts: brief.bank_accounts.length,
+          additionalPersonRules: brief.additional_person.length,
+          sections: brief.sections.length,
+          expectedRows: brief.expected_row_estimate,
+        }
+      : null,
   });
 
   res.status(200).json({
@@ -176,6 +186,9 @@ export async function extractContractHandler(
       input_tokens: usage.inputTokens,
       output_tokens: usage.outputTokens,
       cost_usd: usage.costUsd,
+      // Prefill de cuentas bancarias 2 y 3 (del brief). El frontend pre-llena
+      // los campos manuales de Step 2 con esto. `null` si hay una sola cuenta.
+      manual_prefill: manualPrefill,
     },
   });
 }

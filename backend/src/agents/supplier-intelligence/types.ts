@@ -188,6 +188,50 @@ export interface ValidationResult {
   warnings: string[];
 }
 
+/* -------------------------------------------------------------------------- */
+/*                        Contract Brief (Fase 1)                             */
+/* -------------------------------------------------------------------------- */
+
+/** Una cuenta bancaria capturada por el brief. */
+export interface ContractBriefBankAccount {
+  bank: string | null;
+  account_number: string | null;
+  currency: string | null;
+  swift: string | null;
+  note: string | null;
+}
+
+/** Una tarifa por persona adicional capturada por el brief. */
+export interface ContractBriefAdditionalPerson {
+  scope: string | null;
+  applies_to: string | null;
+  rack: string | null;
+  net: string | null;
+}
+
+/**
+ * Resultado de la pasada de BRIEF (Fase 1). Captura las reglas GLOBALES del
+ * contrato + un inventario, en una llamada chica y focalizada — sin filas de
+ * tarifas. Se inyecta como contexto de prioridad alta en la pasada principal
+ * (ver `renderContractBriefBlock`) para que el modelo no pierda estas reglas
+ * al generar las decenas de filas.
+ */
+export interface ContractBrief {
+  prices_include_tax: boolean | null;
+  tax_rate_pct: number | null;
+  tax_note: string | null;
+  commission_summary: string | null;
+  meal_plan_note: string | null;
+  bank_accounts: ContractBriefBankAccount[];
+  additional_person: ContractBriefAdditionalPerson[];
+  special_periods_note: string | null;
+  product_categories: string[];
+  seasons: string[];
+  sections: string[];
+  expected_row_estimate: number | null;
+  notes: string | null;
+}
+
 /** The kinds of documents the agent accepts. */
 export type SupportedDocKind = "pdf" | "docx" | "xlsx" | "image";
 
