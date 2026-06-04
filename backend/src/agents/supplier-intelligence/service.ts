@@ -183,6 +183,92 @@ function sumUsage(parts: TokenUsage[]): TokenUsage {
 const MAX_TOKENS = 128_000;
 
 /**
+ * Cuántas veces reintentar una pasada que cae por un error de TRANSPORTE
+ * transitorio (socket terminado a mitad del stream, reset de conexión, etc.).
+ * La extracción es idempotente (no tiene side-effects), así que reintentar es
+ * seguro: lo peor que pasa es que pagamos input de nuevo. 2 reintentos cubren
+ * los drops esporádicos sin colgar al usuario por minutos.
+ */
+const STREAM_RETRY_ATTEMPTS = 2;
+const STREAM_RETRY_BASE_DELAY_MS = 1_500;
+
+/**
+ * Heurística para detectar fallas de transporte transitorias que NO son un
+ * error semántico de Anthropic (esos vienen como `APIError` con status). El
+ * caso clásico de contratos densos es undici reportando `"terminated"` cuando
+ * el socket del stream largo se cae. También cubrimos resets / timeouts de
+ * red comunes. Estos SÍ valen un reintento; un APIError 4xx (p. ej. request
+ * inválido) NO — eso lo dejamos propagar.
+ */
+function isTransientTransportError(err: unknown): boolean {
+  if (err instanceof APIError) {
+    // Overload / errores 5xx de Anthropic: transitorios, valen reintento.
+    const status = err.status ?? 0;
+    return status === 429 || status === 529 || (status >= 500 && status < 600);
+  }
+  const msg = (
+    err instanceof Error ? err.message : String(err ?? "")
+  ).toLowerCase();
+  const code =
+    err && typeof err === "object" && "code" in err
+      ? String((err as { code?: unknown }).code ?? "").toUpperCase()
+      : "";
+  return (
+    msg.includes("terminated") ||
+    msg.includes("socket hang up") ||
+    msg.includes("econnreset") ||
+    msg.includes(" econnreset") ||
+    msg.includes("network") ||
+    msg.includes("fetch failed") ||
+    msg.includes("other side closed") ||
+    msg.includes("premature close") ||
+    code === "ECONNRESET" ||
+    code === "ETIMEDOUT" ||
+    code === "EPIPE" ||
+    code === "UND_ERR_SOCKET" ||
+    code === "UND_ERR_HEADERS_TIMEOUT" ||
+    code === "UND_ERR_BODY_TIMEOUT"
+  );
+}
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Corre una pasada de streaming reintentando ante fallas de transporte
+ * transitorias (ver `isTransientTransportError`). Cada intento abre un stream
+ * nuevo — el endpoint de Anthropic es stateless, así que un retry simplemente
+ * re-emite la generación desde cero. Backoff lineal corto entre intentos.
+ */
+async function runStreamWithRetry(
+  run: () => Promise<Message>,
+  opts: { requestId?: string; label: string },
+): Promise<Message> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= STREAM_RETRY_ATTEMPTS + 1; attempt += 1) {
+    try {
+      return await run();
+    } catch (err) {
+      lastErr = err;
+      const transient = isTransientTransportError(err);
+      const hasMoreAttempts = attempt <= STREAM_RETRY_ATTEMPTS;
+      if (!transient || !hasMoreAttempts) throw err;
+      const delay = STREAM_RETRY_BASE_DELAY_MS * attempt;
+      logger.warn("Anthropic stream failed — retrying", {
+        requestId: opts.requestId,
+        label: opts.label,
+        attempt,
+        nextAttemptInMs: delay,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      await sleep(delay);
+    }
+  }
+  // Inalcanzable (el loop o devuelve o tira), pero TS necesita el throw.
+  throw lastErr;
+}
+
+/**
  * Optional context the caller can attach to an extraction. The `comments`
  * field is the user-typed email-body excerpt from the UI — it gets injected
  * into the user message as supplementary context Claude can lean on when the
@@ -635,21 +721,25 @@ async function extractContractBrief(
   const client = getAnthropicClient();
   let response: Message;
   try {
-    response = await client.messages
-      .stream({
-        model: SUPPLIER_INTELLIGENCE_BRIEF_MODEL,
-        max_tokens: BRIEF_MAX_TOKENS,
-        system: SUPPLIER_INTELLIGENCE_SYSTEM_PROMPT,
-        // Solo el tool del brief: sin caching cross-modelo no hay razón para
-        // arrastrar el schema (grande) del tool de extracción en esta pasada.
-        tools: [REGISTRAR_BRIEF_CONTRATO_TOOL],
-        tool_choice: {
-          type: "tool",
-          name: REGISTRAR_BRIEF_CONTRATO_TOOL_NAME,
-        },
-        messages: [buildUserMessage(docs, { context, mode: "brief" })],
-      })
-      .finalMessage();
+    response = await runStreamWithRetry(
+      () =>
+        client.messages
+          .stream({
+            model: SUPPLIER_INTELLIGENCE_BRIEF_MODEL,
+            max_tokens: BRIEF_MAX_TOKENS,
+            system: SUPPLIER_INTELLIGENCE_SYSTEM_PROMPT,
+            // Solo el tool del brief: sin caching cross-modelo no hay razón
+            // para arrastrar el schema (grande) del tool de extracción acá.
+            tools: [REGISTRAR_BRIEF_CONTRATO_TOOL],
+            tool_choice: {
+              type: "tool",
+              name: REGISTRAR_BRIEF_CONTRATO_TOOL_NAME,
+            },
+            messages: [buildUserMessage(docs, { context, mode: "brief" })],
+          })
+          .finalMessage(),
+      { requestId, label: "brief" },
+    );
   } catch (err) {
     logger.warn("Contract brief pass failed — continuing without brief", {
       requestId,
@@ -915,22 +1005,28 @@ export async function extractContract(
   // validación) no cambia.
   let response: Message;
   try {
-    response = await client.messages
-      .stream({
-        model: SUPPLIER_INTELLIGENCE_MODEL,
-        max_tokens: MAX_TOKENS,
-        // No mandar `thinking`: la API rechaza con 400 cuando tool_choice
-        // fuerza un tool, y como además forzamos el tool el modelo no hace
-        // thinking del lado del servidor — todo el max_tokens va al output.
-        system: SUPPLIER_INTELLIGENCE_SYSTEM_PROMPT,
-        tools: [EXTRAER_DATOS_CONTRATO_TOOL],
-        tool_choice: {
-          type: "tool",
-          name: EXTRAER_DATOS_CONTRATO_TOOL_NAME,
-        },
-        messages: [buildUserMessage(docs, { context, mode: "extract", brief })],
-      })
-      .finalMessage();
+    response = await runStreamWithRetry(
+      () =>
+        client.messages
+          .stream({
+            model: SUPPLIER_INTELLIGENCE_MODEL,
+            max_tokens: MAX_TOKENS,
+            // No mandar `thinking`: la API rechaza con 400 cuando tool_choice
+            // fuerza un tool, y como además forzamos el tool el modelo no hace
+            // thinking del lado del servidor — todo el max_tokens va al output.
+            system: SUPPLIER_INTELLIGENCE_SYSTEM_PROMPT,
+            tools: [EXTRAER_DATOS_CONTRATO_TOOL],
+            tool_choice: {
+              type: "tool",
+              name: EXTRAER_DATOS_CONTRATO_TOOL_NAME,
+            },
+            messages: [
+              buildUserMessage(docs, { context, mode: "extract", brief }),
+            ],
+          })
+          .finalMessage(),
+      { requestId, label: "extract" },
+    );
   } catch (err) {
     // Map all Anthropic-side failures (timeouts, 429, 5xx, auth) to 502.
     // We never surface the upstream status code directly because the client
