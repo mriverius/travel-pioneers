@@ -2,7 +2,10 @@ import { Router, json } from "express";
 import rateLimit from "express-rate-limit";
 import asyncHandler from "../utils/asyncHandler.js";
 import { requireAuth } from "../middleware/auth.js";
-import { extractContractHandler } from "../agents/supplier-intelligence/controller.js";
+import {
+  analyzeBriefHandler,
+  extractContractHandler,
+} from "../agents/supplier-intelligence/controller.js";
 import {
   matchSupplierHandler,
   matchServiceHandler,
@@ -127,6 +130,21 @@ router.post(
   extractLimiter,
   handleContractUpload,
   asyncHandler(extractContractHandler),
+);
+
+/**
+ * POST /api/supplier-intelligence/analyze-brief
+ *
+ * Fase 1 standalone del flujo gated — corre solo el pre-análisis y devuelve
+ * las Variables de Configuración para que el usuario las confirme antes de la
+ * extracción completa. Mismo upload middleware y rate limit que /extract
+ * (llama a Anthropic, aunque mucho más barato).
+ */
+router.post(
+  "/analyze-brief",
+  extractLimiter,
+  handleContractUpload,
+  asyncHandler(analyzeBriefHandler),
 );
 
 /**

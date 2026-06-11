@@ -23,6 +23,8 @@ import type {
   ContractBrief,
   ContractBriefAdditionalPerson,
   ContractBriefBankAccount,
+  ContractBriefSeason,
+  ContractBriefSharedFields,
   ContractRow,
   ExtractedContract,
   PaymentTerms,
@@ -51,19 +53,21 @@ import type {
 export const SUPPLIER_INTELLIGENCE_MODEL = "claude-opus-4-7";
 
 /**
- * Modelo de la pasada de BRIEF (Fase 1). Usamos Sonnet 4.6 (no Opus) a
- * propósito: el brief es una tarea acotada (reglas globales + inventario, sin
- * filas) que Sonnet resuelve con fidelidad de sobra, y es ~2x más rápido y
- * ~40% más barato que Opus. Eso recorta la latencia agregada del flujo
- * multi-pasada (que estaba haciendo timeout el front) sin sacrificar la
- * calidad de la extracción principal, que sigue en Opus.
+ * Modelo de la pasada de BRIEF / Variables de Configuración (Fase 1).
  *
- * Trade-off consciente: al usar un modelo distinto en cada pasada, el cache de
- * prompt del documento NO se comparte entre ellas (el cache es por-modelo), así
- * que retiramos el cache_control — el ahorro de costo del cache no aplica acá y
- * la prioridad es latencia. ID verificado: NO existe `claude-sonnet-4-7`.
+ * HISTORIA: empezó en Sonnet 4.6 por latencia/costo, porque el brief solo
+ * auto-alimentaba la extracción. PERO con el flujo gated el brief pasó a ser
+ * la pantalla que el HUMANO confirma — es el dato más crítico — y Sonnet
+ * estaba perdiendo temporadas que viven en ENCABEZADOS de tabla (caso real:
+ * Grano de Oro con dos tablas lado a lado "Temporada Alta"/"Temporada Baja").
+ *
+ * Decisión: lo subimos a Opus. El costo de Anthropic está dominado por los
+ * tokens de OUTPUT, y el brief no emite filas (solo reglas globales +
+ * inventario + identidad → ~1-2k tokens de salida), así que correrlo en Opus
+ * cuesta centavos pero mejora muchísimo la lectura de tablas densas. La
+ * prioridad acá es ACCURACY en el gate, no latencia.
  */
-export const SUPPLIER_INTELLIGENCE_BRIEF_MODEL = "claude-sonnet-4-6";
+export const SUPPLIER_INTELLIGENCE_BRIEF_MODEL = "claude-opus-4-7";
 
 /**
  * Pricing oficial de Claude Opus 4.7 (USD por millón de tokens).
@@ -670,22 +674,119 @@ function coerceAdditionalPerson(
     }));
 }
 
-function coerceBrief(input: unknown): ContractBrief {
+function coerceSeasonsDetail(v: unknown): ContractBriefSeason[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .filter((x): x is Record<string, unknown> => !!x && typeof x === "object")
+    .map((r) => ({
+      name: stringOrNull(r.name),
+      starts: stringOrNull(r.starts),
+      ends: stringOrNull(r.ends),
+      raw_range: stringOrNull(r.raw_range),
+    }));
+}
+
+/**
+ * Reconcilia las DOS representaciones de temporadas que puede emitir el modelo:
+ *   - `seasons`        → solo nombres (campo requerido; el modelo casi siempre
+ *                        lo llena).
+ *   - `seasons_detail` → nombres + fechas (campo más rico; el modelo a veces lo
+ *                        deja vacío porque las fechas dan más trabajo).
+ *
+ * Sin esto, un contrato con dos temporadas (ej. Grano de Oro "Alta"/"Baja")
+ * podía traer `seasons: ["Alta","Baja"]` pero `seasons_detail: []`, y la
+ * pantalla de Variables de Configuración (que muestra seasons_detail) quedaba
+ * VACÍA — parecía que no se detectaron temporadas cuando sí estaban.
+ *
+ * Estrategia: garantizamos que AMBOS lados contengan las mismas temporadas.
+ *   - Si hay detail pero falta algún nombre en `seasons`, lo agregamos.
+ *   - Si hay nombres en `seasons` sin entrada en detail, creamos la entrada
+ *     (con fechas en null para que el usuario las complete/confirme).
+ * El match es por nombre normalizado (trim + lowercase).
+ */
+function reconcileSeasons(
+  seasons: string[],
+  detail: ContractBriefSeason[],
+): { seasons: string[]; seasons_detail: ContractBriefSeason[] } {
+  const norm = (s: string | null): string => (s ?? "").trim().toLowerCase();
+
+  const detailByName = new Map<string, ContractBriefSeason>();
+  for (const d of detail) {
+    const key = norm(d.name);
+    if (key !== "" && !detailByName.has(key)) detailByName.set(key, d);
+  }
+
+  // 1) Toda temporada nombrada en `seasons` debe existir en detail.
+  for (const name of seasons) {
+    const key = norm(name);
+    if (key !== "" && !detailByName.has(key)) {
+      const synthesized: ContractBriefSeason = {
+        name,
+        starts: null,
+        ends: null,
+        raw_range: null,
+      };
+      detailByName.set(key, synthesized);
+      detail = [...detail, synthesized];
+    }
+  }
+
+  // 2) Todo detail debe estar reflejado en la lista de nombres.
+  const nameSet = new Set(seasons.map(norm));
+  const mergedNames = [...seasons];
+  for (const d of detail) {
+    const key = norm(d.name);
+    if (key !== "" && !nameSet.has(key)) {
+      nameSet.add(key);
+      mergedNames.push(d.name as string);
+    }
+  }
+
+  return { seasons: mergedNames, seasons_detail: detail };
+}
+
+function coerceBriefSharedFields(v: unknown): ContractBriefSharedFields {
+  const r = v && typeof v === "object" ? (v as Record<string, unknown>) : {};
+  return {
+    proveedor: stringOrNull(r.proveedor),
+    nombre_comercial: stringOrNull(r.nombre_comercial),
+    cedula: stringOrNull(r.cedula),
+    type_of_business: stringOrNull(r.type_of_business),
+    direccion: stringOrNull(r.direccion),
+    telefono: stringOrNull(r.telefono),
+    pais: stringOrNull(r.pais),
+    state_province: stringOrNull(r.state_province),
+    reservations_email: stringOrNull(r.reservations_email),
+    fecha: stringOrNull(r.fecha),
+    contract_starts: stringOrNull(r.contract_starts),
+    contract_ends: stringOrNull(r.contract_ends),
+  };
+}
+
+export function coerceBrief(input: unknown): ContractBrief {
   const r =
     input && typeof input === "object"
       ? (input as Record<string, unknown>)
       : {};
+  const reconciled = reconcileSeasons(
+    stringArray(r.seasons),
+    coerceSeasonsDetail(r.seasons_detail),
+  );
   return {
+    shared_fields: coerceBriefSharedFields(r.shared_fields),
     prices_include_tax: boolOrNull(r.prices_include_tax),
     tax_rate_pct: numberOrNull(r.tax_rate_pct),
     tax_note: stringOrNull(r.tax_note),
+    commission_default_pct: numberOrNull(r.commission_default_pct),
     commission_summary: stringOrNull(r.commission_summary),
     meal_plan_note: stringOrNull(r.meal_plan_note),
+    currency: stringOrNull(r.currency),
     bank_accounts: coerceBankAccounts(r.bank_accounts),
     additional_person: coerceAdditionalPerson(r.additional_person),
     special_periods_note: stringOrNull(r.special_periods_note),
     product_categories: stringArray(r.product_categories),
-    seasons: stringArray(r.seasons),
+    seasons: reconciled.seasons,
+    seasons_detail: reconciled.seasons_detail,
     sections: stringArray(r.sections),
     expected_row_estimate: numberOrNull(r.expected_row_estimate),
     notes: stringOrNull(r.notes),
@@ -741,21 +842,21 @@ async function extractContractBrief(
       { requestId, label: "brief" },
     );
   } catch (err) {
-    logger.warn("Contract brief pass failed — continuing without brief", {
+    // Diagnóstico EXPLÍCITO: si el brief falla, el step de Variables de
+    // Configuración llega vacío. Logueamos el error completo (mensaje +
+    // status si es APIError + stack) para no tener que adivinar por qué la
+    // pantalla quedó en blanco.
+    logger.error("Contract brief pass FAILED — config screen will be empty", {
       requestId,
+      model: SUPPLIER_INTELLIGENCE_BRIEF_MODEL,
       error: err instanceof Error ? err.message : String(err),
+      status: err instanceof APIError ? err.status : undefined,
+      stack: err instanceof Error ? err.stack : undefined,
     });
     return null;
   }
 
   const usage = usageFromMessage(response, SUPPLIER_INTELLIGENCE_BRIEF_MODEL);
-  logger.info("Contract brief completed", {
-    requestId,
-    model: SUPPLIER_INTELLIGENCE_BRIEF_MODEL,
-    stopReason: response.stop_reason,
-    inputTokens: usage.inputTokens,
-    outputTokens: usage.outputTokens,
-  });
 
   const toolUse = response.content.find(
     (block): block is ToolUseBlock =>
@@ -763,14 +864,35 @@ async function extractContractBrief(
       block.name === REGISTRAR_BRIEF_CONTRATO_TOOL_NAME,
   );
   if (!toolUse) {
-    logger.warn("Contract brief returned no tool_use — continuing", {
+    logger.warn("Contract brief returned NO tool_use — config screen empty", {
       requestId,
       stopReason: response.stop_reason,
+      contentTypes: response.content.map((b) => b.type),
     });
-    // Aun sin brief usable, devolvemos el usage para no perder el costo
-    // (y el cache write ya quedó hecho, lo aprovechará la pasada principal).
+    // Aun sin brief usable, devolvemos el usage para no perder el costo.
     return { brief: coerceBrief({}), usage };
   }
+
+  // Visibilidad del contenido real del brief para depurar "no trae datos":
+  // qué claves llenó el modelo y cuántas temporadas/categorías detectó.
+  const rawInput =
+    toolUse.input && typeof toolUse.input === "object"
+      ? (toolUse.input as Record<string, unknown>)
+      : {};
+  logger.info("Contract brief completed", {
+    requestId,
+    model: SUPPLIER_INTELLIGENCE_BRIEF_MODEL,
+    stopReason: response.stop_reason,
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    toolInputKeys: Object.keys(rawInput),
+    seasonsRaw: Array.isArray(rawInput.seasons) ? rawInput.seasons.length : 0,
+    seasonsDetailRaw: Array.isArray(rawInput.seasons_detail)
+      ? rawInput.seasons_detail.length
+      : 0,
+    hasSharedFields:
+      !!rawInput.shared_fields && typeof rawInput.shared_fields === "object",
+  });
 
   return { brief: coerceBrief(toolUse.input), usage };
 }
@@ -976,10 +1098,66 @@ export interface ExtractionResult {
  *   2. EXTRACCIÓN — pasada principal que genera todas las filas, inyectando el
  *      brief como contexto de prioridad alta y leyendo el cache del documento.
  */
+/**
+ * Resultado público de la pasada de BRIEF (Fase 1) — lo que devuelve el
+ * endpoint `POST /analyze-brief`. El frontend lo muestra como "Variables de
+ * configuración" para que el usuario lo confirme/corrija ANTES de la
+ * extracción principal. La versión editada vuelve en `POST /extract` y se usa
+ * como `briefOverride` (ver `extractContract`), saltándose la Fase 1.
+ */
+export interface BriefAnalysisResult {
+  brief: ContractBrief;
+  model: string;
+  usage: { inputTokens: number; outputTokens: number; costUsd: number };
+}
+
+/**
+ * Fase 1 standalone — corre SOLO el brief y lo devuelve para revisión humana.
+ * A diferencia de `extractContractBrief` (interno, best-effort que puede
+ * devolver null), acá garantizamos un brief coercido aunque el modelo no
+ * emita tool_use (devolvemos uno vacío), porque el usuario igual necesita la
+ * pantalla de configuración para llenarlo a mano.
+ */
+export async function analyzeContractBrief(
+  docs: PreparedDocumentInput[],
+  requestId?: string,
+  context?: ExtractionContext,
+): Promise<BriefAnalysisResult> {
+  if (docs.length === 0) {
+    throw ApiError.badRequest("Se requiere al menos un documento para analizar.");
+  }
+  const result = await extractContractBrief(docs, requestId, context);
+  const usage = result?.usage ?? {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheWriteTokens: 0,
+    cacheReadTokens: 0,
+    costUsd: 0,
+  };
+  return {
+    brief: result?.brief ?? coerceBrief({}),
+    model: SUPPLIER_INTELLIGENCE_BRIEF_MODEL,
+    usage: {
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      costUsd: usage.costUsd,
+    },
+  };
+}
+
 export async function extractContract(
   docs: PreparedDocumentInput[],
   requestId?: string,
   context?: ExtractionContext,
+  /**
+   * Brief ya confirmado/editado por el usuario en el step de Variables de
+   * Configuración. Cuando viene, SALTAMOS la Fase 1 (no re-analizamos el
+   * documento) y usamos este brief como las reglas globales de la pasada
+   * principal. Esa es la mejora clave del flujo gated: el usuario corrige
+   * el "prices_include_tax", la comisión o las fechas de temporada ANTES de
+   * que esas reglas se propaguen a las decenas de filas.
+   */
+  briefOverride?: ContractBrief | null,
 ): Promise<ExtractionResult> {
   if (docs.length === 0) {
     // Defensive — the controller already rejects empty arrays with 400.
@@ -989,11 +1167,23 @@ export async function extractContract(
   const client = getAnthropicClient();
 
   // ── Fase 1: BRIEF ────────────────────────────────────────────────────────
-  // Pasada focalizada que captura las reglas globales que la pasada principal
-  // suele perder (impuestos, persona adicional, bancos) + un inventario. Es
-  // best-effort: si falla, `briefResult` es null y seguimos sin inyección.
-  const briefResult = await extractContractBrief(docs, requestId, context);
-  const brief = briefResult?.brief ?? null;
+  // Si el usuario ya confirmó el brief (flujo gated), lo usamos directo y nos
+  // ahorramos una pasada al modelo. Si no (compat con el flujo de una sola
+  // llamada), corremos el pre-análisis focalizado como antes.
+  let briefResult: BriefResult | null = null;
+  let brief: ContractBrief | null;
+  if (briefOverride) {
+    brief = briefOverride;
+    logger.info("Using user-confirmed brief — skipping Fase 1", {
+      requestId,
+      pricesIncludeTax: brief.prices_include_tax,
+      commissionDefaultPct: brief.commission_default_pct,
+      seasons: brief.seasons_detail.length,
+    });
+  } else {
+    briefResult = await extractContractBrief(docs, requestId, context);
+    brief = briefResult?.brief ?? null;
+  }
 
   // ── Fase 2: EXTRACCIÓN PRINCIPAL ─────────────────────────────────────────
   // Streaming endpoint en lugar de `messages.create` no-stream: con
@@ -1118,17 +1308,56 @@ export async function extractContract(
     );
   }
 
-  const { extraction, validation } = validateExtraction(raw);
+  const { extraction, validation } = validateExtraction(raw, brief);
 
   // Reconciliación de cuentas bancarias + términos de pago: la extracción
   // principal trae todas las cuentas y los payment_terms. Rellenamos la cuenta
   // 1 (con MONEDA normalizada) y armamos el prefill de los campos manuales
   // (cuentas 2/3 + cond_credito + plazo) para pre-llenar Step 2.
   const { sharedPatch, bankPrefill } = reconcileBankAccounts(extraction, brief);
-  const data =
+  let data =
     Object.keys(sharedPatch).length > 0
       ? { ...extraction, shared_fields: { ...extraction.shared_fields, ...sharedPatch } }
       : extraction;
+
+  // Identidad CONFIRMADA por el usuario en el step de Variables de
+  // Configuración → es autoritativa. Solo cuando vino un briefOverride (flujo
+  // gated): sobreescribimos los campos de identidad que el usuario confirmó
+  // (no-null) sobre lo que infirió la extracción principal. Así "razón social",
+  // cédula, vigencia, etc. salen exactamente como el humano los dejó.
+  if (briefOverride?.shared_fields) {
+    const sf = briefOverride.shared_fields;
+    const identityPatch: Partial<ExtractedContract["shared_fields"]> = {};
+    const assign = (
+      key: keyof ContractBriefSharedFields &
+        keyof ExtractedContract["shared_fields"],
+    ) => {
+      const v = sf[key];
+      if (typeof v === "string" && v.trim() !== "") identityPatch[key] = v;
+    };
+    (
+      [
+        "proveedor",
+        "nombre_comercial",
+        "cedula",
+        "type_of_business",
+        "direccion",
+        "telefono",
+        "pais",
+        "state_province",
+        "reservations_email",
+        "fecha",
+        "contract_starts",
+        "contract_ends",
+      ] as const
+    ).forEach(assign);
+    if (Object.keys(identityPatch).length > 0) {
+      data = {
+        ...data,
+        shared_fields: { ...data.shared_fields, ...identityPatch },
+      };
+    }
+  }
 
   const payment = derivePaymentPrefill(extraction);
   const manualPrefillCandidate: ManualBankPrefill = {

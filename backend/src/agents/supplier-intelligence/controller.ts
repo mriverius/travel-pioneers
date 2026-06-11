@@ -2,7 +2,14 @@ import type { Request, Response } from "express";
 import logger from "../../config/logger.js";
 import ApiError from "../../utils/ApiError.js";
 import { detectDocKind, prepareDocument } from "./extractors/index.js";
-import { extractContract } from "./service.js";
+import {
+  analyzeContractBrief,
+  coerceBrief,
+  extractContract,
+  type ExtractionContext,
+  type PreparedDocumentInput,
+} from "./service.js";
+import type { ContractBrief } from "./types.js";
 
 /**
  * Maximum length for the optional user comments field. Picked to be generous
@@ -64,6 +71,146 @@ function combineFilenames(files: Express.Multer.File[]): string {
 }
 
 /**
+ * Parse the optional `brief` form field — the user-confirmed Variables de
+ * Configuración from the gated middle step. Arrives as a JSON string in the
+ * multipart body. When present and parseable, it's passed to `extractContract`
+ * as the brief override (Fase 1 is skipped). Bad JSON is a 400 so the client
+ * notices a serialization bug instead of silently re-running the analysis.
+ */
+function parseBriefField(raw: unknown): ContractBrief | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "string" || raw.trim() === "") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw ApiError.badRequest("El campo 'brief' debe ser JSON válido.");
+  }
+  return coerceBrief(parsed);
+}
+
+/**
+ * Shared upload pipeline for both `/extract` and `/analyze-brief`: narrows
+ * `req.files`, parses the required/optional form fields, and prepares each
+ * document (PDFs stay base64, Word/Excel become text). Failures surface as
+ * 4xx before any Anthropic round-trip.
+ */
+async function prepareUploadedDocs(req: Request): Promise<{
+  prepared: PreparedDocumentInput[];
+  files: Express.Multer.File[];
+  totalBytes: number;
+  context: ExtractionContext;
+}> {
+  const rawFiles = req.files;
+  const files: Express.Multer.File[] = Array.isArray(rawFiles) ? rawFiles : [];
+
+  if (files.length === 0) {
+    throw ApiError.badRequest(
+      "No se recibió ningún archivo. Envía los documentos en el campo 'files'.",
+    );
+  }
+
+  const isExistingSupplier = parseExistingSupplier(
+    req.body?.is_existing_supplier,
+  );
+  const comments = parseComments(req.body?.comments);
+
+  const prepared: PreparedDocumentInput[] = [];
+  let totalBytes = 0;
+  for (const file of files) {
+    const kind = detectDocKind(file.mimetype, file.originalname);
+    if (!kind) {
+      throw new ApiError(
+        415,
+        `Tipo de archivo no soportado: ${file.originalname} (${file.mimetype ?? "desconocido"}).`,
+      );
+    }
+    const doc = await prepareDocument(
+      kind,
+      file.buffer,
+      file.mimetype,
+      file.originalname,
+    );
+    prepared.push({ ...doc, originalName: file.originalname });
+    totalBytes += file.size;
+  }
+
+  return {
+    prepared,
+    files,
+    totalBytes,
+    context: { comments, isExistingSupplier },
+  };
+}
+
+/**
+ * POST /api/supplier-intelligence/analyze-brief
+ *
+ * Fase 1 standalone del flujo gated. Mismo `multipart/form-data` que
+ * `/extract` (files + is_existing_supplier + comments), pero corre SOLO el
+ * pre-análisis y devuelve las Variables de Configuración para que el usuario
+ * las confirme/corrija ANTES de la extracción completa. Mucho más barato y
+ * rápido que `/extract` (un pase de Sonnet, sin generar filas).
+ *
+ * Response:
+ *   { success, brief, meta }
+ */
+export async function analyzeBriefHandler(
+  req: Request,
+  res: Response,
+): Promise<void> {
+  const { prepared, files, totalBytes, context } =
+    await prepareUploadedDocs(req);
+
+  logger.info("Supplier Intelligence brief analysis started", {
+    requestId: req.id,
+    fileCount: files.length,
+    filenames: files.map((f) => f.originalname),
+    totalSize: totalBytes,
+    isExistingSupplier: context.isExistingSupplier,
+    hasComments: context.comments !== undefined,
+  });
+
+  const { brief, model, usage } = await analyzeContractBrief(
+    prepared,
+    req.id,
+    context,
+  );
+
+  const combinedFilename = combineFilenames(files);
+
+  logger.info("Supplier Intelligence brief analysis finished", {
+    requestId: req.id,
+    filename: combinedFilename,
+    pricesIncludeTax: brief.prices_include_tax,
+    taxRatePct: brief.tax_rate_pct,
+    commissionDefaultPct: brief.commission_default_pct,
+    seasonsCount: brief.seasons.length,
+    seasonsDetailCount: brief.seasons_detail.length,
+    seasonNames: brief.seasons,
+    bankAccounts: brief.bank_accounts.length,
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    costUsd: usage.costUsd,
+  });
+
+  res.status(200).json({
+    success: true,
+    brief,
+    meta: {
+      filename: combinedFilename,
+      size_bytes: totalBytes,
+      model,
+      processed_at: new Date().toISOString(),
+      is_existing_supplier: context.isExistingSupplier,
+      input_tokens: usage.inputTokens,
+      output_tokens: usage.outputTokens,
+      cost_usd: usage.costUsd,
+    },
+  });
+}
+
+/**
  * POST /api/supplier-intelligence/extract
  *
  * `multipart/form-data` with these fields:
@@ -87,49 +234,13 @@ export async function extractContractHandler(
   req: Request,
   res: Response,
 ): Promise<void> {
-  // Multer's `.array("files")` populates `req.files` as an array; the typing
-  // is `Express.Multer.File[] | { [fieldname: string]: Express.Multer.File[] }`
-  // depending on the multer mode, but `.array(...)` always yields the array
-  // form. Narrow defensively before iterating.
-  const rawFiles = req.files;
-  const files: Express.Multer.File[] = Array.isArray(rawFiles)
-    ? rawFiles
-    : [];
+  const { prepared, files, totalBytes, context } =
+    await prepareUploadedDocs(req);
+  const { isExistingSupplier, comments } = context;
 
-  if (files.length === 0) {
-    throw ApiError.badRequest(
-      "No se recibió ningún archivo. Envía los documentos en el campo 'files'.",
-    );
-  }
-
-  // Body fields parsed up-front so a bad/missing flag fails fast — before we
-  // pay for the Anthropic round-trip.
-  const isExistingSupplier = parseExistingSupplier(req.body?.is_existing_supplier);
-  const comments = parseComments(req.body?.comments);
-
-  // Prepare each document in order (PDFs stay as base64, Word/Excel get
-  // converted to plain text). Failures here surface as 400 from the
-  // extractors and are returned to the client before we contact Anthropic.
-  const prepared = [];
-  let totalBytes = 0;
-  for (const file of files) {
-    const kind = detectDocKind(file.mimetype, file.originalname);
-    if (!kind) {
-      // Defensive — the multer fileFilter should have already caught this.
-      throw new ApiError(
-        415,
-        `Tipo de archivo no soportado: ${file.originalname} (${file.mimetype ?? "desconocido"}).`,
-      );
-    }
-    const doc = await prepareDocument(
-      kind,
-      file.buffer,
-      file.mimetype,
-      file.originalname,
-    );
-    prepared.push({ ...doc, originalName: file.originalname });
-    totalBytes += file.size;
-  }
+  // Variables de Configuración confirmadas por el usuario en el step gated.
+  // Cuando vienen, `extractContract` salta la Fase 1 y usa este brief.
+  const briefOverride = parseBriefField(req.body?.brief);
 
   logger.info("Supplier Intelligence extraction started", {
     requestId: req.id,
@@ -138,10 +249,11 @@ export async function extractContractHandler(
     totalSize: totalBytes,
     isExistingSupplier,
     hasComments: comments !== undefined,
+    hasConfirmedBrief: briefOverride !== null,
   });
 
   const { data, validation, model, usage, brief, manualPrefill } =
-    await extractContract(prepared, req.id, { comments, isExistingSupplier });
+    await extractContract(prepared, req.id, context, briefOverride);
 
   const combinedFilename = combineFilenames(files);
 

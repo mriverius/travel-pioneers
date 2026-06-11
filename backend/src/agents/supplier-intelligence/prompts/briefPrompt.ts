@@ -22,9 +22,15 @@ export const CONTRACT_BRIEF_INSTRUCTION =
   "  3. PERSONA ADICIONAL: toda tarifa de 3era/4ta persona, con el paquete y " +
   "la temporada a la que aplica y a qué habitaciones aplica.\n" +
   "  4. COMIDAS: qué incluyen los paquetes (BREAKFAST/LUNCH/DINNER/NONE).\n" +
-  "  5. COMISIONES: si varían por sección, resumilas.\n" +
+  "  5. COMISIONES: la comisión por defecto como NÚMERO (commission_default_pct) " +
+  "y, si varían por sección, el resumen (commission_summary).\n" +
   "  6. PERIODOS ESPECIALES: políticas de Navidad/peak/etc. de prepago o " +
   "cancelación.\n" +
+  "  6b. TEMPORADAS CON FECHAS: llená seasons_detail con el nombre y las fechas " +
+  "de CADA temporada (obligatorio, no lo dejes vacío). OJO: dos tablas de " +
+  "tarifas lado a lado con rangos de fecha distintos (ej. 'Alta: Nov-Abr' y " +
+  "'Baja: May-Oct') son DOS temporadas — capturá ambas. Cuidado también con " +
+  "rangos partidos.\n" +
   "  7. INVENTARIO: lista de categorías/habitaciones, temporadas y secciones " +
   "de tarifas (paquetes, noche adicional, experiencias, transfers, spa, " +
   "amenidades…), y un estimado de cuántas filas debería tener el contrato " +
@@ -45,8 +51,10 @@ export function renderContractBriefBlock(brief: {
   prices_include_tax: boolean | null;
   tax_rate_pct: number | null;
   tax_note: string | null;
+  commission_default_pct?: number | null;
   commission_summary: string | null;
   meal_plan_note: string | null;
+  currency?: string | null;
   bank_accounts: Array<{
     bank: string | null;
     account_number: string | null;
@@ -63,6 +71,12 @@ export function renderContractBriefBlock(brief: {
   special_periods_note: string | null;
   product_categories: string[];
   seasons: string[];
+  seasons_detail?: Array<{
+    name: string | null;
+    starts: string | null;
+    ends: string | null;
+    raw_range: string | null;
+  }>;
   sections: string[];
   expected_row_estimate: number | null;
   notes: string | null;
@@ -150,8 +164,43 @@ export function renderContractBriefBlock(brief: {
   if (brief.meal_plan_note) {
     lines.push(`• COMIDAS: ${brief.meal_plan_note}`);
   }
+  // Comisión por defecto (confirmada por el usuario) → columna porcentaje_comision.
+  if (
+    brief.commission_default_pct !== null &&
+    brief.commission_default_pct !== undefined &&
+    brief.commission_default_pct > 0
+  ) {
+    lines.push(
+      `• COMISIÓN POR DEFECTO: ${brief.commission_default_pct}%. Aplicala a la ` +
+        `columna porcentaje_comision de CADA fila salvo que la sección tenga ` +
+        `una comisión distinta (ver abajo). Si la tarifa es neta, derivá el ` +
+        `rack de forma consistente con este porcentaje.`,
+    );
+  }
   if (brief.commission_summary) {
-    lines.push(`• COMISIONES: ${brief.commission_summary}`);
+    lines.push(`• COMISIONES POR SECCIÓN: ${brief.commission_summary}`);
+  }
+  if (brief.currency) {
+    lines.push(
+      `• MONEDA: las tarifas están en ${brief.currency}. Usá esa moneda para ` +
+        `tipo_moneda salvo que una fila indique otra explícitamente.`,
+    );
+  }
+  // Temporadas con fechas confirmadas → season_starts / season_ends por fila.
+  if (brief.seasons_detail && brief.seasons_detail.length > 0) {
+    lines.push(
+      "• TEMPORADAS CON FECHAS (confirmadas) — usá EXACTAMENTE estos rangos " +
+        "para season_starts / season_ends de cada fila de la temporada. NO " +
+        "los re-inferas del documento:",
+    );
+    for (const s of brief.seasons_detail) {
+      const name = s.name ?? "(sin nombre)";
+      const range =
+        s.raw_range ??
+        [s.starts, s.ends].filter(Boolean).join(" → ") ??
+        "(sin fechas)";
+      lines.push(`    – ${name}: ${range}`);
+    }
   }
   if (brief.special_periods_note) {
     lines.push(
@@ -179,10 +228,24 @@ export function renderContractBriefBlock(brief: {
     );
   }
   if (brief.expected_row_estimate && brief.expected_row_estimate > 0) {
+    const seasonCount =
+      (brief.seasons_detail?.length ?? 0) || brief.seasons.length;
+    const perSeason =
+      seasonCount > 0
+        ? Math.round(brief.expected_row_estimate / seasonCount)
+        : 0;
+    const perSeasonLine =
+      seasonCount > 0 && perSeason > 0
+        ? ` Eso es ~${perSeason} combinaciones base POR CADA UNA de las ` +
+          `${seasonCount} temporadas — generá ese bloque completo para cada ` +
+          `temporada antes de pasar a la siguiente.`
+        : "";
     lines.push(
-      `• META DE COMPLETITUD: el contrato debería producir aproximadamente ` +
-        `${brief.expected_row_estimate} filas. Si tu salida tiene muchas menos, ` +
-        "te faltaron combinaciones — revisá.",
+      `• META DE COMPLETITUD: generá aproximadamente ` +
+        `${brief.expected_row_estimate} filas base (combinaciones ` +
+        `categoría × ocupación × temporada, SIN contar las filas de persona ` +
+        `adicional que agrega el servidor).${perSeasonLine} Si tu salida tiene ` +
+        "muchas menos, te faltaron combinaciones — revisá temporada por temporada.",
     );
   }
   if (brief.notes) {

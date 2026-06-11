@@ -1,4 +1,5 @@
 import type {
+  ContractBrief,
   ContractRow,
   ExtractedContract,
   SourcePage,
@@ -632,6 +633,119 @@ function expandOccupancy(
   return { ...extraction, rows: newRows, paginas_origen_rows: newPages };
 }
 
+/* -------------------------------------------------------------------------- */
+/*           Brief-driven checks (Variables de Configuración)                 */
+/* -------------------------------------------------------------------------- */
+
+/** % de comisión implícito en una fila a partir de rack y neto. */
+function impliedCommissionPct(
+  rack: string | null,
+  neto: string | null,
+): number | null {
+  const r = parseAmount(rack);
+  const n = parseAmount(neto);
+  if (r === null || n === null || r <= 0 || n < 0) return null;
+  return ((r - n) / r) * 100;
+}
+
+/**
+ * Cruza la extracción contra el BRIEF confirmado por el usuario (las Variables
+ * de Configuración). Estas son verificaciones DETERMINÍSTICAS — no llaman al
+ * modelo — que atrapan justamente los errores que el usuario vino a corregir:
+ *
+ *   1. IVA: si el usuario dijo "los precios NO incluyen IVA", verificamos que
+ *      la relación neto/rack de las filas sea coherente con haber sumado el
+ *      impuesto (señal: rack > neto por más que la sola comisión).
+ *   2. Comisión: si el usuario fijó una comisión por defecto, marcamos las
+ *      filas cuya comisión implícita (rack→neto) se desvía > 2 puntos.
+ *   3. Temporadas: cada temporada del brief debería aparecer en las filas.
+ *   4. Conteo: filas generadas vs. estimado del brief (completitud).
+ *
+ * Todo es no-fatal: agrega warnings para que el revisor los vea en el grid.
+ */
+function validateAgainstBrief(
+  extraction: ExtractedContract,
+  brief: ContractBrief,
+  warnings: string[],
+): void {
+  const rows = extraction.rows;
+  if (rows.length === 0) return;
+
+  // 2) Comisión por defecto vs. comisión implícita por fila.
+  const defaultPct = brief.commission_default_pct;
+  if (defaultPct !== null && defaultPct > 0 && !brief.commission_summary) {
+    // Solo cuando NO hay comisiones por sección (si varían, el desvío es
+    // esperado y el warning sería ruido).
+    let offCount = 0;
+    const offending: number[] = [];
+    rows.forEach((r, i) => {
+      const implied = impliedCommissionPct(r.precio_rack_iva, r.precios_neto_iva);
+      if (implied === null) return;
+      if (Math.abs(implied - defaultPct) > 2) {
+        offCount += 1;
+        if (offending.length < 5) offending.push(i + 1);
+      }
+    });
+    if (offCount > 0) {
+      warnings.push(
+        `Comisión: ${offCount} fila(s) tienen una comisión implícita (rack→neto) ` +
+          `que se desvía más de 2 puntos del ${defaultPct}% confirmado en las ` +
+          `Variables de Configuración (ej. filas ${offending.join(", ")}). ` +
+          `Revisá si los precios neto/rack están bien o si esas filas llevan otra comisión.`,
+      );
+    }
+  }
+
+  // 1) IVA — si el usuario marcó que los precios NO incluyen impuesto, las
+  // tarifas finales deberían haberlo sumado. No tenemos el precio "antes de
+  // impuesto" para comparar exacto, pero sí podemos avisar de forma explícita
+  // para que el revisor confirme que el ajuste se hizo en TODAS las filas.
+  if (brief.prices_include_tax === false) {
+    const rate = brief.tax_rate_pct ?? 13;
+    warnings.push(
+      `IVA: confirmaste que los precios del documento NO incluían el ${rate}% ` +
+        `de impuesto. Verificá que las ${rows.length} filas ya lo tengan sumado ` +
+        `(tanto neto como rack). Este es el error que más se propaga.`,
+    );
+  }
+
+  // 3) Cobertura de temporadas confirmadas.
+  const seasonNames = (
+    brief.seasons_detail.length > 0
+      ? brief.seasons_detail.map((s) => s.name)
+      : brief.seasons
+  )
+    .filter((s): s is string => !!s && s.trim() !== "")
+    .map((s) => s.trim().toLowerCase());
+  if (seasonNames.length > 0) {
+    const rowSeasons = new Set(
+      rows
+        .map((r) => r.season_name?.trim().toLowerCase())
+        .filter((s): s is string => !!s),
+    );
+    const missing = seasonNames.filter(
+      (s) => !Array.from(rowSeasons).some((rs) => rs.includes(s) || s.includes(rs)),
+    );
+    if (missing.length > 0) {
+      warnings.push(
+        `Temporadas: estas temporadas de las Variables de Configuración no ` +
+          `aparecen en ninguna fila — puede que falten combinaciones: ` +
+          `${missing.join(", ")}.`,
+      );
+    }
+  }
+
+  // 4) Conteo vs. estimado del brief.
+  const expected = brief.expected_row_estimate;
+  if (expected !== null && expected > 0 && rows.length < expected * 0.7) {
+    warnings.push(
+      `Completitud: se generaron ${rows.length} filas pero las Variables de ` +
+        `Configuración estimaban ~${expected}. Es probable que falten ` +
+        `combinaciones (secciones, temporadas u ocupaciones).`,
+    );
+  }
+}
+
 /**
  * Run all post-extraction checks and collect warnings. Downgrades `confianza`
  * to "baja" when the IBAN checksum fails (that's the one signal we're very
@@ -639,9 +753,14 @@ function expandOccupancy(
  *
  * Mutates nothing — returns the warnings list plus the (possibly downgraded)
  * extraction so the caller can decide how to respond.
+ *
+ * `brief` (opcional): cuando viene, se cruzan verificaciones determinísticas
+ * contra las Variables de Configuración confirmadas por el usuario (IVA,
+ * comisión, temporadas, completitud) — ver `validateAgainstBrief`.
  */
 export function validateExtraction(
   data: ExtractedContract,
+  brief?: ContractBrief | null,
 ): { extraction: ExtractedContract; validation: ValidationResult } {
   const warnings: string[] = [];
   let extraction = data;
@@ -939,6 +1058,11 @@ export function validateExtraction(
     warnings.push(
       "Confianza baja — se recomienda revisión humana de los datos extraídos.",
     );
+  }
+
+  // Cruce contra las Variables de Configuración confirmadas (si las hay).
+  if (brief) {
+    validateAgainstBrief(extraction, brief, warnings);
   }
 
   return {

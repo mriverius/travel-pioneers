@@ -32,6 +32,8 @@ import {
 import {
   api,
   ApiError,
+  type AnalyzeBriefMeta,
+  type ContractConfigVariables,
   type ExtractContractResponse,
   type ExtractedContract,
   type ExtractedContractRow,
@@ -44,6 +46,7 @@ import {
   type GenerateXlsxManualFields,
   type ManualBankPrefill,
 } from "@/lib/api";
+import { ConfigVariablesStep } from "./configStep";
 import {
   findSupplierByNameWithAI,
   findServiceForSupplierWithAI,
@@ -68,7 +71,7 @@ import {
  *                 xlsx final (clonado de plantilla-agente-utopia.xlsx).
  */
 
-type Step = 1 | 2 | 3;
+type Step = 1 | 2 | 3 | 4;
 
 export type FileKind = "pdf" | "docx" | "xlsx" | "image";
 
@@ -142,8 +145,13 @@ const STEPS: { id: Step; label: string; hint: string }[] = [
     label: "Cargar documento",
     hint: "PDF, Word, Excel o imagen · máx 20 MB",
   },
-  { id: 2, label: "Revisar información", hint: "Tabla con todas las filas" },
-  { id: 3, label: "Descargar xlsx", hint: "Genera el archivo final" },
+  {
+    id: 2,
+    label: "Variables de configuración",
+    hint: "Confirma IVA, comisión, temporadas…",
+  },
+  { id: 3, label: "Revisar información", hint: "Tabla con todas las filas" },
+  { id: 4, label: "Descargar xlsx", hint: "Genera el archivo final" },
 ];
 
 function inferKind(mime: string, name: string): FileKind | null {
@@ -223,6 +231,16 @@ export function SupplierWorkflow() {
   const [serverError, setServerError] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  /**
+   * Variables de Configuración detectadas en la Fase 1 (step 1 → 2). El
+   * usuario las confirma/edita en el step 2 y la versión editada se manda a
+   * la extracción. `configMeta` guarda filename/model/etc. del análisis.
+   */
+  const [config, setConfig] = useState<ContractConfigVariables | null>(null);
+  const [configMeta, setConfigMeta] = useState<AnalyzeBriefMeta | null>(null);
+  /** True mientras corre la extracción principal disparada desde el step 2. */
+  const [extracting, setExtracting] = useState(false);
 
   const [comments, setComments] = useState("");
   const [isExistingSupplier, setIsExistingSupplier] = useState<boolean | null>(
@@ -355,6 +373,14 @@ export function SupplierWorkflow() {
     setServerError(null);
   };
 
+  /**
+   * Step 1 → 2: corre la Fase 1 (pre-análisis) Y el matching contra el catálogo
+   * lista-proveedores, de modo que el step 2 pueda mostrar TODO lo compartido —
+   * identidad del proveedor + reglas globales + clasificación de catálogo
+   * (Tipo Actividad, Zona Turismo, Proveedor código). El matching usa el nombre
+   * del proveedor que trae el brief; el hint de servicio usa el inventario de
+   * categorías del brief (todavía no hay filas).
+   */
   const startAnalysis = async () => {
     if (selectedFiles.length === 0 || analyzing || isExistingSupplier === null) {
       return;
@@ -363,19 +389,20 @@ export function SupplierWorkflow() {
     setServerError(null);
     setProgress(4);
     try {
-      const response = await api.supplierIntelligence.extract(selectedFiles, {
-        comments,
-        isExistingSupplier,
-      });
+      const response = await api.supplierIntelligence.analyzeBrief(
+        selectedFiles,
+        { comments, isExistingSupplier },
+      );
       setProgress(100);
 
+      const brief = response.brief;
       let prefill: CatalogPrefill | null = null;
       let matchInfo: CatalogMatchInfo | null = null;
       if (isExistingSupplier) {
         setMatchingPhase("local");
         const sharedNames = [
-          response.data.shared_fields.nombre_comercial,
-          response.data.shared_fields.proveedor,
+          brief.shared_fields.nombre_comercial,
+          brief.shared_fields.proveedor,
         ]
           .map((s) => s?.trim())
           .filter((s): s is string => !!s);
@@ -396,47 +423,29 @@ export function SupplierWorkflow() {
             });
           }
           if (match) {
-            // Construimos un contexto rico para el matcher de servicios.
-            // CRÍTICO: `product_name`, `categoria` y `meals_included` son
-            // ROW-level (no shared), pero son la señal más fuerte para elegir
-            // entre servicios del mismo proveedor (ej: PARADOR tiene
-            // GARDENEU vs GARDENUS vs VISTASEU vs MASUITEU — sin
-            // "Garden"/"Vista Suites"/"Master Suites" la IA tiene que
-            // adivinar entre 50+ códigos).
-            //
-            // `tipo_moneda` se incluye como proxy de mercado:
-            // USD/CAD → US & CA, EUR → Europe, CRC → mercado local.
-            const shared = response.data.shared_fields;
-            const rows = response.data.rows ?? [];
-            // Dedupe + cap para no inflar tokens si el contrato tiene 50
-            // filas con product_names únicos.
+            // Hint de servicio desde el BRIEF (no hay filas todavía en este
+            // punto del flujo gated): usamos el inventario de categorías de
+            // producto + país + moneda como señal para elegir entre los
+            // servicios del proveedor.
             const dedupe = (xs: Array<string | null>, cap: number): string[] =>
               Array.from(
                 new Set(xs.filter((s): s is string => !!s && s.trim() !== "")),
               ).slice(0, cap);
-            const productNames = dedupe(rows.map((r) => r.product_name), 8);
-            const categorias = dedupe(rows.map((r) => r.categoria), 6);
-            const meals = dedupe(rows.map((r) => r.meals_included), 4);
-
+            const categorias = dedupe(brief.product_categories, 8);
             const hintParts = [
-              shared.tipo_servicio
-                ? `Tipo servicio: ${shared.tipo_servicio}`
+              brief.shared_fields.nombre_comercial
+                ? `Proveedor: ${brief.shared_fields.nombre_comercial}`
                 : null,
-              shared.tipo_unidad
-                ? `Tipo unidad: ${shared.tipo_unidad}`
-                : null,
-              shared.nombre_comercial
-                ? `Proveedor: ${shared.nombre_comercial}`
-                : null,
-              productNames.length > 0
-                ? `Productos: ${productNames.join(", ")}`
+              brief.shared_fields.type_of_business
+                ? `Tipo negocio: ${brief.shared_fields.type_of_business}`
                 : null,
               categorias.length > 0
-                ? `Categorías: ${categorias.join(", ")}`
+                ? `Categorías/Productos: ${categorias.join(", ")}`
                 : null,
-              meals.length > 0 ? `Meals: ${meals.join(", ")}` : null,
-              shared.tipo_moneda ? `Moneda: ${shared.tipo_moneda}` : null,
-              shared.pais ? `País proveedor: ${shared.pais}` : null,
+              brief.currency ? `Moneda: ${brief.currency}` : null,
+              brief.shared_fields.pais
+                ? `País proveedor: ${brief.shared_fields.pais}`
+                : null,
               comments?.trim() ? `Notas: ${comments.trim()}` : null,
               selectedFiles[0]?.name
                 ? `Archivo: ${selectedFiles[0].name}` +
@@ -447,10 +456,6 @@ export function SupplierWorkflow() {
             ].filter((s): s is string => s !== null);
             const serviceHint = hintParts.join(" · ");
 
-            // Fallback IA si el proveedor tiene varios servicios y el matcher
-            // local no resuelve. La llamada es fire-and-await: si falla
-            // (red, backend caído, rate limit) el hook devuelve null y el
-            // campo queda vacío — el usuario lo llena en step 2.
             setMatchingPhase("ai");
             const serviceMatch = await findServiceForSupplierWithAI(
               match.supplier,
@@ -489,8 +494,9 @@ export function SupplierWorkflow() {
       setCatalogPrefill(prefill);
       setCatalogMatchInfo(matchInfo);
 
-      await new Promise((r) => setTimeout(r, 450));
-      setResult(response);
+      await new Promise((r) => setTimeout(r, 300));
+      setConfig(response.brief);
+      setConfigMeta(response.meta);
       setStep(2);
     } catch (err) {
       if (err instanceof ApiError) {
@@ -507,6 +513,46 @@ export function SupplierWorkflow() {
     }
   };
 
+  /**
+   * Step 2 → 3: el usuario confirmó TODO lo compartido (identidad + catálogo +
+   * reglas). Corremos la extracción completa inyectando el config editado (el
+   * backend salta la Fase 1 y usa estas reglas tal cual) y pasamos a la
+   * revisión de la grilla. El matching de proveedor ya se hizo en el step 1,
+   * así que acá solo persistimos el catálogo (posiblemente editado por el
+   * usuario) y extraemos las filas.
+   */
+  const confirmConfig = async (
+    edited: ContractConfigVariables,
+    catalog: CatalogPrefill | null,
+  ) => {
+    if (selectedFiles.length === 0 || extracting || isExistingSupplier === null) {
+      return;
+    }
+    setConfig(edited);
+    setCatalogPrefill(catalog);
+    setExtracting(true);
+    setServerError(null);
+    try {
+      const response = await api.supplierIntelligence.extract(selectedFiles, {
+        comments,
+        isExistingSupplier,
+        confirmedConfig: edited,
+      });
+      setResult(response);
+      setStep(3);
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setServerError(err.message);
+      } else {
+        setServerError(
+          "No pudimos conectar con el servidor. Revisa tu conexión e intenta de nuevo.",
+        );
+      }
+    } finally {
+      setExtracting(false);
+    }
+  };
+
   const reset = () => {
     setStep(1);
     setSelectedFiles([]);
@@ -520,11 +566,23 @@ export function SupplierWorkflow() {
     setCatalogMatchInfo(null);
     setMatchingPhase(null);
     setApprovedPayload(null);
+    setConfig(null);
+    setConfigMeta(null);
+    setExtracting(false);
+  };
+
+  /** Step 2 ← 3: volver del config a la carga sin perder los archivos. */
+  const backToUpload = () => {
+    setStep(1);
+    setConfig(null);
+    setConfigMeta(null);
+    setServerError(null);
+    setProgress(0);
   };
 
   const approve = (payload: ApprovedPayload) => {
     setApprovedPayload(payload);
-    setStep(3);
+    setStep(4);
   };
 
   return (
@@ -609,7 +667,19 @@ export function SupplierWorkflow() {
           />
         )}
 
-        {step === 2 && result && (
+        {step === 2 && config && configMeta && (
+          <ConfigVariablesStep
+            config={config}
+            meta={configMeta}
+            catalogPrefill={catalogPrefill}
+            extracting={extracting}
+            serverError={serverError}
+            onConfirm={confirmConfig}
+            onBack={backToUpload}
+          />
+        )}
+
+        {step === 3 && result && (
           <ReviewStep
             result={result}
             catalogPrefill={catalogPrefill}
@@ -617,7 +687,7 @@ export function SupplierWorkflow() {
           />
         )}
 
-        {step === 3 && result && approvedPayload && (
+        {step === 4 && result && approvedPayload && (
           <DownloadStep
             payload={approvedPayload}
             meta={result.meta}
@@ -628,7 +698,7 @@ export function SupplierWorkflow() {
     </section>
 
     <div className="text-center mt-4 space-y-1">
-      <p className="text-[11px] text-muted-foreground/60">Version 1.3.2 - Junio 3</p>
+      <p className="text-[11px] text-muted-foreground/60">Version 1.4.0 - Junio 6</p>
       <a
         href="https://forms.gle/GANUbdcuAS3P7szS8"
         target="_blank"

@@ -11,6 +11,8 @@
     "start": "node dist/server.js",
     "lint": "eslint \"src/**/*.ts\"",
     "typecheck": "tsc --noEmit",
+    "eval": "tsx src/scripts/contractEval.ts",
+    "eval:inspect": "tsx src/scripts/contractEval.ts --inspect",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",

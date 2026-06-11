@@ -34,6 +34,59 @@ export const REGISTRAR_BRIEF_CONTRATO_TOOL: Tool = {
   input_schema: {
     type: "object",
     properties: {
+      shared_fields: {
+        type: "object",
+        description:
+          "Datos del proveedor que son IGUALES en todas las filas (no varían " +
+          "por habitación ni temporada): identidad, contacto y vigencia del " +
+          "contrato. Llená lo que esté en el documento; null lo que no esté.",
+        properties: {
+          proveedor: {
+            type: ["string", "null"],
+            description: "Razón social / nombre legal del proveedor.",
+          },
+          nombre_comercial: {
+            type: ["string", "null"],
+            description: "Nombre comercial (marca) si difiere de la razón social.",
+          },
+          cedula: {
+            type: ["string", "null"],
+            description: "Cédula jurídica / RFC / NIT / tax ID.",
+          },
+          type_of_business: {
+            type: ["string", "null"],
+            description: "Tipo de negocio (ej. Hotel, Lodge, Tour Operator).",
+          },
+          direccion: { type: ["string", "null"] },
+          telefono: { type: ["string", "null"] },
+          pais: { type: ["string", "null"] },
+          state_province: { type: ["string", "null"] },
+          reservations_email: {
+            type: ["string", "null"],
+            description: "Email de reservas.",
+          },
+          fecha: {
+            type: ["string", "null"],
+            description: "Fecha del contrato/tarifario en YYYY-MM-DD si aparece.",
+          },
+          contract_starts: {
+            type: ["string", "null"],
+            description: "Inicio de vigencia del contrato en YYYY-MM-DD.",
+          },
+          contract_ends: {
+            type: ["string", "null"],
+            description: "Fin de vigencia del contrato en YYYY-MM-DD.",
+          },
+        },
+        required: [
+          "proveedor",
+          "nombre_comercial",
+          "cedula",
+          "contract_starts",
+          "contract_ends",
+        ],
+        additionalProperties: false,
+      },
       prices_include_tax: {
         type: ["boolean", "null"],
         description:
@@ -60,12 +113,29 @@ export const REGISTRAR_BRIEF_CONTRATO_TOOL: Tool = {
           "incluyen el 10% de servicio de A&B. Sustainability Fee $35 por " +
           "persona/noche NO incluido.'",
       },
+      commission_default_pct: {
+        type: ["number", "null"],
+        description:
+          "Comisión POR DEFECTO del contrato en porcentaje, como número (ej. " +
+          "20, 25, 30). Es la que aplica a la mayoría de las filas. Buscá " +
+          "frases como 'Comisión 20%', 'Net rates 25%', 'comisionable al 30%'. " +
+          "Si una tarifa es NETA (ya descontada), la comisión es la diferencia " +
+          "implícita rack→net. null si el contrato no define una comisión.",
+      },
       commission_summary: {
         type: ["string", "null"],
         description:
-          "Resumen de las comisiones por sección, si varían. Ej: '30% en " +
-          "paquetes de hospedaje, 10% en experiencias y transfers, 0% en " +
-          "amenidades'. null si el contrato usa una sola comisión global.",
+          "Resumen de las comisiones por sección CUANDO varían respecto a la " +
+          "comisión por defecto. Ej: '30% en paquetes de hospedaje, 10% en " +
+          "experiencias y transfers, 0% en amenidades'. null si el contrato " +
+          "usa una sola comisión global (la de commission_default_pct).",
+      },
+      currency: {
+        type: ["string", "null"],
+        description:
+          "Moneda principal en la que están expresadas las tarifas: 'USD', " +
+          "'CRC' (colones), 'EUR', etc. Si el contrato mezcla monedas, indicá " +
+          "la de las tarifas (no la de las cuentas bancarias).",
       },
       meal_plan_note: {
         type: ["string", "null"],
@@ -164,8 +234,49 @@ export const REGISTRAR_BRIEF_CONTRATO_TOOL: Tool = {
         type: "array",
         items: { type: "string" },
         description:
-          "Inventario de temporadas que aparecen en el contrato. Ej: " +
-          "['Pico', 'Alta', 'Media Baja', 'Baja'].",
+          "Inventario de NOMBRES de temporadas que aparecen en el contrato. " +
+          "Ej: ['Pico', 'Alta', 'Media Baja', 'Baja']. (Las fechas van en " +
+          "seasons_detail.)",
+      },
+      seasons_detail: {
+        type: "array",
+        description:
+          "OBLIGATORIO: una entrada por CADA temporada del contrato, con sus " +
+          "fechas. Debe contener EXACTAMENTE las mismas temporadas que el " +
+          "array `seasons` (no dejes este vacío si `seasons` tiene nombres). " +
+          "MUY IMPORTANTE — detección de temporadas: dos tablas de tarifas " +
+          "puestas LADO A LADO, cada una con su propio rango de fechas y su " +
+          "nombre (ej. 'Temporada Alta: 01 Nov 2025 - 30 Abr 2026' a la " +
+          "izquierda y 'Temporada Baja: 1 May - 31 Oct 2026' a la derecha) " +
+          "son DOS temporadas distintas — capturá las dos. No las colapses en " +
+          "una sola. CRÍTICO con rangos partidos (ej. 'Wildlife: May 1-Jun 19 " +
+          "y Aug 21-Oct 31'): poné el PRIMER tramo en starts/ends y el texto " +
+          "completo en raw_range. Normalizá a YYYY-MM-DD inferiendo el año.",
+        items: {
+          type: "object",
+          properties: {
+            name: {
+              type: ["string", "null"],
+              description: "Nombre de la temporada (ej. 'High Season').",
+            },
+            starts: {
+              type: ["string", "null"],
+              description: "Inicio en YYYY-MM-DD (primer tramo si hay varios).",
+            },
+            ends: {
+              type: ["string", "null"],
+              description: "Fin en YYYY-MM-DD (primer tramo si hay varios).",
+            },
+            raw_range: {
+              type: ["string", "null"],
+              description:
+                "Rango(s) tal cual aparecen, útil para temporadas partidas. " +
+                "Ej: '1 May - 19 Jun · 21 Ago - 31 Oct'.",
+            },
+          },
+          required: ["name", "starts", "ends"],
+          additionalProperties: false,
+        },
       },
       sections: {
         type: "array",
@@ -191,12 +302,14 @@ export const REGISTRAR_BRIEF_CONTRATO_TOOL: Tool = {
       },
     },
     required: [
+      "shared_fields",
       "prices_include_tax",
       "tax_rate_pct",
       "bank_accounts",
       "additional_person",
       "product_categories",
       "seasons",
+      "seasons_detail",
       "sections",
     ],
     additionalProperties: false,

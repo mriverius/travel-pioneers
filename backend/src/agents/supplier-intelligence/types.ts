@@ -241,6 +241,51 @@ export interface ContractBriefAdditionalPerson {
 }
 
 /**
+ * Una temporada con sus fechas, capturada por el brief. Es la versión
+ * estructurada de `ContractBrief.seasons` (que es solo string[] de nombres).
+ * El usuario la confirma/edita en el step de Variables de Configuración y las
+ * fechas confirmadas se inyectan en la pasada principal para que CADA fila
+ * salga con `season_starts`/`season_ends` correctos — uno de los datos que más
+ * se equivoca el modelo cuando un contrato lista temporadas con rangos
+ * partidos (ej. "May 1 - Jun 19 · Aug 21 - Oct 31").
+ */
+export interface ContractBriefSeason {
+  name: string | null;
+  /** Fecha de inicio en YYYY-MM-DD (o texto crudo si no se pudo normalizar). */
+  starts: string | null;
+  /** Fecha de fin en YYYY-MM-DD. */
+  ends: string | null;
+  /**
+   * Rango(s) crudos tal cual aparecen, para temporadas con tramos partidos
+   * que no caben en un solo start/end (ej. "21 abr-30 jun y 16 ago-19 dic").
+   */
+  raw_range: string | null;
+}
+
+/**
+ * Identidad / vigencia del proveedor capturada en la Fase 1 — los datos que
+ * son IGUALES en todas las filas (no varían por habitación/temporada). El
+ * usuario los confirma en el step de Variables de Configuración y, al
+ * confirmar, sobreescriben lo que la extracción principal infiera. Es el
+ * subconjunto "humano" de SharedFields (sin códigos de catálogo ni bancos,
+ * que se manejan aparte).
+ */
+export interface ContractBriefSharedFields {
+  proveedor: string | null;
+  nombre_comercial: string | null;
+  cedula: string | null;
+  type_of_business: string | null;
+  direccion: string | null;
+  telefono: string | null;
+  pais: string | null;
+  state_province: string | null;
+  reservations_email: string | null;
+  fecha: string | null;
+  contract_starts: string | null;
+  contract_ends: string | null;
+}
+
+/**
  * Resultado de la pasada de BRIEF (Fase 1). Captura las reglas GLOBALES del
  * contrato + un inventario, en una llamada chica y focalizada — sin filas de
  * tarifas. Se inyecta como contexto de prioridad alta en la pasada principal
@@ -248,16 +293,31 @@ export interface ContractBriefAdditionalPerson {
  * al generar las decenas de filas.
  */
 export interface ContractBrief {
+  /** Identidad / vigencia del proveedor (datos compartidos por todas las filas). */
+  shared_fields: ContractBriefSharedFields;
   prices_include_tax: boolean | null;
   tax_rate_pct: number | null;
   tax_note: string | null;
+  /**
+   * Comisión por defecto del contrato en porcentaje (ej. 20, 25, 30). Es la
+   * comisión que aplica a la mayoría de las filas; los desvíos por sección se
+   * describen en `commission_summary`. Capturarla como número (no solo texto)
+   * permite validar fila-por-fila que el modelo no se haya equivocado, y
+   * pre-llenar la columna de comisión cuando una fila viene vacía.
+   */
+  commission_default_pct: number | null;
   commission_summary: string | null;
   meal_plan_note: string | null;
+  /** Moneda principal del contrato (USD, CRC/LOC, EUR…), normalizada aparte. */
+  currency: string | null;
   bank_accounts: ContractBriefBankAccount[];
   additional_person: ContractBriefAdditionalPerson[];
   special_periods_note: string | null;
   product_categories: string[];
+  /** Nombres de temporada (compat). Ver `seasons_detail` para fechas. */
   seasons: string[];
+  /** Temporadas con sus fechas — la fuente que el usuario confirma/edita. */
+  seasons_detail: ContractBriefSeason[];
   sections: string[];
   expected_row_estimate: number | null;
   notes: string | null;

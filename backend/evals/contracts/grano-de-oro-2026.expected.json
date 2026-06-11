@@ -1,0 +1,20 @@
+{
+  "_comment": "Ground truth for Hotel Grano de Oro 2026 rack sheet. Prices in the PDF are '+imp' (exclude 13% IVA), commission 20%, so the system must ADD 13% to produce the *_iva columns. rack_iva = doc_rack * 1.13. This fixture specifically guards: two-season detection, IVA-applied math, and commission.",
+  "shared_fields": {
+    "nombre_comercial": "Grano de Oro",
+    "pais": "Costa Rica",
+    "reservations_email": "info@hotelgranodeoro.com"
+  },
+  "prices_include_tax": false,
+  "tax_rate_pct": 13,
+  "commission_default_pct": 20,
+  "seasons": ["Alta", "Baja"],
+  "min_rows": 16,
+  "price_tolerance": 1.5,
+  "rows": [
+    { "product": "STANDARD", "season": "Alta", "precio_rack_iva": 259.9, "porcentaje_comision": 20 },
+    { "product": "VISTA DE ORO", "season": "Alta", "precio_rack_iva": 779.7 },
+    { "product": "STANDARD", "season": "Baja", "precio_rack_iva": 242.95 },
+    { "product": "FAMILY SUITE", "season": "Baja", "precio_rack_iva": 514.15 }
+  ]
+}

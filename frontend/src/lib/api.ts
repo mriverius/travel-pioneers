@@ -611,6 +611,103 @@ export interface ExtractContractInput {
   comments?: string;
   /** Required toggle from step 1 — `true` if the supplier already exists. */
   isExistingSupplier: boolean;
+  /**
+   * Variables de Configuración confirmadas por el usuario en el step gated
+   * (entre upload y review). Cuando vienen, el backend SALTA la Fase 1 y usa
+   * estas reglas globales (IVA, comisión, temporadas, bancos) para la
+   * extracción — así una corrección del usuario se propaga a todas las filas.
+   */
+  confirmedConfig?: ContractConfigVariables | null;
+}
+
+/* --- analyze-brief (Fase 1 gated — Variables de Configuración) --- */
+
+/** Una cuenta bancaria del contrato. Mirrors backend ContractBriefBankAccount. */
+export interface ConfigBankAccount {
+  bank: string | null;
+  account_number: string | null;
+  currency: string | null;
+  swift: string | null;
+  note: string | null;
+}
+
+/** Tarifa por persona adicional. Mirrors backend ContractBriefAdditionalPerson. */
+export interface ConfigAdditionalPerson {
+  scope: string | null;
+  applies_to: string | null;
+  rack: string | null;
+  net: string | null;
+}
+
+/** Temporada con fechas. Mirrors backend ContractBriefSeason. */
+export interface ConfigSeason {
+  name: string | null;
+  starts: string | null;
+  ends: string | null;
+  raw_range: string | null;
+}
+
+/**
+ * Identidad / vigencia del proveedor — datos IGUALES en todas las filas.
+ * Mirrors backend ContractBriefSharedFields. El usuario los confirma en Step 2
+ * y sobreescriben lo que la extracción infiera.
+ */
+export interface ConfigSharedFields {
+  proveedor: string | null;
+  nombre_comercial: string | null;
+  cedula: string | null;
+  type_of_business: string | null;
+  direccion: string | null;
+  telefono: string | null;
+  pais: string | null;
+  state_province: string | null;
+  reservations_email: string | null;
+  fecha: string | null;
+  contract_starts: string | null;
+  contract_ends: string | null;
+}
+
+/**
+ * Variables de Configuración del contrato — las reglas GLOBALES que el usuario
+ * revisa/corrige en el step intermedio antes de la extracción. Mirrors backend
+ * `ContractBrief` one-to-one. Un valor mal acá (ej. "los precios no incluyen
+ * IVA") envenena TODAS las filas, por eso este gate es el de mayor impacto.
+ */
+export interface ContractConfigVariables {
+  shared_fields: ConfigSharedFields;
+  prices_include_tax: boolean | null;
+  tax_rate_pct: number | null;
+  tax_note: string | null;
+  commission_default_pct: number | null;
+  commission_summary: string | null;
+  meal_plan_note: string | null;
+  currency: string | null;
+  bank_accounts: ConfigBankAccount[];
+  additional_person: ConfigAdditionalPerson[];
+  special_periods_note: string | null;
+  product_categories: string[];
+  seasons: string[];
+  seasons_detail: ConfigSeason[];
+  sections: string[];
+  expected_row_estimate: number | null;
+  notes: string | null;
+}
+
+export interface AnalyzeBriefMeta {
+  filename: string;
+  size_bytes: number;
+  model: string;
+  processed_at: string;
+  is_existing_supplier?: boolean;
+  input_tokens?: number;
+  output_tokens?: number;
+  cost_usd?: number;
+}
+
+export interface AnalyzeBriefResponse {
+  success: true;
+  brief: ContractConfigVariables;
+  meta: AnalyzeBriefMeta;
 }
 
 /* --- generate-xlsx (genera el xlsx final con los datos editados) --- */
@@ -882,6 +979,11 @@ export const api = {
       if (trimmed) {
         form.append("comments", trimmed);
       }
+      // Variables de Configuración confirmadas en el step gated. Cuando vienen,
+      // el backend salta la Fase 1 y usa estas reglas globales tal cual.
+      if (input.confirmedConfig) {
+        form.append("brief", JSON.stringify(input.confirmedConfig));
+      }
       // AI extraction is slow, and now runs in TWO sequential Anthropic
       // passes: a focused "contract brief" (global rules + inventory) followed
       // by the full grid-fill extraction. A dense contract (100+ rows) can
@@ -893,6 +995,38 @@ export const api = {
         "/api/supplier-intelligence/extract",
         form,
         { timeoutMs: 15 * 60 * 1000 },
+      );
+    },
+    /**
+     * Fase 1 del flujo gated: sube los documentos y devuelve las Variables de
+     * Configuración (reglas globales: IVA, comisión, temporadas, bancos) para
+     * que el usuario las confirme/corrija antes de la extracción completa.
+     * Mucho más rápido que `extract` (un solo pase de Sonnet, sin filas), así
+     * que un timeout de 3 minutos es holgado.
+     */
+    analyzeBrief(files: File[], input: ExtractContractInput) {
+      if (files.length === 0) {
+        throw new ApiError(
+          400,
+          "Adjunta al menos un documento antes de continuar.",
+        );
+      }
+      const form = new FormData();
+      for (const f of files) {
+        form.append("files", f);
+      }
+      form.append(
+        "is_existing_supplier",
+        input.isExistingSupplier ? "true" : "false",
+      );
+      const trimmed = input.comments?.trim();
+      if (trimmed) {
+        form.append("comments", trimmed);
+      }
+      return requestForm<AnalyzeBriefResponse>(
+        "/api/supplier-intelligence/analyze-brief",
+        form,
+        { timeoutMs: 3 * 60 * 1000 },
       );
     },
     /**
