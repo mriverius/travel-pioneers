@@ -9,7 +9,10 @@ import logger from "../../config/logger.js";
 import type { Message } from "@anthropic-ai/sdk/resources/messages.js";
 import { getAnthropicClient } from "./anthropicClient.js";
 import {
+  BRIEF_ANALYSIS_SYSTEM_PROMPT,
   CONTRACT_BRIEF_INSTRUCTION,
+  CONTRACT_BRIEF_REFINE_INSTRUCTION,
+  EXTRACT_WITH_CONFIRMED_BRIEF_CLOSING,
   EXTRAER_DATOS_CONTRATO_TOOL,
   EXTRAER_DATOS_CONTRATO_TOOL_NAME,
   REGISTRAR_BRIEF_CONTRATO_TOOL,
@@ -19,10 +22,12 @@ import {
 } from "./prompts/index.js";
 import { validateExtraction, normalizeCurrency } from "./validators.js";
 import type {
+  BriefChatMessage,
   Confianza,
   ContractBrief,
   ContractBriefAdditionalPerson,
   ContractBriefBankAccount,
+  ContractBriefRowPlan,
   ContractBriefSeason,
   ContractBriefSharedFields,
   ContractRow,
@@ -54,20 +59,9 @@ export const SUPPLIER_INTELLIGENCE_MODEL = "claude-opus-4-7";
 
 /**
  * Modelo de la pasada de BRIEF / Variables de Configuración (Fase 1).
- *
- * HISTORIA: empezó en Sonnet 4.6 por latencia/costo, porque el brief solo
- * auto-alimentaba la extracción. PERO con el flujo gated el brief pasó a ser
- * la pantalla que el HUMANO confirma — es el dato más crítico — y Sonnet
- * estaba perdiendo temporadas que viven en ENCABEZADOS de tabla (caso real:
- * Grano de Oro con dos tablas lado a lado "Temporada Alta"/"Temporada Baja").
- *
- * Decisión: lo subimos a Opus. El costo de Anthropic está dominado por los
- * tokens de OUTPUT, y el brief no emite filas (solo reglas globales +
- * inventario + identidad → ~1-2k tokens de salida), así que correrlo en Opus
- * cuesta centavos pero mejora muchísimo la lectura de tablas densas. La
- * prioridad acá es ACCURACY en el gate, no latencia.
+ * Sonnet 4.5 entiende y estructura la lógica; Opus genera las filas finales.
  */
-export const SUPPLIER_INTELLIGENCE_BRIEF_MODEL = "claude-opus-4-7";
+export const SUPPLIER_INTELLIGENCE_BRIEF_MODEL = "claude-sonnet-4-5";
 
 /**
  * Pricing oficial de Claude Opus 4.7 (USD por millón de tokens).
@@ -94,6 +88,7 @@ interface ModelPrices {
 
 const MODEL_PRICES: Record<string, ModelPrices> = {
   "claude-opus-4-7": { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5 },
+  "claude-sonnet-4-5": { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.3 },
   "claude-sonnet-4-6": { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.3 },
 };
 
@@ -369,18 +364,30 @@ interface BuildUserMessageOpts {
   context?: ExtractionContext;
   /**
    * "brief"   → Fase 1: pide solo el brief (reglas globales + inventario).
+   * "refine"  → Re-análisis tras feedback humano sobre el brief anterior.
    * "extract" → Fase 2: pide todas las filas, inyectando el brief ya extraído.
    */
-  mode: "brief" | "extract";
+  mode: "brief" | "refine" | "extract";
   /** Brief ya extraído — solo se usa (y se requiere) en mode "extract". */
   brief?: ContractBrief | null;
+  /** True cuando el brief fue confirmado por el humano (flujo gated). */
+  briefConfirmed?: boolean;
+  /** Contexto de refinamiento — solo en mode "refine". */
+  refine?: BriefRefineContext;
+}
+
+/** Contexto acumulado para POST /refine-brief. */
+export interface BriefRefineContext {
+  previousBrief: ContractBrief;
+  feedback: string;
+  chatHistory?: BriefChatMessage[];
 }
 
 function buildUserMessage(
   docs: PreparedDocumentInput[],
   opts: BuildUserMessageOpts,
 ): MessageParam {
-  const { context: ctx, mode, brief } = opts;
+  const { context: ctx, mode, brief, refine, briefConfirmed } = opts;
   const content: ContentBlockParam[] = [];
 
   const contextBlock = buildContextBlock(ctx);
@@ -450,14 +457,50 @@ function buildUserMessage(
     return { role: "user", content };
   }
 
+  if (mode === "refine" && refine) {
+    content.push({
+      type: "text",
+      text:
+        "═══════════════════════════════════════════════════════════════════\n" +
+        "BRIEF ANTERIOR (generado en el análisis previo)\n" +
+        "═══════════════════════════════════════════════════════════════════\n\n" +
+        JSON.stringify(refine.previousBrief, null, 2),
+    });
+    if (refine.chatHistory && refine.chatHistory.length > 0) {
+      const historyLines = refine.chatHistory
+        .map(
+          (m) =>
+            `${m.role === "user" ? "Operador" : "Asistente"}: ${m.content}`,
+        )
+        .join("\n\n");
+      content.push({
+        type: "text",
+        text:
+          "Historial de correcciones previas:\n\n" + historyLines,
+      });
+    }
+    content.push({
+      type: "text",
+      text:
+        "═══════════════════════════════════════════════════════════════════\n" +
+        "FEEDBACK DEL OPERADOR (corregí el brief según esto)\n" +
+        "═══════════════════════════════════════════════════════════════════\n\n" +
+        refine.feedback,
+    });
+    content.push({ type: "text", text: CONTRACT_BRIEF_REFINE_INSTRUCTION });
+    return { role: "user", content };
+  }
+
   // mode === "extract": inyectamos el brief (si lo tenemos) como contexto de
   // prioridad alta ANTES de la instrucción final.
   if (brief) {
     content.push({ type: "text", text: renderContractBriefBlock(brief) });
   }
 
-  const closing =
-    docs.length === 1
+  const confirmedBrief = briefConfirmed === true;
+  const closingBase = confirmedBrief
+    ? EXTRACT_WITH_CONFIRMED_BRIEF_CLOSING
+    : docs.length === 1
       ? "Extrae los datos del contrato adjunto usando el tool " +
         `"${EXTRAER_DATOS_CONTRATO_TOOL_NAME}". Genera TODAS las ` +
         "combinaciones product × season en `rows` — no resumas a una sola " +
@@ -468,7 +511,7 @@ function buildUserMessage(
         "combinaciones product × season en `rows` — no resumas a una sola " +
         "fila. Respeta las reglas del system prompt y el CONTRACT BRIEF de " +
         "arriba (impuestos, persona adicional, bancos, inventario).";
-  content.push({ type: "text", text: closing });
+  content.push({ type: "text", text: closingBase });
 
   return { role: "user", content };
 }
@@ -763,6 +806,99 @@ function coerceBriefSharedFields(v: unknown): ContractBriefSharedFields {
   };
 }
 
+function coerceRowPlan(v: unknown): ContractBriefRowPlan | null {
+  if (!v || typeof v !== "object") return null;
+  const r = v as Record<string, unknown>;
+  const categories = stringArray(r.categories);
+  if (categories.length === 0 && r.expected_rows == null) return null;
+  return {
+    categories:
+      categories.length > 0 ? categories : stringArray(r.product_categories),
+    occupancies_per_category: numberOrNull(r.occupancies_per_category),
+    seasons_count: numberOrNull(r.seasons_count),
+    expected_rows: numberOrNull(r.expected_rows),
+  };
+}
+
+/** Fallback si el modelo no emitió logic_summary. */
+function buildLogicSummaryFallback(brief: Omit<ContractBrief, "logic_summary" | "row_plan">): string {
+  const parts: string[] = [];
+  const name =
+    brief.shared_fields.nombre_comercial ??
+    brief.shared_fields.proveedor ??
+    "este proveedor";
+  parts.push(`Estás cargando las tarifas de ${name}.`);
+
+  if (brief.shared_fields.pais || brief.shared_fields.direccion) {
+    const loc = [brief.shared_fields.direccion, brief.shared_fields.pais]
+      .filter(Boolean)
+      .join(", ");
+    if (loc) parts.push(`Ubicación: ${loc}.`);
+  }
+
+  if (brief.shared_fields.contract_starts || brief.shared_fields.contract_ends) {
+    parts.push(
+      `Vigencia del contrato: ${brief.shared_fields.contract_starts ?? "?"} al ${brief.shared_fields.contract_ends ?? "?"}.`,
+    );
+  }
+
+  if (brief.seasons_detail.length > 0) {
+    const seasonDesc = brief.seasons_detail
+      .map((s) => {
+        const range =
+          s.raw_range ??
+          [s.starts, s.ends].filter(Boolean).join(" – ") ??
+          "";
+        return `${s.name ?? "Temporada"}${range ? ` (${range})` : ""}`;
+      })
+      .join("; ");
+    parts.push(`Temporadas detectadas: ${seasonDesc}.`);
+  } else if (brief.seasons.length > 0) {
+    parts.push(`Temporadas: ${brief.seasons.join(", ")}.`);
+  }
+
+  if (brief.currency) {
+    parts.push(`Moneda: ${brief.currency}.`);
+  }
+
+  if (brief.prices_include_tax === false) {
+    const rate = brief.tax_rate_pct ?? 13;
+    parts.push(`Los precios NO incluyen el IVA del ${rate}%.`);
+  } else if (brief.prices_include_tax === true) {
+    parts.push("Los precios incluyen IVA.");
+  }
+
+  if (brief.commission_default_pct != null) {
+    parts.push(`Comisión general: ${brief.commission_default_pct}%.`);
+  }
+  if (brief.commission_summary) {
+    parts.push(brief.commission_summary);
+  }
+
+  if (brief.product_categories.length > 0) {
+    parts.push(
+      `Categorías: ${brief.product_categories.join(", ")}.`,
+    );
+  }
+
+  const est = brief.expected_row_estimate;
+  if (est != null && est > 0) {
+    parts.push(`Se estiman aproximadamente ${est} filas en el Excel.`);
+  }
+
+  if (brief.meal_plan_note) {
+    parts.push(brief.meal_plan_note);
+  }
+  if (brief.special_periods_note) {
+    parts.push(brief.special_periods_note);
+  }
+  if (brief.notes) {
+    parts.push(brief.notes);
+  }
+
+  return parts.join(" ");
+}
+
 export function coerceBrief(input: unknown): ContractBrief {
   const r =
     input && typeof input === "object"
@@ -772,7 +908,17 @@ export function coerceBrief(input: unknown): ContractBrief {
     stringArray(r.seasons),
     coerceSeasonsDetail(r.seasons_detail),
   );
-  return {
+  const productCategories = stringArray(r.product_categories);
+  let rowPlan = coerceRowPlan(r.row_plan);
+  if (!rowPlan && productCategories.length > 0) {
+    rowPlan = {
+      categories: productCategories,
+      occupancies_per_category: null,
+      seasons_count: reconciled.seasons_detail.length || reconciled.seasons.length || null,
+      expected_rows: numberOrNull(r.expected_row_estimate),
+    };
+  }
+  const base: Omit<ContractBrief, "logic_summary" | "row_plan"> = {
     shared_fields: coerceBriefSharedFields(r.shared_fields),
     prices_include_tax: boolOrNull(r.prices_include_tax),
     tax_rate_pct: numberOrNull(r.tax_rate_pct),
@@ -784,12 +930,31 @@ export function coerceBrief(input: unknown): ContractBrief {
     bank_accounts: coerceBankAccounts(r.bank_accounts),
     additional_person: coerceAdditionalPerson(r.additional_person),
     special_periods_note: stringOrNull(r.special_periods_note),
-    product_categories: stringArray(r.product_categories),
+    product_categories: productCategories,
     seasons: reconciled.seasons,
     seasons_detail: reconciled.seasons_detail,
     sections: stringArray(r.sections),
-    expected_row_estimate: numberOrNull(r.expected_row_estimate),
+    expected_row_estimate:
+      numberOrNull(r.expected_row_estimate) ??
+      rowPlan?.expected_rows ??
+      null,
     notes: stringOrNull(r.notes),
+  };
+  const logicSummary =
+    stringOrNull(r.logic_summary) ?? buildLogicSummaryFallback(base);
+  if (rowPlan && rowPlan.expected_rows == null && base.expected_row_estimate) {
+    rowPlan = { ...rowPlan, expected_rows: base.expected_row_estimate };
+  }
+  if (rowPlan && rowPlan.seasons_count == null) {
+    rowPlan = {
+      ...rowPlan,
+      seasons_count: reconciled.seasons_detail.length || reconciled.seasons.length || null,
+    };
+  }
+  return {
+    ...base,
+    logic_summary: logicSummary,
+    row_plan: rowPlan,
   };
 }
 
@@ -818,8 +983,10 @@ async function extractContractBrief(
   docs: PreparedDocumentInput[],
   requestId: string | undefined,
   context: ExtractionContext | undefined,
+  refine?: BriefRefineContext,
 ): Promise<BriefResult | null> {
   const client = getAnthropicClient();
+  const mode = refine ? "refine" : "brief";
   let response: Message;
   try {
     response = await runStreamWithRetry(
@@ -828,7 +995,7 @@ async function extractContractBrief(
           .stream({
             model: SUPPLIER_INTELLIGENCE_BRIEF_MODEL,
             max_tokens: BRIEF_MAX_TOKENS,
-            system: SUPPLIER_INTELLIGENCE_SYSTEM_PROMPT,
+            system: BRIEF_ANALYSIS_SYSTEM_PROMPT,
             // Solo el tool del brief: sin caching cross-modelo no hay razón
             // para arrastrar el schema (grande) del tool de extracción acá.
             tools: [REGISTRAR_BRIEF_CONTRATO_TOOL],
@@ -836,10 +1003,12 @@ async function extractContractBrief(
               type: "tool",
               name: REGISTRAR_BRIEF_CONTRATO_TOOL_NAME,
             },
-            messages: [buildUserMessage(docs, { context, mode: "brief" })],
+            messages: [
+              buildUserMessage(docs, { context, mode, refine }),
+            ],
           })
           .finalMessage(),
-      { requestId, label: "brief" },
+      { requestId, label: refine ? "refine-brief" : "brief" },
     );
   } catch (err) {
     // Diagnóstico EXPLÍCITO: si el brief falla, el step de Variables de
@@ -1145,6 +1314,47 @@ export async function analyzeContractBrief(
   };
 }
 
+/**
+ * Re-analiza el brief tras feedback del usuario (chat de correcciones).
+ */
+export async function refineContractBrief(
+  docs: PreparedDocumentInput[],
+  previousBrief: ContractBrief,
+  feedback: string,
+  requestId?: string,
+  context?: ExtractionContext,
+  chatHistory?: BriefChatMessage[],
+): Promise<BriefAnalysisResult> {
+  if (docs.length === 0) {
+    throw ApiError.badRequest("Se requiere al menos un documento para refinar.");
+  }
+  const trimmed = feedback.trim();
+  if (!trimmed) {
+    throw ApiError.badRequest("El mensaje de corrección no puede estar vacío.");
+  }
+  const result = await extractContractBrief(docs, requestId, context, {
+    previousBrief,
+    feedback: trimmed,
+    chatHistory,
+  });
+  const usage = result?.usage ?? {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheWriteTokens: 0,
+    cacheReadTokens: 0,
+    costUsd: 0,
+  };
+  return {
+    brief: result?.brief ?? coerceBrief({}),
+    model: SUPPLIER_INTELLIGENCE_BRIEF_MODEL,
+    usage: {
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      costUsd: usage.costUsd,
+    },
+  };
+}
+
 export async function extractContract(
   docs: PreparedDocumentInput[],
   requestId?: string,
@@ -1211,7 +1421,12 @@ export async function extractContract(
               name: EXTRAER_DATOS_CONTRATO_TOOL_NAME,
             },
             messages: [
-              buildUserMessage(docs, { context, mode: "extract", brief }),
+              buildUserMessage(docs, {
+                context,
+                mode: "extract",
+                brief,
+                briefConfirmed: !!briefOverride,
+              }),
             ],
           })
           .finalMessage(),

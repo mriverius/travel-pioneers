@@ -1,6 +1,26 @@
 import { REGISTRAR_BRIEF_CONTRATO_TOOL_NAME } from "./briefSchema.js";
 
 /**
+ * System prompt dedicado a la Fase 1 (Sonnet). Más corto y focalizado que el
+ * prompt de extracción: el objetivo es ENTENDER la lógica del documento, no
+ * generar filas de tarifas.
+ */
+export const BRIEF_ANALYSIS_SYSTEM_PROMPT =
+  "Eres un analista experto en contratos y tarifarios turísticos " +
+  "(hoteles, lodges, tours, transfers) para operadoras en Latinoamérica.\n\n" +
+  "Tu trabajo en esta fase es ENTENDER Y ESTRUCTURAR la lógica del documento, " +
+  "NO extraer todas las tarifas fila por fila. Identificá:\n" +
+  "  • Estructura tarifaria: cómo organiza el proveedor sus precios\n" +
+  "  • Nomenclatura de habitaciones/servicios y temporadas\n" +
+  "  • Reglas de IVA/impuestos, comisión y moneda\n" +
+  "  • Persona adicional, cuentas bancarias, plan de comidas, políticas especiales\n" +
+  "  • Inventario: categorías, temporadas con fechas, secciones\n\n" +
+  "Generá un `logic_summary` en español natural (segunda persona) que un " +
+  "operador humano pueda leer de un vistazo y confirmar si entendiste bien.\n" +
+  "Estimá el `row_plan` (categorías × ocupaciones × temporadas) para que la " +
+  "extracción final sepa cuántas filas esperar.";
+
+/**
  * Instrucción final (trailing) para la llamada de BRIEF (Fase 1).
  *
  * Se envía DESPUÉS del/los documento(s) y del bloque de cache, de modo que
@@ -34,9 +54,44 @@ export const CONTRACT_BRIEF_INSTRUCTION =
   "  7. INVENTARIO: lista de categorías/habitaciones, temporadas y secciones " +
   "de tarifas (paquetes, noche adicional, experiencias, transfers, spa, " +
   "amenidades…), y un estimado de cuántas filas debería tener el contrato " +
-  "completo.\n\n" +
+  "completo.\n" +
+  "  8. logic_summary: párrafo narrativo en ESPAÑOL (segunda persona) que " +
+  "resuma todo lo anterior para un operador humano.\n" +
+  "  9. row_plan: categorías, ocupaciones por categoría, cantidad de " +
+  "temporadas y expected_rows (categorías × ocupaciones × temporadas).\n\n" +
   "Sé EXHAUSTIVO sobre todo en bancos y persona adicional — son los datos que " +
   "más se pierden cuando se extrae todo de una vez.";
+
+/**
+ * Instrucción para re-analizar el brief tras feedback del usuario (refine).
+ */
+export const CONTRACT_BRIEF_REFINE_INSTRUCTION =
+  "RE-ANÁLISIS DEL CONTRATO (corrección humana).\n\n" +
+  "Arriba tenés el documento original, el brief que generaste antes y el " +
+  "feedback del operador. Tu trabajo es CORREGIR el brief según lo que el " +
+  "usuario indicó — no extraigas filas de tarifas todavía.\n\n" +
+  `Registrá el brief ACTUALIZADO con el tool "${REGISTRAR_BRIEF_CONTRATO_TOOL_NAME}".\n\n` +
+  "Reglas:\n" +
+  "  • El feedback del usuario tiene PRIORIDAD sobre tu análisis anterior.\n" +
+  "  • Re-leé el documento solo para verificar/corregir lo que el usuario señaló.\n" +
+  "  • Actualizá logic_summary para reflejar las correcciones en español natural.\n" +
+  "  • Recalculá row_plan y expected_row_estimate si cambian categorías, " +
+  "temporadas u ocupaciones.\n" +
+  "  • Mantén intacto lo que el usuario NO cuestionó.";
+
+/**
+ * Cierre de extracción cuando el brief ya fue validado por un humano.
+ */
+export const EXTRACT_WITH_CONFIRMED_BRIEF_CLOSING =
+  "El CONTRACT BRIEF de arriba fue VALIDADO por un operador humano — " +
+  "tratalo como FUENTE DE VERDAD para TODAS las reglas globales (IVA, " +
+  "comisión, temporadas, fechas, comidas, persona adicional, bancos). " +
+  "Usá el documento adjunto ÚNICAMENTE para leer los valores literales de " +
+  "precios y nombres de producto; NO re-interprete las reglas globales del " +
+  "documento si contradicen el brief confirmado. " +
+  "Respetá estrictamente row_plan.expected_rows / expected_row_estimate como " +
+  "meta de completitud. Genera TODAS las combinaciones product × season en " +
+  "`rows` — no resumas a una sola fila.";
 
 /**
  * Renderiza el brief ya extraído como un bloque de texto de PRIORIDAD ALTA
@@ -80,6 +135,12 @@ export function renderContractBriefBlock(brief: {
   sections: string[];
   expected_row_estimate: number | null;
   notes: string | null;
+  row_plan?: {
+    categories: string[];
+    occupancies_per_category: number | null;
+    seasons_count: number | null;
+    expected_rows: number | null;
+  } | null;
 }): string {
   const lines: string[] = [];
   lines.push(
@@ -228,12 +289,13 @@ export function renderContractBriefBlock(brief: {
     );
   }
   if (brief.expected_row_estimate && brief.expected_row_estimate > 0) {
+    const targetRows =
+      brief.row_plan?.expected_rows ?? brief.expected_row_estimate;
     const seasonCount =
-      (brief.seasons_detail?.length ?? 0) || brief.seasons.length;
+      brief.row_plan?.seasons_count ??
+      ((brief.seasons_detail?.length ?? 0) || brief.seasons.length);
     const perSeason =
-      seasonCount > 0
-        ? Math.round(brief.expected_row_estimate / seasonCount)
-        : 0;
+      seasonCount > 0 ? Math.round(targetRows / seasonCount) : 0;
     const perSeasonLine =
       seasonCount > 0 && perSeason > 0
         ? ` Eso es ~${perSeason} combinaciones base POR CADA UNA de las ` +
@@ -242,7 +304,7 @@ export function renderContractBriefBlock(brief: {
         : "";
     lines.push(
       `• META DE COMPLETITUD: generá aproximadamente ` +
-        `${brief.expected_row_estimate} filas base (combinaciones ` +
+        `${targetRows} filas base (combinaciones ` +
         `categoría × ocupación × temporada, SIN contar las filas de persona ` +
         `adicional que agrega el servidor).${perSeasonLine} Si tu salida tiene ` +
         "muchas menos, te faltaron combinaciones — revisá temporada por temporada.",

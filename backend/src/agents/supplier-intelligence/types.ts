@@ -286,6 +286,24 @@ export interface ContractBriefSharedFields {
 }
 
 /**
+ * Plan de filas estimado por la Fase 1 (Sonnet). Opus usa `expected_rows` como
+ * meta de completitud al generar el grid.
+ */
+export interface ContractBriefRowPlan {
+  /** Categorías / tipos de habitación o servicio detectados. */
+  categories: string[];
+  /**
+   * Ocupaciones por categoría (ej. 1 = solo doble, 2 = sencilla + doble).
+   * null si el documento no lo aclara — el writer asume 1.
+   */
+  occupancies_per_category: number | null;
+  /** Cantidad de temporadas distintas. */
+  seasons_count: number | null;
+  /** Total estimado de filas = categorías × ocupaciones × temporadas (+ extras). */
+  expected_rows: number | null;
+}
+
+/**
  * Resultado de la pasada de BRIEF (Fase 1). Captura las reglas GLOBALES del
  * contrato + un inventario, en una llamada chica y focalizada — sin filas de
  * tarifas. Se inyecta como contexto de prioridad alta en la pasada principal
@@ -321,6 +339,20 @@ export interface ContractBrief {
   sections: string[];
   expected_row_estimate: number | null;
   notes: string | null;
+  /**
+   * Resumen narrativo en español para el operador humano — explica en lenguaje
+   * natural qué entendió Sonnet del documento (proveedor, temporadas, IVA,
+   * comisión, filas estimadas). Se muestra en el Paso 2 como card principal.
+   */
+  logic_summary: string | null;
+  /** Inventario estructurado para estimar cuántas filas generará Opus. */
+  row_plan: ContractBriefRowPlan | null;
+}
+
+/** Mensaje del chat de refinamiento del brief (Paso 2). */
+export interface BriefChatMessage {
+  role: "user" | "assistant";
+  content: string;
 }
 
 /** The kinds of documents the agent accepts. */

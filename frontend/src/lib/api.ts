@@ -647,6 +647,20 @@ export interface ConfigSeason {
   raw_range: string | null;
 }
 
+/** Plan de filas estimado. Mirrors backend ContractBriefRowPlan. */
+export interface ConfigRowPlan {
+  categories: string[];
+  occupancies_per_category: number | null;
+  seasons_count: number | null;
+  expected_rows: number | null;
+}
+
+/** Mensaje del chat de refinamiento del brief. */
+export interface BriefChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
 /**
  * Identidad / vigencia del proveedor — datos IGUALES en todas las filas.
  * Mirrors backend ContractBriefSharedFields. El usuario los confirma en Step 2
@@ -691,6 +705,10 @@ export interface ContractConfigVariables {
   sections: string[];
   expected_row_estimate: number | null;
   notes: string | null;
+  /** Resumen narrativo en español para el operador (Paso 2). */
+  logic_summary: string | null;
+  /** Inventario estructurado de filas estimadas. */
+  row_plan: ConfigRowPlan | null;
 }
 
 export interface AnalyzeBriefMeta {
@@ -705,6 +723,18 @@ export interface AnalyzeBriefMeta {
 }
 
 export interface AnalyzeBriefResponse {
+  success: true;
+  brief: ContractConfigVariables;
+  meta: AnalyzeBriefMeta;
+}
+
+export interface RefineBriefInput {
+  previousBrief: ContractConfigVariables;
+  feedbackMessage: string;
+  chatHistory?: BriefChatMessage[];
+}
+
+export interface RefineBriefResponse {
   success: true;
   brief: ContractConfigVariables;
   meta: AnalyzeBriefMeta;
@@ -1025,6 +1055,42 @@ export const api = {
       }
       return requestForm<AnalyzeBriefResponse>(
         "/api/supplier-intelligence/analyze-brief",
+        form,
+        { timeoutMs: 3 * 60 * 1000 },
+      );
+    },
+    /**
+     * Re-analiza el brief tras correcciones en lenguaje natural (Paso 2).
+     */
+    refineBrief(
+      files: File[],
+      input: ExtractContractInput & RefineBriefInput,
+    ) {
+      if (files.length === 0) {
+        throw new ApiError(
+          400,
+          "Adjunta al menos un documento antes de continuar.",
+        );
+      }
+      const form = new FormData();
+      for (const f of files) {
+        form.append("files", f);
+      }
+      form.append(
+        "is_existing_supplier",
+        input.isExistingSupplier ? "true" : "false",
+      );
+      const trimmed = input.comments?.trim();
+      if (trimmed) {
+        form.append("comments", trimmed);
+      }
+      form.append("brief", JSON.stringify(input.previousBrief));
+      form.append("feedback_message", input.feedbackMessage.trim());
+      if (input.chatHistory && input.chatHistory.length > 0) {
+        form.append("chat_history", JSON.stringify(input.chatHistory));
+      }
+      return requestForm<RefineBriefResponse>(
+        "/api/supplier-intelligence/refine-brief",
         form,
         { timeoutMs: 3 * 60 * 1000 },
       );

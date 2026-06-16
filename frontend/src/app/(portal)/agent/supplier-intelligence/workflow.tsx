@@ -33,6 +33,7 @@ import {
   api,
   ApiError,
   type AnalyzeBriefMeta,
+  type BriefChatMessage,
   type ContractConfigVariables,
   type ExtractContractResponse,
   type ExtractedContract,
@@ -241,6 +242,10 @@ export function SupplierWorkflow() {
   const [configMeta, setConfigMeta] = useState<AnalyzeBriefMeta | null>(null);
   /** True mientras corre la extracción principal disparada desde el step 2. */
   const [extracting, setExtracting] = useState(false);
+  /** True mientras Sonnet re-analiza el brief tras feedback del chat. */
+  const [isRefining, setIsRefining] = useState(false);
+  /** Historial del chat de correcciones en el Paso 2. */
+  const [chatHistory, setChatHistory] = useState<BriefChatMessage[]>([]);
 
   const [comments, setComments] = useState("");
   const [isExistingSupplier, setIsExistingSupplier] = useState<boolean | null>(
@@ -497,6 +502,7 @@ export function SupplierWorkflow() {
       await new Promise((r) => setTimeout(r, 300));
       setConfig(response.brief);
       setConfigMeta(response.meta);
+      setChatHistory([]);
       setStep(2);
     } catch (err) {
       if (err instanceof ApiError) {
@@ -510,6 +516,70 @@ export function SupplierWorkflow() {
     } finally {
       setAnalyzing(false);
       setMatchingPhase(null);
+    }
+  };
+
+  /**
+   * Paso 2 — chat: re-analiza el brief con Sonnet según feedback del usuario.
+   */
+  const refineConfig = async (message: string) => {
+    if (
+      selectedFiles.length === 0 ||
+      !config ||
+      isRefining ||
+      extracting ||
+      isExistingSupplier === null
+    ) {
+      return;
+    }
+    const userMsg = message.trim();
+    if (!userMsg) return;
+
+    setIsRefining(true);
+    setServerError(null);
+    setChatHistory((h) => [...h, { role: "user", content: userMsg }]);
+
+    try {
+      const response = await api.supplierIntelligence.refineBrief(
+        selectedFiles,
+        {
+          comments,
+          isExistingSupplier,
+          previousBrief: config,
+          feedbackMessage: userMsg,
+          chatHistory,
+        },
+      );
+      setConfig(response.brief);
+      setConfigMeta((prev) =>
+        prev
+          ? {
+              ...prev,
+              model: response.meta.model,
+              processed_at: response.meta.processed_at,
+              input_tokens: response.meta.input_tokens,
+              output_tokens: response.meta.output_tokens,
+              cost_usd: response.meta.cost_usd,
+            }
+          : response.meta,
+      );
+      const assistantReply =
+        response.brief.logic_summary?.trim() ||
+        "Actualicé el análisis según tus correcciones.";
+      setChatHistory((h) => [
+        ...h,
+        { role: "assistant", content: assistantReply },
+      ]);
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setServerError(err.message);
+      } else {
+        setServerError(
+          "No pudimos reanalizar el documento. Revisa tu conexión e intenta de nuevo.",
+        );
+      }
+    } finally {
+      setIsRefining(false);
     }
   };
 
@@ -569,6 +639,8 @@ export function SupplierWorkflow() {
     setConfig(null);
     setConfigMeta(null);
     setExtracting(false);
+    setIsRefining(false);
+    setChatHistory([]);
   };
 
   /** Step 2 ← 3: volver del config a la carga sin perder los archivos. */
@@ -578,6 +650,8 @@ export function SupplierWorkflow() {
     setConfigMeta(null);
     setServerError(null);
     setProgress(0);
+    setIsRefining(false);
+    setChatHistory([]);
   };
 
   const approve = (payload: ApprovedPayload) => {
@@ -673,8 +747,11 @@ export function SupplierWorkflow() {
             meta={configMeta}
             catalogPrefill={catalogPrefill}
             extracting={extracting}
+            isRefining={isRefining}
+            chatHistory={chatHistory}
             serverError={serverError}
             onConfirm={confirmConfig}
+            onRefine={refineConfig}
             onBack={backToUpload}
           />
         )}

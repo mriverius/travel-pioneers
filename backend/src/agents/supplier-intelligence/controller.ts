@@ -6,10 +6,11 @@ import {
   analyzeContractBrief,
   coerceBrief,
   extractContract,
+  refineContractBrief,
   type ExtractionContext,
   type PreparedDocumentInput,
 } from "./service.js";
-import type { ContractBrief } from "./types.js";
+import type { BriefChatMessage, ContractBrief } from "./types.js";
 
 /**
  * Maximum length for the optional user comments field. Picked to be generous
@@ -87,6 +88,57 @@ function parseBriefField(raw: unknown): ContractBrief | null {
     throw ApiError.badRequest("El campo 'brief' debe ser JSON válido.");
   }
   return coerceBrief(parsed);
+}
+
+function parseFeedbackField(raw: unknown): string {
+  if (typeof raw !== "string" || raw.trim() === "") {
+    throw ApiError.badRequest(
+      "Falta el campo 'feedback_message' con la corrección del usuario.",
+    );
+  }
+  const trimmed = raw.trim();
+  if (trimmed.length > MAX_COMMENTS_LENGTH) {
+    throw ApiError.badRequest(
+      `El mensaje de corrección excede el máximo (${MAX_COMMENTS_LENGTH} caracteres).`,
+    );
+  }
+  return trimmed;
+}
+
+function parseChatHistoryField(raw: unknown): BriefChatMessage[] | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "string" || raw.trim() === "") return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw ApiError.badRequest("El campo 'chat_history' debe ser JSON válido.");
+  }
+  if (!Array.isArray(parsed)) {
+    throw ApiError.badRequest("'chat_history' debe ser un array.");
+  }
+  const out: BriefChatMessage[] = [];
+  for (const item of parsed) {
+    if (
+      item &&
+      typeof item === "object" &&
+      (item as { role?: string }).role === "user" &&
+      typeof (item as { content?: unknown }).content === "string"
+    ) {
+      out.push({ role: "user", content: (item as { content: string }).content });
+    } else if (
+      item &&
+      typeof item === "object" &&
+      (item as { role?: string }).role === "assistant" &&
+      typeof (item as { content?: unknown }).content === "string"
+    ) {
+      out.push({
+        role: "assistant",
+        content: (item as { content: string }).content,
+      });
+    }
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 /**
@@ -189,6 +241,72 @@ export async function analyzeBriefHandler(
     seasonsDetailCount: brief.seasons_detail.length,
     seasonNames: brief.seasons,
     bankAccounts: brief.bank_accounts.length,
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    costUsd: usage.costUsd,
+  });
+
+  res.status(200).json({
+    success: true,
+    brief,
+    meta: {
+      filename: combinedFilename,
+      size_bytes: totalBytes,
+      model,
+      processed_at: new Date().toISOString(),
+      is_existing_supplier: context.isExistingSupplier,
+      input_tokens: usage.inputTokens,
+      output_tokens: usage.outputTokens,
+      cost_usd: usage.costUsd,
+    },
+  });
+}
+
+/**
+ * POST /api/supplier-intelligence/refine-brief
+ *
+ * Re-analiza el brief tras feedback del usuario en el chat del Paso 2.
+ * Mismo multipart que analyze-brief + campos `brief` (JSON anterior) y
+ * `feedback_message` (texto del usuario). Opcional: `chat_history` (JSON array).
+ */
+export async function refineBriefHandler(
+  req: Request,
+  res: Response,
+): Promise<void> {
+  const { prepared, files, totalBytes, context } =
+    await prepareUploadedDocs(req);
+
+  const previousBrief = parseBriefField(req.body?.brief);
+  if (!previousBrief) {
+    throw ApiError.badRequest(
+      "Falta el campo 'brief' con el análisis anterior.",
+    );
+  }
+  const feedback = parseFeedbackField(req.body?.feedback_message);
+  const chatHistory = parseChatHistoryField(req.body?.chat_history);
+
+  logger.info("Supplier Intelligence brief refine started", {
+    requestId: req.id,
+    fileCount: files.length,
+    feedbackLength: feedback.length,
+    chatHistoryLength: chatHistory?.length ?? 0,
+  });
+
+  const { brief, model, usage } = await refineContractBrief(
+    prepared,
+    previousBrief,
+    feedback,
+    req.id,
+    context,
+    chatHistory,
+  );
+
+  const combinedFilename = combineFilenames(files);
+
+  logger.info("Supplier Intelligence brief refine finished", {
+    requestId: req.id,
+    filename: combinedFilename,
+    logicSummaryLength: brief.logic_summary?.length ?? 0,
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
     costUsd: usage.costUsd,

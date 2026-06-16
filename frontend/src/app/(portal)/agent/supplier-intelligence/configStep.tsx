@@ -4,23 +4,27 @@ import {
   AlertTriangle,
   ArrowLeft,
   Banknote,
+  Brain,
   Building2,
   CalendarRange,
   Calculator,
   Check,
+  ChevronDown,
   Info,
   Loader2,
   Percent,
   Plus,
   Receipt,
+  Send,
   Sparkles,
   Tags,
   Trash2,
   UserPlus,
 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type {
   AnalyzeBriefMeta,
+  BriefChatMessage,
   ConfigAdditionalPerson,
   ConfigBankAccount,
   ConfigSeason,
@@ -43,6 +47,108 @@ import type { CatalogPrefill } from "./workflow";
  * El componente es totalmente controlado por estado local: clona el config
  * entrante, deja editar cada campo, y al confirmar emite el objeto editado.
  */
+
+/* -------------------------------------------------------------------------- */
+/*                         Draft hydration from config                        */
+/* -------------------------------------------------------------------------- */
+
+function hydrateDraftFromConfig(
+  config: ContractConfigVariables,
+): ContractConfigVariables {
+  const detail = config.seasons_detail.map((s) => ({ ...s }));
+  const haveNames = new Set(
+    detail.map((s) => (s.name ?? "").trim().toLowerCase()),
+  );
+  for (const name of config.seasons) {
+    const key = name.trim().toLowerCase();
+    if (key !== "" && !haveNames.has(key)) {
+      haveNames.add(key);
+      detail.push({ name, starts: null, ends: null, raw_range: null });
+    }
+  }
+  return {
+    ...config,
+    shared_fields: { ...config.shared_fields },
+    bank_accounts: config.bank_accounts.map((b) => ({ ...b })),
+    additional_person: config.additional_person.map((a) => ({ ...a })),
+    seasons_detail: detail,
+    product_categories: [...config.product_categories],
+    seasons: [...config.seasons],
+    sections: [...config.sections],
+    row_plan: config.row_plan ? { ...config.row_plan, categories: [...config.row_plan.categories] } : null,
+  };
+}
+
+function buildLogicSummaryFromBrief(
+  brief: ContractConfigVariables,
+): string | null {
+  const parts: string[] = [];
+  const name =
+    brief.shared_fields.nombre_comercial?.trim() ||
+    brief.shared_fields.proveedor?.trim();
+  if (name) {
+    parts.push(`Estás cargando las tarifas de ${name}.`);
+  }
+
+  const loc = [brief.shared_fields.direccion, brief.shared_fields.pais]
+    .filter(Boolean)
+    .join(", ");
+  if (loc) parts.push(`Ubicación: ${loc}.`);
+
+  if (brief.shared_fields.contract_starts || brief.shared_fields.contract_ends) {
+    parts.push(
+      `Vigencia: ${brief.shared_fields.contract_starts ?? "?"} al ${brief.shared_fields.contract_ends ?? "?"}.`,
+    );
+  }
+
+  if (brief.seasons_detail.length > 0) {
+    const seasonDesc = brief.seasons_detail
+      .map((s) => {
+        const range =
+          s.raw_range?.trim() ||
+          [s.starts, s.ends].filter(Boolean).join(" – ");
+        return `${s.name ?? "Temporada"}${range ? ` (${range})` : ""}`;
+      })
+      .join("; ");
+    parts.push(`Temporadas: ${seasonDesc}.`);
+  } else if (brief.seasons.length > 0) {
+    parts.push(`Temporadas: ${brief.seasons.join(", ")}.`);
+  }
+
+  if (brief.currency) parts.push(`Moneda: ${brief.currency}.`);
+
+  if (brief.prices_include_tax === false) {
+    const rate = brief.tax_rate_pct ?? 13;
+    parts.push(`Los precios NO incluyen el IVA del ${rate}%.`);
+  } else if (brief.prices_include_tax === true) {
+    parts.push("Los precios incluyen IVA.");
+  }
+
+  if (brief.commission_default_pct != null) {
+    parts.push(`Comisión general: ${brief.commission_default_pct}%.`);
+  }
+  if (brief.commission_summary?.trim()) {
+    parts.push(brief.commission_summary.trim());
+  }
+
+  if (brief.product_categories.length > 0) {
+    parts.push(`Categorías: ${brief.product_categories.join(", ")}.`);
+  }
+
+  if (brief.expected_row_estimate != null && brief.expected_row_estimate > 0) {
+    parts.push(
+      `Se estiman aproximadamente ${brief.expected_row_estimate} filas en el Excel.`,
+    );
+  }
+
+  if (brief.meal_plan_note?.trim()) parts.push(brief.meal_plan_note.trim());
+  if (brief.special_periods_note?.trim()) {
+    parts.push(brief.special_periods_note.trim());
+  }
+  if (brief.notes?.trim()) parts.push(brief.notes.trim());
+
+  return parts.length > 0 ? parts.join(" ") : null;
+}
 
 /* -------------------------------------------------------------------------- */
 /*                              Small UI helpers                              */
@@ -156,8 +262,11 @@ export function ConfigVariablesStep({
   meta,
   catalogPrefill,
   extracting,
+  isRefining,
+  chatHistory,
   serverError,
   onConfirm,
+  onRefine,
   onBack,
 }: {
   config: ContractConfigVariables;
@@ -166,41 +275,28 @@ export function ConfigVariablesStep({
   catalogPrefill: CatalogPrefill | null;
   /** True mientras corre la extracción principal disparada al confirmar. */
   extracting: boolean;
+  /** True mientras Sonnet re-analiza tras feedback del chat. */
+  isRefining: boolean;
+  /** Historial conversacional de correcciones. */
+  chatHistory: BriefChatMessage[];
   serverError: string | null;
   onConfirm: (
     edited: ContractConfigVariables,
     catalog: CatalogPrefill | null,
   ) => void;
+  onRefine: (message: string) => Promise<void>;
   onBack: () => void;
 }) {
-  // Estado local editable — clona el config entrante una sola vez.
-  // Defensa en profundidad: el backend ya reconcilia seasons ↔ seasons_detail,
-  // pero si por cualquier camino llegan nombres en `seasons` sin entrada en
-  // `seasons_detail`, los hidratamos acá para que el usuario SIEMPRE vea las
-  // temporadas detectadas (y pueda completar las fechas).
-  const [draft, setDraft] = useState<ContractConfigVariables>(() => {
-    const detail = config.seasons_detail.map((s) => ({ ...s }));
-    const haveNames = new Set(
-      detail.map((s) => (s.name ?? "").trim().toLowerCase()),
-    );
-    for (const name of config.seasons) {
-      const key = name.trim().toLowerCase();
-      if (key !== "" && !haveNames.has(key)) {
-        haveNames.add(key);
-        detail.push({ name, starts: null, ends: null, raw_range: null });
-      }
-    }
-    return {
-      ...config,
-      shared_fields: { ...config.shared_fields },
-      bank_accounts: config.bank_accounts.map((b) => ({ ...b })),
-      additional_person: config.additional_person.map((a) => ({ ...a })),
-      seasons_detail: detail,
-      product_categories: [...config.product_categories],
-      seasons: [...config.seasons],
-      sections: [...config.sections],
-    };
-  });
+  const [feedbackInput, setFeedbackInput] = useState("");
+
+  // Estado local editable — se re-sincroniza cuando el brief se actualiza tras refine.
+  const [draft, setDraft] = useState<ContractConfigVariables>(() =>
+    hydrateDraftFromConfig(config),
+  );
+
+  useEffect(() => {
+    setDraft(hydrateDraftFromConfig(config));
+  }, [config]);
 
   // Clasificación de catálogo (lista-proveedores). codigo_servicio es row-level
   // (se confirma en el step 3), así que NO se edita acá — pero lo arrastramos
@@ -311,9 +407,10 @@ export function ConfigVariablesStep({
    * meta de completitud por temporada, y las filas de persona adicional las
    * agrega el servidor automáticamente. */
   const initSeasons = config.seasons_detail.length;
-  const [planCats, setPlanCats] = useState<number>(
-    () => config.product_categories.length || 0,
-  );
+  const [planCats, setPlanCats] = useState<number>(() => {
+    const fromPlan = config.row_plan?.categories.length ?? 0;
+    return fromPlan || config.product_categories.length || 0;
+  });
   const [planOcc, setPlanOcc] = useState<number>(() => {
     const cats = config.product_categories.length;
     const est = config.expected_row_estimate ?? 0;
@@ -331,6 +428,20 @@ export function ConfigVariablesStep({
   // (2 filas extra) en el servidor — estimación.
   const expansionRows = hasAddl ? 2 * Math.max(0, planCats) * planSeasons : 0;
   const finalEstimate = baseTotal + expansionRows;
+
+  const handleRefine = async () => {
+    const msg = feedbackInput.trim();
+    if (!msg || isRefining || extracting) return;
+    setFeedbackInput("");
+    await onRefine(msg);
+  };
+
+  const logicSummary =
+    draft.logic_summary?.trim() ||
+    config.logic_summary?.trim() ||
+    buildLogicSummaryFromBrief(draft) ||
+    buildLogicSummaryFromBrief(config) ||
+    "No pudimos generar un resumen. Revisá los detalles técnicos abajo o usá el chat para corregir.";
 
   const handleConfirm = () => {
     if (extracting) return;
@@ -354,23 +465,116 @@ export function ConfigVariablesStep({
 
   return (
     <div className="px-5 sm:px-8 py-7 space-y-5">
-      <div className="rounded-xl border border-primary/30 bg-primary/5 px-4 py-3.5">
-        <div className="flex items-start gap-2">
-          <Info className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-          <div>
-            <p className="text-[13px] font-semibold text-foreground">
-              Revisá las variables de configuración antes de extraer
+      {/* SECCIÓN 1 — Resumen inteligente */}
+      <div className="rounded-xl border border-primary/25 bg-gradient-to-br from-primary/8 via-card/80 to-card/60 shadow-sm">
+        <header className="flex items-center gap-2 px-4 py-3 border-b border-primary/15">
+          <Brain className="h-4 w-4 text-primary shrink-0" />
+          <p className="text-[13px] font-semibold text-foreground">
+            Lo que entendí del documento
+          </p>
+        </header>
+        <div className="px-4 py-4">
+          {isRefining ? (
+            <div className="flex items-center gap-2 text-[13px] text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin text-primary" />
+              Reanalizando según tus correcciones…
+            </div>
+          ) : (
+            <p className="text-[13.5px] leading-relaxed text-foreground/90 whitespace-pre-wrap">
+              {logicSummary}
             </p>
-            <p className="mt-0.5 text-[12px] text-muted-foreground">
-              Estas son las reglas globales que la IA detectó en{" "}
-              <span className="text-foreground/90">{meta.filename}</span>.
-              Corregilas si algo está mal — se aplican a TODAS las filas, así
-              que un dato equivocado acá (ej. el IVA o la comisión) se propaga
-              a toda la tarifa.
-            </p>
+          )}
+          <p className="mt-3 text-[11px] text-muted-foreground">
+            Fuente:{" "}
+            <span className="text-foreground/80">{meta.filename}</span>
+            {meta.model ? ` · ${meta.model}` : null}
+          </p>
+        </div>
+      </div>
+
+      {/* SECCIÓN 2 — Chat de feedback */}
+      <div className="rounded-xl border border-border bg-card/60">
+        <header className="px-4 py-3 border-b border-border/60">
+          <p className="text-[12.5px] font-semibold text-foreground">
+            ¿Algo está mal o quieres ajustar algo? Cuéntame
+          </p>
+        </header>
+        <div className="px-4 py-3 space-y-3">
+          {chatHistory.length > 0 && (
+            <div className="space-y-3 max-h-64 overflow-y-auto pr-1">
+              {chatHistory.map((msg, i) => (
+                <div
+                  key={i}
+                  className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+                >
+                  <div
+                    className={`max-w-[92%] rounded-lg px-3 py-2 text-[13px] leading-relaxed ${
+                      msg.role === "user"
+                        ? "bg-primary/15 text-foreground border border-primary/20"
+                        : "bg-secondary/50 text-foreground/90 border border-border/60"
+                    }`}
+                  >
+                    {msg.content}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="space-y-2">
+            <textarea
+              value={feedbackInput}
+              onChange={(e) => setFeedbackInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  void handleRefine();
+                }
+              }}
+              disabled={isRefining || extracting}
+              rows={3}
+              placeholder="Ej: La comisión es 20%, no 25%. La temporada alta termina el 15 de abril, no el 30..."
+              className="w-full rounded-lg border border-border bg-secondary/30 px-3 py-2.5 text-[13px] text-foreground placeholder:text-muted-foreground/60 outline-none transition-colors focus:border-primary/60 focus:bg-secondary/50 resize-y min-h-[80px] disabled:opacity-50"
+            />
+            <button
+              type="button"
+              onClick={() => void handleRefine()}
+              disabled={
+                isRefining || extracting || feedbackInput.trim() === ""
+              }
+              className="inline-flex items-center justify-center gap-2 h-10 px-4 rounded-lg border border-border bg-secondary/50 text-[13px] text-foreground hover:bg-secondary/80 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {isRefining ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Reanalizando…
+                </>
+              ) : (
+                <>
+                  <Send className="h-4 w-4" />
+                  Corregir y reanalizar
+                </>
+              )}
+            </button>
           </div>
         </div>
       </div>
+
+      {/* SECCIÓN 3 — Detalles técnicos (colapsable) */}
+      <details className="group rounded-xl border border-border bg-card/40 open:bg-card/60">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-4 py-3 text-[13px] font-medium text-foreground hover:bg-secondary/30 rounded-xl transition-colors [&::-webkit-details-marker]:hidden">
+          <span>Ver / editar detalles técnicos</span>
+          <ChevronDown className="h-4 w-4 text-muted-foreground transition-transform group-open:rotate-180" />
+        </summary>
+        <div className="px-4 pb-4 pt-1 space-y-5 border-t border-border/60">
+          <div className="rounded-lg border border-border/60 bg-secondary/20 px-3 py-2.5">
+            <div className="flex items-start gap-2">
+              <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <p className="text-[11.5px] text-muted-foreground">
+                Campos avanzados para ajustes puntuales. La mayoría de correcciones
+                se pueden hacer en lenguaje natural con el chat de arriba.
+              </p>
+            </div>
+          </div>
 
       {/* Clasificación de catálogo (lista-proveedores) */}
       <SectionCard
@@ -893,6 +1097,9 @@ export function ConfigVariablesStep({
         </div>
       </SectionCard>
 
+        </div>
+      </details>
+
       {serverError && (
         <div
           role="alert"
@@ -907,7 +1114,7 @@ export function ConfigVariablesStep({
         <button
           type="button"
           onClick={onBack}
-          disabled={extracting}
+          disabled={extracting || isRefining}
           className="inline-flex items-center justify-center gap-2 h-11 px-4 rounded-lg border border-border bg-secondary/40 text-[13.5px] text-foreground hover:bg-secondary/70 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
         >
           <ArrowLeft className="w-4 h-4" />
@@ -916,7 +1123,7 @@ export function ConfigVariablesStep({
         <button
           type="button"
           onClick={handleConfirm}
-          disabled={extracting}
+          disabled={extracting || isRefining}
           className="btn-premium inline-flex items-center justify-center gap-2 h-11 px-5 rounded-lg text-[13.5px]"
         >
           {extracting ? (
@@ -926,7 +1133,7 @@ export function ConfigVariablesStep({
             </>
           ) : (
             <>
-              <Sparkles className="w-4 h-4" />
+              <Check className="w-4 h-4" />
               Confirmar y extraer tarifas
             </>
           )}

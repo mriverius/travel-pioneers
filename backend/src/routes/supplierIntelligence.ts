@@ -5,6 +5,7 @@ import { requireAuth } from "../middleware/auth.js";
 import {
   analyzeBriefHandler,
   extractContractHandler,
+  refineBriefHandler,
 } from "../agents/supplier-intelligence/controller.js";
 import {
   matchSupplierHandler,
@@ -145,6 +146,18 @@ router.post(
   extractLimiter,
   handleContractUpload,
   asyncHandler(analyzeBriefHandler),
+);
+
+/**
+ * POST /api/supplier-intelligence/refine-brief
+ *
+ * Re-análisis del brief tras correcciones en lenguaje natural (Paso 2).
+ */
+router.post(
+  "/refine-brief",
+  extractLimiter,
+  handleContractUpload,
+  asyncHandler(refineBriefHandler),
 );
 
 /**

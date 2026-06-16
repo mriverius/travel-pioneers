@@ -8,6 +8,9 @@ export {
   REGISTRAR_BRIEF_CONTRATO_TOOL_NAME,
 } from "./briefSchema.js";
 export {
+  BRIEF_ANALYSIS_SYSTEM_PROMPT,
   CONTRACT_BRIEF_INSTRUCTION,
+  CONTRACT_BRIEF_REFINE_INSTRUCTION,
+  EXTRACT_WITH_CONFIRMED_BRIEF_CLOSING,
   renderContractBriefBlock,
 } from "./briefPrompt.js";

@@ -300,6 +300,48 @@ export const REGISTRAR_BRIEF_CONTRATO_TOOL: Tool = {
           "Cualquier otra regla global relevante que no encaje arriba " +
           "(tarifa de guía, estadía mínima, niños, recargos, etc.).",
       },
+      logic_summary: {
+        type: ["string", "null"],
+        description:
+          "OBLIGATORIO: párrafo fluido en ESPAÑOL, en segunda persona " +
+          "('Estás cargando…', 'El documento indica…'), que explique en " +
+          "lenguaje natural para un operador turístico todo lo que entendiste " +
+          "del contrato: proveedor, ubicación, vigencia, temporadas con fechas, " +
+          "moneda, si el IVA está incluido o no, comisión, tipos de habitación, " +
+          "cuántas filas estimás generar, plan de comidas y políticas especiales. " +
+          "Debe leerse como si un colega humano resumiera el documento.",
+      },
+      row_plan: {
+        type: ["object", "null"],
+        description:
+          "Plan de filas estimado: categorías × ocupaciones × temporadas.",
+        properties: {
+          categories: {
+            type: "array",
+            items: { type: "string" },
+            description: "Categorías / tipos de habitación detectados.",
+          },
+          occupancies_per_category: {
+            type: ["number", "null"],
+            description:
+              "Cuántas ocupaciones distintas por categoría (ej. 1=solo doble, " +
+              "2=sencilla+doble). null si no está claro.",
+          },
+          seasons_count: {
+            type: ["number", "null"],
+            description: "Cantidad de temporadas distintas.",
+          },
+          expected_rows: {
+            type: ["number", "null"],
+            description:
+              "Total estimado de filas base = categorías × ocupaciones × " +
+              "temporadas (sin contar persona adicional). Debe coincidir con " +
+              "expected_row_estimate.",
+          },
+        },
+        required: ["categories"],
+        additionalProperties: false,
+      },
     },
     required: [
       "shared_fields",
@@ -311,6 +353,7 @@ export const REGISTRAR_BRIEF_CONTRATO_TOOL: Tool = {
       "seasons",
       "seasons_detail",
       "sections",
+      "logic_summary",
     ],
     additionalProperties: false,
   },
