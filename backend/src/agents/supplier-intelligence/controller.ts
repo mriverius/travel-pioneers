@@ -90,6 +90,28 @@ function parseBriefField(raw: unknown): ContractBrief | null {
   return coerceBrief(parsed);
 }
 
+/**
+ * Parse the optional `briefs` form field — an array of user-confirmed briefs,
+ * one per uploaded document (multi-document flow). Arrives as a JSON array
+ * string. Falls back to `null` when absent so the single-`brief` path or the
+ * internal Fase 1 still applies.
+ */
+function parseBriefsField(raw: unknown): ContractBrief[] | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "string" || raw.trim() === "") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw ApiError.badRequest("El campo 'briefs' debe ser JSON válido.");
+  }
+  if (!Array.isArray(parsed)) {
+    throw ApiError.badRequest("'briefs' debe ser un array de briefs.");
+  }
+  const out = parsed.map((b) => coerceBrief(b));
+  return out.length > 0 ? out : null;
+}
+
 function parseFeedbackField(raw: unknown): string {
   if (typeof raw !== "string" || raw.trim() === "") {
     throw ApiError.badRequest(
@@ -357,8 +379,14 @@ export async function extractContractHandler(
   const { isExistingSupplier, comments } = context;
 
   // Variables de Configuración confirmadas por el usuario en el step gated.
-  // Cuando vienen, `extractContract` salta la Fase 1 y usa este brief.
-  const briefOverride = parseBriefField(req.body?.brief);
+  // `briefs` (array, uno por documento) tiene prioridad; `brief` (single) es
+  // back-compat. Cuando vienen, `extractContract` salta la Fase 1.
+  const briefsOverride =
+    parseBriefsField(req.body?.briefs) ??
+    (() => {
+      const single = parseBriefField(req.body?.brief);
+      return single ? [single] : null;
+    })();
 
   logger.info("Supplier Intelligence extraction started", {
     requestId: req.id,
@@ -367,11 +395,11 @@ export async function extractContractHandler(
     totalSize: totalBytes,
     isExistingSupplier,
     hasComments: comments !== undefined,
-    hasConfirmedBrief: briefOverride !== null,
+    confirmedBriefCount: briefsOverride?.length ?? 0,
   });
 
   const { data, validation, model, usage, brief, manualPrefill } =
-    await extractContract(prepared, req.id, context, briefOverride);
+    await extractContract(prepared, req.id, context, briefsOverride);
 
   const combinedFilename = combineFilenames(files);
 

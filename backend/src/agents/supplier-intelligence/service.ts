@@ -59,9 +59,13 @@ export const SUPPLIER_INTELLIGENCE_MODEL = "claude-opus-4-7";
 
 /**
  * Modelo de la pasada de BRIEF / Variables de Configuración (Fase 1).
- * Sonnet 4.5 entiende y estructura la lógica; Opus genera las filas finales.
+ *
+ * Subido a Opus 4.7 (el más potente disponible en el SDK): el análisis del
+ * documento es la fase más crítica del pipeline — si Opus entiende mejor la
+ * lógica del proveedor acá, todo lo demás mejora en cascada. El presupuesto
+ * de créditos ya no es limitante; la prioridad es máxima precisión.
  */
-export const SUPPLIER_INTELLIGENCE_BRIEF_MODEL = "claude-sonnet-4-5";
+export const SUPPLIER_INTELLIGENCE_BRIEF_MODEL = "claude-opus-4-7";
 
 /**
  * Pricing oficial de Claude Opus 4.7 (USD por millón de tokens).
@@ -370,6 +374,12 @@ interface BuildUserMessageOpts {
   mode: "brief" | "refine" | "extract";
   /** Brief ya extraído — solo se usa (y se requiere) en mode "extract". */
   brief?: ContractBrief | null;
+  /**
+   * Múltiples briefs confirmados (uno por documento). Cuando viene con >1
+   * entrada, se renderiza un bloque por brief y se instruye al modelo a
+   * consolidarlos en un único conjunto de filas. Tiene prioridad sobre `brief`.
+   */
+  briefs?: ContractBrief[] | null;
   /** True cuando el brief fue confirmado por el humano (flujo gated). */
   briefConfirmed?: boolean;
   /** Contexto de refinamiento — solo en mode "refine". */
@@ -387,7 +397,7 @@ function buildUserMessage(
   docs: PreparedDocumentInput[],
   opts: BuildUserMessageOpts,
 ): MessageParam {
-  const { context: ctx, mode, brief, refine, briefConfirmed } = opts;
+  const { context: ctx, mode, brief, briefs, refine, briefConfirmed } = opts;
   const content: ContentBlockParam[] = [];
 
   const contextBlock = buildContextBlock(ctx);
@@ -491,10 +501,35 @@ function buildUserMessage(
     return { role: "user", content };
   }
 
-  // mode === "extract": inyectamos el brief (si lo tenemos) como contexto de
-  // prioridad alta ANTES de la instrucción final.
-  if (brief) {
-    content.push({ type: "text", text: renderContractBriefBlock(brief) });
+  // mode === "extract": inyectamos el/los brief(s) (si los tenemos) como
+  // contexto de prioridad alta ANTES de la instrucción final.
+  const briefList =
+    briefs && briefs.length > 0 ? briefs : brief ? [brief] : [];
+  if (briefList.length === 1) {
+    content.push({
+      type: "text",
+      text: renderContractBriefBlock(briefList[0]!),
+    });
+  } else if (briefList.length > 1) {
+    content.push({
+      type: "text",
+      text:
+        `Se te entregan ${briefList.length} BRIEFS, uno por documento. Cada ` +
+        "brief fue validado por un operador humano. Tu trabajo es " +
+        "CONSOLIDARLOS en UN SOLO conjunto de filas para el Excel: eliminá " +
+        "duplicados, resolvé contradicciones según las '⚠️ Notas críticas' de " +
+        "cada brief, y priorizá el brief con información más completa para cada " +
+        "campo. Si un dato proviene de un documento específico, anotalo en las " +
+        "notas de la fila.",
+    });
+    briefList.forEach((b, i) => {
+      content.push({
+        type: "text",
+        text:
+          `═══════════ BRIEF ${i + 1} de ${briefList.length} ═══════════\n` +
+          renderContractBriefBlock(b),
+      });
+    });
   }
 
   const confirmedBrief = briefConfirmed === true;
@@ -1360,14 +1395,14 @@ export async function extractContract(
   requestId?: string,
   context?: ExtractionContext,
   /**
-   * Brief ya confirmado/editado por el usuario en el step de Variables de
-   * Configuración. Cuando viene, SALTAMOS la Fase 1 (no re-analizamos el
-   * documento) y usamos este brief como las reglas globales de la pasada
-   * principal. Esa es la mejora clave del flujo gated: el usuario corrige
-   * el "prices_include_tax", la comisión o las fechas de temporada ANTES de
-   * que esas reglas se propaguen a las decenas de filas.
+   * Brief(s) ya confirmado(s)/editado(s) por el usuario en el step de Variables
+   * de Configuración — uno por documento. Cuando vienen, SALTAMOS la Fase 1 (no
+   * re-analizamos los documentos) y usamos estos briefs como las reglas
+   * globales de la pasada principal. Esa es la mejora clave del flujo gated: el
+   * usuario corrige el "prices_include_tax", la comisión o las fechas de
+   * temporada ANTES de que esas reglas se propaguen a las decenas de filas.
    */
-  briefOverride?: ContractBrief | null,
+  briefOverrides?: ContractBrief[] | null,
 ): Promise<ExtractionResult> {
   if (docs.length === 0) {
     // Defensive — the controller already rejects empty arrays with 400.
@@ -1375,6 +1410,13 @@ export async function extractContract(
   }
 
   const client = getAnthropicClient();
+
+  // Brief PRIMARIO: cuando hay varios briefs (multi-documento), usamos el
+  // primero como fuente de prefill/identidad/validación; los demás se pasan al
+  // modelo para que consolide las filas. Cuando hay uno solo, es ese.
+  const confirmedBriefs =
+    briefOverrides && briefOverrides.length > 0 ? briefOverrides : null;
+  const briefOverride = confirmedBriefs?.[0] ?? null;
 
   // ── Fase 1: BRIEF ────────────────────────────────────────────────────────
   // Si el usuario ya confirmó el brief (flujo gated), lo usamos directo y nos
@@ -1384,8 +1426,9 @@ export async function extractContract(
   let brief: ContractBrief | null;
   if (briefOverride) {
     brief = briefOverride;
-    logger.info("Using user-confirmed brief — skipping Fase 1", {
+    logger.info("Using user-confirmed brief(s) — skipping Fase 1", {
       requestId,
+      briefCount: confirmedBriefs?.length ?? 1,
       pricesIncludeTax: brief.prices_include_tax,
       commissionDefaultPct: brief.commission_default_pct,
       seasons: brief.seasons_detail.length,
@@ -1425,6 +1468,7 @@ export async function extractContract(
                 context,
                 mode: "extract",
                 brief,
+                briefs: confirmedBriefs,
                 briefConfirmed: !!briefOverride,
               }),
             ],

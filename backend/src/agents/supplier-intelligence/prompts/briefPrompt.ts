@@ -1,9 +1,42 @@
 import { REGISTRAR_BRIEF_CONTRATO_TOOL_NAME } from "./briefSchema.js";
 
 /**
- * System prompt dedicado a la Fase 1 (Sonnet). Más corto y focalizado que el
- * prompt de extracción: el objetivo es ENTENDER la lógica del documento, no
- * generar filas de tarifas.
+ * Plantilla OBLIGATORIA del campo `logic_summary`. Se inyecta tanto en el
+ * análisis inicial como en cada refinamiento por feedback, para que el
+ * resumen tenga SIEMPRE la misma estructura de 10 secciones (legible y
+ * comparable entre regeneraciones).
+ */
+export const LOGIC_SUMMARY_FORMAT =
+  "FORMATO OBLIGATORIO de `logic_summary` (Markdown, ESPAÑOL, segunda " +
+  "persona). Usá EXACTAMENTE estas 10 secciones, SIEMPRE en este orden y " +
+  "con estos títulos en negrita (no los cambies, no los reordenes, no " +
+  "agregues ni quites secciones). Si una sección no aplica, inclúyela igual " +
+  "con 'No se detectaron' o 'No aplica':\n\n" +
+  "**🏨 Proveedor**\n" +
+  "Nombre comercial, razón social, ubicación, tipo de negocio, vigencia del contrato.\n\n" +
+  "**💰 Tarifas y moneda**\n" +
+  "Moneda, si incluye o no IVA, tasa de impuesto, nota sobre fees adicionales.\n\n" +
+  "**📊 Comisión**\n" +
+  "Porcentaje base, si varía por temporada/categoría, cómo se calcula.\n\n" +
+  "**📅 Temporadas**\n" +
+  "Lista de temporadas con nombre, fechas inicio–fin, tipo de tarifa (por noche / por servicio / paquete).\n\n" +
+  "**🛏️ Habitaciones / Servicios**\n" +
+  "Lista de categorías detectadas, ocupación máxima, si hay tarifa single/double/adicional.\n\n" +
+  "**📐 Plan de filas estimado**\n" +
+  "Fórmula explícita: X categorías × Y ocupaciones × Z temporadas = N filas. Notas sobre el conteo.\n\n" +
+  "**🍽️ Servicios incluidos**\n" +
+  "Plan de comidas, transfers, amenidades, Wi-Fi, etc. incluidos en la tarifa.\n\n" +
+  "**📋 Políticas de pago y cancelación**\n" +
+  "Por temporada: depósitos, deadlines de pago, condiciones de cancelación.\n\n" +
+  "**🏦 Cuentas bancarias**\n" +
+  "Si las hay: banco, titular, IBAN/cuenta. Si no, indicá explícitamente 'No se detectaron'.\n\n" +
+  "**⚠️ Notas críticas**\n" +
+  "Cualquier dato inusual, ambiguo, contradictorio o que el operador humano deba verificar a mano.";
+
+/**
+ * System prompt dedicado a la Fase 1 (análisis con Opus). Más corto y
+ * focalizado que el prompt de extracción: el objetivo es ENTENDER la lógica
+ * del documento, no generar filas de tarifas.
  */
 export const BRIEF_ANALYSIS_SYSTEM_PROMPT =
   "Eres un analista experto en contratos y tarifarios turísticos " +
@@ -15,10 +48,13 @@ export const BRIEF_ANALYSIS_SYSTEM_PROMPT =
   "  • Reglas de IVA/impuestos, comisión y moneda\n" +
   "  • Persona adicional, cuentas bancarias, plan de comidas, políticas especiales\n" +
   "  • Inventario: categorías, temporadas con fechas, secciones\n\n" +
-  "Generá un `logic_summary` en español natural (segunda persona) que un " +
-  "operador humano pueda leer de un vistazo y confirmar si entendiste bien.\n" +
+  "Generá un `logic_summary` que un operador humano pueda leer de un vistazo " +
+  "y confirmar si entendiste bien.\n" +
   "Estimá el `row_plan` (categorías × ocupaciones × temporadas) para que la " +
-  "extracción final sepa cuántas filas esperar.";
+  "extracción final sepa cuántas filas esperar.\n\n" +
+  "IMPORTANTE: si recibís UN SOLO documento, analizá SOLO ese documento. No " +
+  "inventes ni asumas datos de otros documentos.\n\n" +
+  LOGIC_SUMMARY_FORMAT;
 
 /**
  * Instrucción final (trailing) para la llamada de BRIEF (Fase 1).
@@ -55,12 +91,13 @@ export const CONTRACT_BRIEF_INSTRUCTION =
   "de tarifas (paquetes, noche adicional, experiencias, transfers, spa, " +
   "amenidades…), y un estimado de cuántas filas debería tener el contrato " +
   "completo.\n" +
-  "  8. logic_summary: párrafo narrativo en ESPAÑOL (segunda persona) que " +
-  "resuma todo lo anterior para un operador humano.\n" +
+  "  8. logic_summary: resumen narrativo en ESPAÑOL siguiendo el FORMATO " +
+  "OBLIGATORIO de 10 secciones (ver abajo).\n" +
   "  9. row_plan: categorías, ocupaciones por categoría, cantidad de " +
   "temporadas y expected_rows (categorías × ocupaciones × temporadas).\n\n" +
   "Sé EXHAUSTIVO sobre todo en bancos y persona adicional — son los datos que " +
-  "más se pierden cuando se extrae todo de una vez.";
+  "más se pierden cuando se extrae todo de una vez.\n\n" +
+  LOGIC_SUMMARY_FORMAT;
 
 /**
  * Instrucción para re-analizar el brief tras feedback del usuario (refine).
@@ -74,10 +111,12 @@ export const CONTRACT_BRIEF_REFINE_INSTRUCTION =
   "Reglas:\n" +
   "  • El feedback del usuario tiene PRIORIDAD sobre tu análisis anterior.\n" +
   "  • Re-leé el documento solo para verificar/corregir lo que el usuario señaló.\n" +
-  "  • Actualizá logic_summary para reflejar las correcciones en español natural.\n" +
+  "  • Actualizá logic_summary respetando el MISMO FORMATO OBLIGATORIO de 10 " +
+  "secciones (ver abajo) — no devuelvas un bloque de texto pegado sin estructura.\n" +
   "  • Recalculá row_plan y expected_row_estimate si cambian categorías, " +
   "temporadas u ocupaciones.\n" +
-  "  • Mantén intacto lo que el usuario NO cuestionó.";
+  "  • Mantén intacto lo que el usuario NO cuestionó.\n\n" +
+  LOGIC_SUMMARY_FORMAT;
 
 /**
  * Cierre de extracción cuando el brief ya fue validado por un humano.

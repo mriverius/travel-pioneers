@@ -303,7 +303,7 @@ async function main(): Promise<void> {
         [doc],
         `eval-${c.slug}`,
         { isExistingSupplier: false },
-        brief,
+        [brief],
       );
       const rowChecks = scoreRows(data, exp);
       if (rowChecks.length > 0) {

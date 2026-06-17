@@ -618,6 +618,13 @@ export interface ExtractContractInput {
    * extracción — así una corrección del usuario se propaga a todas las filas.
    */
   confirmedConfig?: ContractConfigVariables | null;
+  /**
+   * Variables de Configuración confirmadas, UNA por documento (flujo
+   * multi-documento). Cuando viene con >1 entrada, el backend renderiza un
+   * brief por documento e instruye al modelo a consolidarlos en un solo
+   * conjunto de filas. Tiene prioridad sobre `confirmedConfig`.
+   */
+  confirmedConfigs?: ContractConfigVariables[] | null;
 }
 
 /* --- analyze-brief (Fase 1 gated — Variables de Configuración) --- */
@@ -1011,7 +1018,11 @@ export const api = {
       }
       // Variables de Configuración confirmadas en el step gated. Cuando vienen,
       // el backend salta la Fase 1 y usa estas reglas globales tal cual.
-      if (input.confirmedConfig) {
+      // `briefs` (array, uno por documento) tiene prioridad; `brief` es
+      // back-compat para el flujo de un solo documento.
+      if (input.confirmedConfigs && input.confirmedConfigs.length > 0) {
+        form.append("briefs", JSON.stringify(input.confirmedConfigs));
+      } else if (input.confirmedConfig) {
         form.append("brief", JSON.stringify(input.confirmedConfig));
       }
       // AI extraction is slow, and now runs in TWO sequential Anthropic

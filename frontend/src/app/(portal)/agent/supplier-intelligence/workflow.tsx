@@ -2,6 +2,7 @@
 
 import {
   AlertTriangle,
+  ArrowLeft,
   Check,
   CheckCircle2,
   Cloud,
@@ -22,6 +23,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -234,18 +236,39 @@ export function SupplierWorkflow() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   /**
-   * Variables de Configuración detectadas en la Fase 1 (step 1 → 2). El
-   * usuario las confirma/edita en el step 2 y la versión editada se manda a
-   * la extracción. `configMeta` guarda filename/model/etc. del análisis.
+   * Variables de Configuración detectadas en la Fase 1 (step 1 → 2) — UNA por
+   * documento (flujo multi-documento). `briefs` es la salida de la IA (se
+   * reemplaza al re-analizar); `editedBriefs` son los drafts vivos que el
+   * usuario edita en cada tab (se envían a la extracción). `metas` guarda
+   * filename/model/etc. por documento. `briefVersions` fuerza el remount del
+   * editor cuando la IA reemplaza un brief tras un refine.
    */
-  const [config, setConfig] = useState<ContractConfigVariables | null>(null);
-  const [configMeta, setConfigMeta] = useState<AnalyzeBriefMeta | null>(null);
+  const [briefs, setBriefs] = useState<ContractConfigVariables[]>([]);
+  const [editedBriefs, setEditedBriefs] = useState<ContractConfigVariables[]>(
+    [],
+  );
+  const [metas, setMetas] = useState<AnalyzeBriefMeta[]>([]);
+  const [chatHistories, setChatHistories] = useState<BriefChatMessage[][]>([]);
+  const [briefVersions, setBriefVersions] = useState<number[]>([]);
+  const [fileLabels, setFileLabels] = useState<string[]>([]);
+  const [activeTab, setActiveTab] = useState(0);
   /** True mientras corre la extracción principal disparada desde el step 2. */
   const [extracting, setExtracting] = useState(false);
-  /** True mientras Sonnet re-analiza el brief tras feedback del chat. */
-  const [isRefining, setIsRefining] = useState(false);
-  /** Historial del chat de correcciones en el Paso 2. */
-  const [chatHistory, setChatHistory] = useState<BriefChatMessage[]>([]);
+  /** Índice del tab que Opus está re-analizando (null = ninguno). */
+  const [refiningTab, setRefiningTab] = useState<number | null>(null);
+
+  /** Actualiza el draft vivo del documento `i` sin perder los de otros tabs. */
+  const handleDraftChange = useCallback(
+    (i: number, edited: ContractConfigVariables) => {
+      setEditedBriefs((prev) => {
+        if (prev[i] === edited) return prev;
+        const next = [...prev];
+        next[i] = edited;
+        return next;
+      });
+    },
+    [],
+  );
 
   const [comments, setComments] = useState("");
   const [isExistingSupplier, setIsExistingSupplier] = useState<boolean | null>(
@@ -394,13 +417,20 @@ export function SupplierWorkflow() {
     setServerError(null);
     setProgress(4);
     try {
-      const response = await api.supplierIntelligence.analyzeBrief(
-        selectedFiles,
-        { comments, isExistingSupplier },
+      // Un análisis INDEPENDIENTE por documento (Cambio v2 #4): cada archivo
+      // genera su propio brief para que la IA no mezcle documentos distintos.
+      const responses = await Promise.all(
+        selectedFiles.map((f) =>
+          api.supplierIntelligence.analyzeBrief([f], {
+            comments,
+            isExistingSupplier,
+          }),
+        ),
       );
       setProgress(100);
 
-      const brief = response.brief;
+      // El documento PRIMARIO (primero) maneja el matching contra el catálogo.
+      const brief = responses[0]!.brief;
       let prefill: CatalogPrefill | null = null;
       let matchInfo: CatalogMatchInfo | null = null;
       if (isExistingSupplier) {
@@ -500,9 +530,14 @@ export function SupplierWorkflow() {
       setCatalogMatchInfo(matchInfo);
 
       await new Promise((r) => setTimeout(r, 300));
-      setConfig(response.brief);
-      setConfigMeta(response.meta);
-      setChatHistory([]);
+      const newBriefs = responses.map((r) => r.brief);
+      setBriefs(newBriefs);
+      setEditedBriefs(newBriefs.map((b) => b));
+      setMetas(responses.map((r) => r.meta));
+      setChatHistories(newBriefs.map(() => []));
+      setBriefVersions(newBriefs.map(() => 0));
+      setFileLabels(selectedFiles.map((f) => f.name));
+      setActiveTab(0);
       setStep(2);
     } catch (err) {
       if (err instanceof ApiError) {
@@ -519,14 +554,30 @@ export function SupplierWorkflow() {
     }
   };
 
+  /** Sincroniza `seasons` (nombres) con `seasons_detail` antes de extraer. */
+  const normalizeBrief = (
+    b: ContractConfigVariables,
+  ): ContractConfigVariables => {
+    const seasonNames = b.seasons_detail
+      .map((s) => s.name?.trim())
+      .filter((s): s is string => !!s);
+    return {
+      ...b,
+      seasons: seasonNames.length > 0 ? seasonNames : b.seasons,
+    };
+  };
+
   /**
-   * Paso 2 — chat: re-analiza el brief con Sonnet según feedback del usuario.
+   * Paso 2 — chat: re-analiza el brief del documento `tabIndex` con Opus según
+   * el feedback del usuario. Cada documento tiene su propio historial.
    */
-  const refineConfig = async (message: string) => {
+  const refineConfig = async (tabIndex: number, message: string) => {
+    const file = selectedFiles[tabIndex];
+    const prevBrief = editedBriefs[tabIndex] ?? briefs[tabIndex];
     if (
-      selectedFiles.length === 0 ||
-      !config ||
-      isRefining ||
+      !file ||
+      !prevBrief ||
+      refiningTab !== null ||
       extracting ||
       isExistingSupplier === null
     ) {
@@ -535,41 +586,63 @@ export function SupplierWorkflow() {
     const userMsg = message.trim();
     if (!userMsg) return;
 
-    setIsRefining(true);
+    setRefiningTab(tabIndex);
     setServerError(null);
-    setChatHistory((h) => [...h, { role: "user", content: userMsg }]);
+    setChatHistories((prev) => {
+      const next = [...prev];
+      next[tabIndex] = [...(next[tabIndex] ?? []), { role: "user", content: userMsg }];
+      return next;
+    });
 
     try {
-      const response = await api.supplierIntelligence.refineBrief(
-        selectedFiles,
-        {
-          comments,
-          isExistingSupplier,
-          previousBrief: config,
-          feedbackMessage: userMsg,
-          chatHistory,
-        },
-      );
-      setConfig(response.brief);
-      setConfigMeta((prev) =>
-        prev
+      const response = await api.supplierIntelligence.refineBrief([file], {
+        comments,
+        isExistingSupplier,
+        previousBrief: prevBrief,
+        feedbackMessage: userMsg,
+        chatHistory: chatHistories[tabIndex] ?? [],
+      });
+      setBriefs((prev) => {
+        const next = [...prev];
+        next[tabIndex] = response.brief;
+        return next;
+      });
+      setEditedBriefs((prev) => {
+        const next = [...prev];
+        next[tabIndex] = response.brief;
+        return next;
+      });
+      setBriefVersions((prev) => {
+        const next = [...prev];
+        next[tabIndex] = (next[tabIndex] ?? 0) + 1;
+        return next;
+      });
+      setMetas((prev) => {
+        const next = [...prev];
+        const cur = next[tabIndex];
+        next[tabIndex] = cur
           ? {
-              ...prev,
+              ...cur,
               model: response.meta.model,
               processed_at: response.meta.processed_at,
               input_tokens: response.meta.input_tokens,
               output_tokens: response.meta.output_tokens,
               cost_usd: response.meta.cost_usd,
             }
-          : response.meta,
-      );
+          : response.meta;
+        return next;
+      });
       const assistantReply =
         response.brief.logic_summary?.trim() ||
         "Actualicé el análisis según tus correcciones.";
-      setChatHistory((h) => [
-        ...h,
-        { role: "assistant", content: assistantReply },
-      ]);
+      setChatHistories((prev) => {
+        const next = [...prev];
+        next[tabIndex] = [
+          ...(next[tabIndex] ?? []),
+          { role: "assistant", content: assistantReply },
+        ];
+        return next;
+      });
     } catch (err) {
       if (err instanceof ApiError) {
         setServerError(err.message);
@@ -579,34 +652,36 @@ export function SupplierWorkflow() {
         );
       }
     } finally {
-      setIsRefining(false);
+      setRefiningTab(null);
     }
   };
 
   /**
-   * Step 2 → 3: el usuario confirmó TODO lo compartido (identidad + catálogo +
-   * reglas). Corremos la extracción completa inyectando el config editado (el
-   * backend salta la Fase 1 y usa estas reglas tal cual) y pasamos a la
-   * revisión de la grilla. El matching de proveedor ya se hizo en el step 1,
-   * así que acá solo persistimos el catálogo (posiblemente editado por el
-   * usuario) y extraemos las filas.
+   * Step 2 → 3: el usuario confirmó TODOS los briefs (uno por documento).
+   * Corremos la extracción enviando el array de briefs validados; el backend
+   * salta la Fase 1, consolida los documentos en un único conjunto de filas y
+   * pasamos a la revisión de la grilla.
    */
-  const confirmConfig = async (
-    edited: ContractConfigVariables,
-    catalog: CatalogPrefill | null,
-  ) => {
-    if (selectedFiles.length === 0 || extracting || isExistingSupplier === null) {
+  const confirmConfig = async () => {
+    if (
+      selectedFiles.length === 0 ||
+      extracting ||
+      refiningTab !== null ||
+      isExistingSupplier === null ||
+      briefs.length === 0
+    ) {
       return;
     }
-    setConfig(edited);
-    setCatalogPrefill(catalog);
+    const source = briefs.map((b, i) => editedBriefs[i] ?? b);
+    const finalBriefs = source.map(normalizeBrief);
+    setEditedBriefs(finalBriefs);
     setExtracting(true);
     setServerError(null);
     try {
       const response = await api.supplierIntelligence.extract(selectedFiles, {
         comments,
         isExistingSupplier,
-        confirmedConfig: edited,
+        confirmedConfigs: finalBriefs,
       });
       setResult(response);
       setStep(3);
@@ -623,6 +698,17 @@ export function SupplierWorkflow() {
     }
   };
 
+  const resetConfigState = () => {
+    setBriefs([]);
+    setEditedBriefs([]);
+    setMetas([]);
+    setChatHistories([]);
+    setBriefVersions([]);
+    setFileLabels([]);
+    setActiveTab(0);
+    setRefiningTab(null);
+  };
+
   const reset = () => {
     setStep(1);
     setSelectedFiles([]);
@@ -636,22 +722,16 @@ export function SupplierWorkflow() {
     setCatalogMatchInfo(null);
     setMatchingPhase(null);
     setApprovedPayload(null);
-    setConfig(null);
-    setConfigMeta(null);
     setExtracting(false);
-    setIsRefining(false);
-    setChatHistory([]);
+    resetConfigState();
   };
 
   /** Step 2 ← 3: volver del config a la carga sin perder los archivos. */
   const backToUpload = () => {
     setStep(1);
-    setConfig(null);
-    setConfigMeta(null);
     setServerError(null);
     setProgress(0);
-    setIsRefining(false);
-    setChatHistory([]);
+    resetConfigState();
   };
 
   const approve = (payload: ApprovedPayload) => {
@@ -741,19 +821,109 @@ export function SupplierWorkflow() {
           />
         )}
 
-        {step === 2 && config && configMeta && (
-          <ConfigVariablesStep
-            config={config}
-            meta={configMeta}
-            catalogPrefill={catalogPrefill}
-            extracting={extracting}
-            isRefining={isRefining}
-            chatHistory={chatHistory}
-            serverError={serverError}
-            onConfirm={confirmConfig}
-            onRefine={refineConfig}
-            onBack={backToUpload}
-          />
+        {step === 2 && briefs.length > 0 && (
+          <div className="px-5 sm:px-8 pt-5">
+            {/* Tabs por documento (solo si hay más de uno) */}
+            {briefs.length > 1 && (
+              <div className="flex flex-wrap gap-1.5 border-b border-border pb-3">
+                {fileLabels.map((label, i) => {
+                  const active = i === activeTab;
+                  return (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => setActiveTab(i)}
+                      className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[12px] font-medium transition-colors ${
+                        active
+                          ? "border-primary bg-primary/10 text-foreground"
+                          : "border-border bg-secondary/30 text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <FileText className="h-3.5 w-3.5 shrink-0" />
+                      <span className="max-w-[180px] truncate">{label}</span>
+                      {refiningTab === i && (
+                        <Loader2 className="h-3 w-3 animate-spin text-primary" />
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Editores: TODOS montados, el inactivo oculto, para no perder
+                ediciones al cambiar de tab. */}
+            {briefs.map((b, i) => (
+              <div key={i} className={i === activeTab ? "" : "hidden"}>
+                <ConfigVariablesStep
+                  key={`${i}-${briefVersions[i] ?? 0}`}
+                  config={b}
+                  meta={
+                    metas[i] ?? {
+                      filename: fileLabels[i] ?? "",
+                      size_bytes: 0,
+                      model: "",
+                      processed_at: "",
+                    }
+                  }
+                  catalogPrefill={catalogPrefill}
+                  extracting={extracting}
+                  isRefining={refiningTab === i}
+                  chatHistory={chatHistories[i] ?? []}
+                  serverError={null}
+                  onConfirm={() => confirmConfig()}
+                  onRefine={(msg) => refineConfig(i, msg)}
+                  onBack={backToUpload}
+                  onDraftChange={(edited) => handleDraftChange(i, edited)}
+                  onCatalogChange={setCatalogPrefill}
+                  showActions={false}
+                />
+              </div>
+            ))}
+
+            {/* Acciones GLOBALES (una sola extracción para todos los docs) */}
+            <div className="pb-7 space-y-4">
+              {serverError && (
+                <div
+                  role="alert"
+                  className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2.5 text-[13px] text-destructive"
+                >
+                  <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+                  <span>{serverError}</span>
+                </div>
+              )}
+              <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={backToUpload}
+                  disabled={extracting || refiningTab !== null}
+                  className="inline-flex items-center justify-center gap-2 h-11 px-4 rounded-lg border border-border bg-secondary/40 text-[13.5px] text-foreground hover:bg-secondary/70 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                  Volver
+                </button>
+                <button
+                  type="button"
+                  onClick={() => confirmConfig()}
+                  disabled={extracting || refiningTab !== null}
+                  className="btn-premium inline-flex items-center justify-center gap-2 h-11 px-5 rounded-lg text-[13.5px]"
+                >
+                  {extracting ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Extrayendo tarifas…
+                    </>
+                  ) : (
+                    <>
+                      <Check className="w-4 h-4" />
+                      {briefs.length > 1
+                        ? "Confirmar todo y extraer tarifas"
+                        : "Confirmar y extraer tarifas"}
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
         )}
 
         {step === 3 && result && (
@@ -775,7 +945,7 @@ export function SupplierWorkflow() {
     </section>
 
     <div className="text-center mt-4 space-y-1">
-      <p className="text-[11px] text-muted-foreground/60">Version 1.4.0 - Junio 6</p>
+      <p className="text-[11px] text-muted-foreground/60">Version 1.5.0 - Junio 16</p>
       <a
         href="https://forms.gle/GANUbdcuAS3P7szS8"
         target="_blank"

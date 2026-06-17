@@ -21,7 +21,7 @@ import {
   Trash2,
   UserPlus,
 } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type {
   AnalyzeBriefMeta,
   BriefChatMessage,
@@ -151,6 +151,58 @@ function buildLogicSummaryFromBrief(
 }
 
 /* -------------------------------------------------------------------------- */
+/*                         Logic summary (Markdown-lite)                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Renderiza el `logic_summary` (Markdown-lite): convierte **negritas** en
+ * <strong> y preserva saltos de línea. Las líneas que son SOLO un título en
+ * negrita (las 10 secciones estándar) se muestran como encabezados. Siempre
+ * dentro del MISMO contenedor (mismo alto/estilo) sea análisis inicial o
+ * corrección — así el bloque no "encoge" tras un refine.
+ */
+function renderInlineBold(text: string, keyPrefix: string): ReactNode[] {
+  const parts = text.split(/(\*\*[^*]+\*\*)/g).filter((p) => p !== "");
+  return parts.map((part, i) => {
+    const m = part.match(/^\*\*([^*]+)\*\*$/);
+    if (m) {
+      return (
+        <strong key={`${keyPrefix}-${i}`} className="font-semibold text-foreground">
+          {m[1]}
+        </strong>
+      );
+    }
+    return <span key={`${keyPrefix}-${i}`}>{part}</span>;
+  });
+}
+
+function LogicSummaryView({ summary }: { summary: string }) {
+  const lines = summary.split("\n");
+  return (
+    <div className="space-y-1.5">
+      {lines.map((line, i) => {
+        const trimmed = line.trim();
+        if (trimmed === "") return <div key={i} className="h-1.5" />;
+        // Línea que es solo un título de sección en negrita → encabezado.
+        const isHeading = /^\*\*[^*]+\*\*$/.test(trimmed);
+        return (
+          <p
+            key={i}
+            className={
+              isHeading
+                ? "text-[13px] font-semibold text-foreground mt-2 first:mt-0"
+                : "text-[13px] leading-relaxed text-foreground/90"
+            }
+          >
+            {renderInlineBold(line, `l${i}`)}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /*                              Small UI helpers                              */
 /* -------------------------------------------------------------------------- */
 
@@ -268,6 +320,9 @@ export function ConfigVariablesStep({
   onConfirm,
   onRefine,
   onBack,
+  onDraftChange,
+  onCatalogChange,
+  showActions = true,
 }: {
   config: ContractConfigVariables;
   meta: AnalyzeBriefMeta;
@@ -286,6 +341,19 @@ export function ConfigVariablesStep({
   ) => void;
   onRefine: (message: string) => Promise<void>;
   onBack: () => void;
+  /**
+   * Reporta el brief editado hacia el padre en cada cambio. Lo usa el flujo
+   * multi-documento para mantener vivos los drafts de cada tab sin perder
+   * ediciones al cambiar de pestaña.
+   */
+  onDraftChange?: (edited: ContractConfigVariables) => void;
+  /** Reporta la clasificación de catálogo editada hacia el padre. */
+  onCatalogChange?: (catalog: CatalogPrefill) => void;
+  /**
+   * Cuando es false, el padre maneja la barra de acciones (Volver / Confirmar)
+   * y el serverError — útil en multi-documento donde el confirm es global.
+   */
+  showActions?: boolean;
 }) {
   const [feedbackInput, setFeedbackInput] = useState("");
 
@@ -311,6 +379,20 @@ export function ConfigVariablesStep({
     key: "tipo_actividad" | "zona_turismo" | "proveedor_codigo",
     value: string,
   ) => setCatalog((c) => ({ ...c, [key]: value.trim() === "" ? null : value }));
+
+  // Reportar draft/catalog hacia el padre (multi-documento). Usamos refs para
+  // que un cambio de identidad del callback no re-dispare el efecto, y NO
+  // re-hidratamos desde lo que emitimos (el padre no reinyecta `config`).
+  const onDraftChangeRef = useRef(onDraftChange);
+  onDraftChangeRef.current = onDraftChange;
+  const onCatalogChangeRef = useRef(onCatalogChange);
+  onCatalogChangeRef.current = onCatalogChange;
+  useEffect(() => {
+    onDraftChangeRef.current?.(draft);
+  }, [draft]);
+  useEffect(() => {
+    onCatalogChangeRef.current?.(catalog);
+  }, [catalog]);
 
   const patch = (p: Partial<ContractConfigVariables>) =>
     setDraft((d) => ({ ...d, ...p }));
@@ -474,16 +556,19 @@ export function ConfigVariablesStep({
           </p>
         </header>
         <div className="px-4 py-4">
-          {isRefining ? (
-            <div className="flex items-center gap-2 text-[13px] text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin text-primary" />
-              Reanalizando según tus correcciones…
-            </div>
-          ) : (
-            <p className="text-[13.5px] leading-relaxed text-foreground/90 whitespace-pre-wrap">
-              {logicSummary}
-            </p>
-          )}
+          {/* Contenedor de alto FIJO/consistente: el análisis inicial y cada
+              corrección se muestran en el mismo bloque, mismo tamaño, con
+              scroll interno si el contenido es largo. */}
+          <div className="min-h-[280px] max-h-[480px] overflow-y-auto pr-1">
+            {isRefining ? (
+              <div className="flex h-[280px] items-center justify-center gap-2 text-[13px] text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                Reanalizando según tus correcciones…
+              </div>
+            ) : (
+              <LogicSummaryView summary={logicSummary} />
+            )}
+          </div>
           <p className="mt-3 text-[11px] text-muted-foreground">
             Fuente:{" "}
             <span className="text-foreground/80">{meta.filename}</span>
@@ -501,23 +586,35 @@ export function ConfigVariablesStep({
         </header>
         <div className="px-4 py-3 space-y-3">
           {chatHistory.length > 0 && (
-            <div className="space-y-3 max-h-64 overflow-y-auto pr-1">
-              {chatHistory.map((msg, i) => (
-                <div
-                  key={i}
-                  className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-                >
-                  <div
-                    className={`max-w-[92%] rounded-lg px-3 py-2 text-[13px] leading-relaxed ${
-                      msg.role === "user"
-                        ? "bg-primary/15 text-foreground border border-primary/20"
-                        : "bg-secondary/50 text-foreground/90 border border-border/60"
-                    }`}
-                  >
-                    {msg.content}
+            <div className="space-y-4">
+              {chatHistory.map((msg, i) =>
+                msg.role === "user" ? (
+                  <div key={i} className="flex justify-end">
+                    <div className="max-w-[92%] rounded-lg border border-primary/20 bg-primary/15 px-3 py-2 text-[13px] leading-relaxed text-foreground whitespace-pre-wrap">
+                      {msg.content}
+                    </div>
                   </div>
-                </div>
-              ))}
+                ) : (
+                  // Respuesta del agente = análisis regenerado. Se muestra con
+                  // la MISMA estructura y tamaño que el resumen de arriba.
+                  <div
+                    key={i}
+                    className="rounded-xl border border-primary/25 bg-gradient-to-br from-primary/8 via-card/80 to-card/60 shadow-sm"
+                  >
+                    <header className="flex items-center gap-2 px-4 py-3 border-b border-primary/15">
+                      <Brain className="h-4 w-4 text-primary shrink-0" />
+                      <p className="text-[13px] font-semibold text-foreground">
+                        Análisis actualizado
+                      </p>
+                    </header>
+                    <div className="px-4 py-4">
+                      <div className="min-h-[280px] max-h-[480px] overflow-y-auto pr-1">
+                        <LogicSummaryView summary={msg.content} />
+                      </div>
+                    </div>
+                  </div>
+                ),
+              )}
             </div>
           )}
           <div className="space-y-2">
@@ -1100,7 +1197,7 @@ export function ConfigVariablesStep({
         </div>
       </details>
 
-      {serverError && (
+      {showActions && serverError && (
         <div
           role="alert"
           className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2.5 text-[13px] text-destructive"
@@ -1110,6 +1207,7 @@ export function ConfigVariablesStep({
         </div>
       )}
 
+      {showActions && (
       <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-between gap-2 pt-1">
         <button
           type="button"
@@ -1139,6 +1237,7 @@ export function ConfigVariablesStep({
           )}
         </button>
       </div>
+      )}
     </div>
   );
 }
