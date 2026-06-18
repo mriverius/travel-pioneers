@@ -305,12 +305,15 @@ export const REGISTRAR_BRIEF_CONTRATO_TOOL: Tool = {
         description:
           "OBLIGATORIO: resumen en ESPAÑOL con formato Markdown ESTANDARIZADO " +
           "de 10 secciones FIJAS, SIEMPRE en este orden y con estos títulos " +
-          "exactos en negrita (no los cambies ni los reordenes):\n" +
-          "**🏨 Proveedor**\n**💰 Tarifas y moneda**\n**📊 Comisión**\n" +
-          "**📅 Temporadas**\n**🛏️ Habitaciones / Servicios**\n" +
-          "**📐 Plan de filas estimado**\n**🍽️ Servicios incluidos**\n" +
-          "**📋 Políticas de pago y cancelación**\n**🏦 Cuentas bancarias**\n" +
-          "**⚠️ Notas críticas**\n" +
+          "exactos en negrita SIN EMOJIS (no los cambies ni los reordenes):\n" +
+          "**Proveedor**\n**Tarifas y moneda**\n**Comisión**\n" +
+          "**Temporadas**\n**Habitaciones / Servicios**\n" +
+          "**Plan de filas estimado**\n**Servicios incluidos**\n" +
+          "**Políticas de pago y cancelación**\n**Cuentas bancarias**\n" +
+          "**Notas críticas**\n" +
+          "En 'Habitaciones / Servicios' incluí SIEMPRE si hay tarifa de niño " +
+          "(CHL): 'Tarifa de niño detectada: … Se generarán filas CHL.' o " +
+          "'No se detectó tarifa de niño en el contrato.'\n" +
           "Bajo cada título, prosa fluida en segunda persona ('Estás " +
           "cargando…', 'El documento indica…'). Si una sección no aplica, " +
           "inclúyela igual con 'No se detectaron' o 'No aplica' — NUNCA omitas " +

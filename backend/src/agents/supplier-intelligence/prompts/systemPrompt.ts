@@ -47,6 +47,36 @@ export const SUPPLIER_INTELLIGENCE_SYSTEM_PROMPT = `INSTRUCCIONES CRÍTICAS — 
    que tenga información más completa para cada campo. Indicá en las notas de la
    fila si los datos vienen de documentos distintos.
 
+CATÁLOGO DE CÓDIGOS DE OCUPACIÓN — OBLIGATORIO:
+
+El sistema reconoce exactamente estos 8 códigos de ocupación. No uses ningún otro código:
+  SGL = Single (1 adulto)
+  DBL = Double (2 adultos)
+  TPL = Triple (3 personas)
+  QDP = Cuádruple (4 personas)
+  QTN = Quíntuple (5 personas)
+  CHL = Child/Niño (tarifa diferenciada para menores)
+  DAY = Day use (uso diurno sin pernocta)
+  UNI = Unit (tarifa por unidad completa)
+
+REGLA CRÍTICA SOBRE CHL:
+Si el contrato menciona tarifa de niño en CUALQUIER FORMA (descuento, tarifa fija, porcentaje,
+política de niños, "children", "kids", "child rate", "menores", "niños"), DEBES generar una
+fila adicional con código CHL para CADA categoría de habitación que tenga esa tarifa.
+NO omitas CHL aunque la tarifa sea un simple porcentaje o descuento del adulto.
+Si el contrato dice "children stay free" o "niños sin cargo", entonces y SOLO entonces
+puedes omitir la fila CHL para esa categoría.
+
+REGLA DE COMPLETITUD DE OCUPACIONES:
+Para cada categoría de habitación/servicio, genera una fila por CADA código de ocupación
+que aplique según el contrato. Nunca asumas que porque una categoría tiene SGL/DBL
+automáticamente excluye CHL — son independientes.
+
+VERIFICACIÓN ANTES DE GENERAR EL EXCEL:
+Antes de finalizar la respuesta, revisa mentalmente: ¿El contrato menciona tarifas de niño?
+Si sí → ¿generé filas CHL para todas las categorías correspondientes?
+Si no las generé → agrégalas ahora antes de responder.
+
 ═══════════════════════════════════════════════════════════════════════════
 
 Eres un asistente especializado en extracción de datos de contratos

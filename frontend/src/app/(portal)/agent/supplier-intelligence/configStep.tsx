@@ -161,6 +161,13 @@ function buildLogicSummaryFromBrief(
  * dentro del MISMO contenedor (mismo alto/estilo) sea análisis inicial o
  * corrección — así el bloque no "encoge" tras un refine.
  */
+function stripSectionEmojis(text: string): string {
+  return text
+    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\uFE0F\u200D]/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function renderInlineBold(text: string, keyPrefix: string): ReactNode[] {
   const parts = text.split(/(\*\*[^*]+\*\*)/g).filter((p) => p !== "");
   return parts.map((part, i) => {
@@ -168,7 +175,7 @@ function renderInlineBold(text: string, keyPrefix: string): ReactNode[] {
     if (m) {
       return (
         <strong key={`${keyPrefix}-${i}`} className="font-semibold text-foreground">
-          {m[1]}
+          {stripSectionEmojis(m[1]!)}
         </strong>
       );
     }

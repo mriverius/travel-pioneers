@@ -30,6 +30,7 @@ import {
   useState,
   type ChangeEvent,
   type DragEvent,
+  type ReactNode,
 } from "react";
 import {
   api,
@@ -115,6 +116,21 @@ const MAX_FILE_BYTES = 20 * 1024 * 1024;
  * manually — if the backend raises this, bump it here too.
  */
 const MAX_FILES_PER_REQUEST = 10;
+const MAX_SECONDARY_FILES = MAX_FILES_PER_REQUEST - 1;
+
+const STEP2_ANALYSIS_FOOTER =
+  "Corre en dos fases: un pre-análisis rápido (Opus) que detecta las reglas " +
+  "globales y luego la extracción completa que consolida todos los documentos. " +
+  "Puede tardar varios minutos — mantené esta pestaña abierta.";
+
+const STEP3_EXTRACT_FOOTER =
+  "Extrayendo y estructurando todas las tarifas del contrato. El modelo está generando " +
+  "cada combinación de habitación × temporada × ocupación. Puede tardar varios minutos " +
+  "con contratos extensos — mantené esta pestaña abierta.";
+
+const STEP3_RENDER_FOOTER =
+  "Preparando la tabla con todas las filas generadas. Esto puede tomar unos segundos " +
+  "según la cantidad de combinaciones — ya casi está listo.";
 
 const ACCEPT_ATTR = [
   "application/pdf",
@@ -222,18 +238,22 @@ export interface ApprovedPayload {
 export function SupplierWorkflow() {
   const [step, setStep] = useState<Step>(1);
   /**
-   * Files queued for extraction. Order is preserved end-to-end: the first
-   * file is treated as the "primary" contract by the backend (its name is
-   * what populates `meta.filename` once combined), and additional files are
-   * sent as supporting documents (amendments, price lists, etc.).
+   * Documento principal (índice 0) + secundarios opcionales. El orden se
+   * preserva end-to-end para el backend.
    */
-  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [primaryFile, setPrimaryFile] = useState<File | null>(null);
+  const [secondaryFiles, setSecondaryFiles] = useState<File[]>([]);
+  const selectedFiles = useMemo(
+    () => (primaryFile ? [primaryFile, ...secondaryFiles] : []),
+    [primaryFile, secondaryFiles],
+  );
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [result, setResult] = useState<ExtractContractResponse | null>(null);
   const [serverError, setServerError] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const primaryFileInputRef = useRef<HTMLInputElement>(null);
+  const secondaryFileInputRef = useRef<HTMLInputElement>(null);
 
   /**
    * Variables de Configuración detectadas en la Fase 1 (step 1 → 2) — UNA por
@@ -254,6 +274,7 @@ export function SupplierWorkflow() {
   const [activeTab, setActiveTab] = useState(0);
   /** True mientras corre la extracción principal disparada desde el step 2. */
   const [extracting, setExtracting] = useState(false);
+  const [preparingGrid, setPreparingGrid] = useState(false);
   /** Índice del tab que Opus está re-analizando (null = ninguno). */
   const [refiningTab, setRefiningTab] = useState<number | null>(null);
 
@@ -287,7 +308,7 @@ export function SupplierWorkflow() {
   );
 
   useEffect(() => {
-    if (!analyzing) return;
+    if (!analyzing && !extracting) return;
     const id = window.setInterval(() => {
       setProgress((p) => {
         if (p >= 90) return p;
@@ -296,107 +317,168 @@ export function SupplierWorkflow() {
       });
     }, 180);
     return () => window.clearInterval(id);
-  }, [analyzing]);
+  }, [analyzing, extracting]);
+
+  useEffect(() => {
+    if (!preparingGrid) return;
+    setProgress(15);
+    const id = window.setInterval(() => {
+      setProgress((p) => (p >= 92 ? p : Math.min(92, p + 6)));
+    }, 120);
+    return () => window.clearInterval(id);
+  }, [preparingGrid]);
 
   /**
-   * Validate and append a batch of newly picked / dropped files to the queue.
-   * Validation errors are aggregated into a single `uploadError` line per
-   * batch so the user sees every problem at once instead of having to retry
-   * file-by-file. Duplicates (by name + size) are skipped silently — the
-   * user dragging the same file twice is almost always an accident.
-   *
-   * The first error sentence in the message is the one most likely to be
-   * actionable, so keep it specific (which file, what limit, what size).
+   * Valida archivos entrantes contra formato, tamaño y duplicados.
    */
-  const acceptFiles = (incoming: FileList | File[]) => {
-    setServerError(null);
+  const validateIncomingFiles = (
+    incoming: File[],
+    seen: Set<string>,
+    maxToAccept: number,
+    limitMessage: string,
+  ): { accepted: File[]; errors: string[] } => {
+    const accepted: File[] = [];
+    const errors: string[] = [];
 
+    for (const file of incoming) {
+      if (accepted.length >= maxToAccept) {
+        errors.push(`${limitMessage} — se descartó "${file.name}".`);
+        continue;
+      }
+      const kind = inferKind(file.type, file.name);
+      if (!kind) {
+        errors.push(
+          `${file.name}: formato no admitido. Usa PDF, Word, Excel o imagen (JPG/PNG/GIF/WebP).`,
+        );
+        continue;
+      }
+      if (file.size > MAX_FILE_BYTES) {
+        errors.push(
+          `${file.name}: excede el límite de 20 MB (${humanSize(file.size)}).`,
+        );
+        continue;
+      }
+      const key = `${file.name}|${file.size}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      accepted.push(file);
+    }
+
+    return { accepted, errors };
+  };
+
+  const buildSeenKeys = (): Set<string> => {
+    const seen = new Set<string>();
+    if (primaryFile) seen.add(`${primaryFile.name}|${primaryFile.size}`);
+    for (const f of secondaryFiles) seen.add(`${f.name}|${f.size}`);
+    return seen;
+  };
+
+  const acceptPrimaryFiles = (incoming: FileList | File[]) => {
+    setServerError(null);
     const list = Array.from(incoming);
     if (list.length === 0) {
       setUploadError(null);
       return;
     }
 
-    // We validate against the CURRENT files state up-front (read once via
-    // the functional getter we already have). The state updater itself must
-    // stay pure — pushing into outer arrays from inside `setSelectedFiles`
-    // would double-count files under React strict mode (the updater runs
-    // twice in development).
-    setSelectedFiles((prev) => {
-      const seen = new Set(prev.map((f) => `${f.name}|${f.size}`));
-      const accepted: File[] = [];
-      const errors: string[] = [];
+    const errors: string[] = [];
+    if (list.length > 1) {
+      errors.push(
+        "Solo se permite 1 documento principal. Usá la sección de documentos secundarios para archivos adicionales.",
+      );
+    }
 
-      for (const file of list) {
-        const kind = inferKind(file.type, file.name);
-        if (!kind) {
-          errors.push(
-            `${file.name}: formato no admitido. Usa PDF, Word, Excel o imagen (JPG/PNG/GIF/WebP).`,
-          );
-          continue;
-        }
-        if (file.size > MAX_FILE_BYTES) {
-          errors.push(
-            `${file.name}: excede el límite de 20 MB (${humanSize(file.size)}).`,
-          );
-          continue;
-        }
-        const key = `${file.name}|${file.size}`;
-        if (seen.has(key)) {
-          // Silently skip duplicates — most often a drag-and-drop double-fire.
-          continue;
-        }
-        if (prev.length + accepted.length >= MAX_FILES_PER_REQUEST) {
-          errors.push(
-            `Máximo ${MAX_FILES_PER_REQUEST} documentos por análisis — se descartó "${file.name}".`,
-          );
-          continue;
-        }
-        seen.add(key);
-        accepted.push(file);
-      }
+    const seen = buildSeenKeys();
+    const { accepted, errors: validationErrors } = validateIncomingFiles(
+      list.slice(0, 1),
+      seen,
+      1,
+      "Solo se permite 1 documento principal",
+    );
+    errors.push(...validationErrors);
 
-      // Surface validation errors as part of the same render. Safe to call
-      // from inside the updater: setState calls are batched and idempotent
-      // even if the updater itself runs twice in strict mode.
-      setUploadError(errors.length > 0 ? errors.join(" ") : null);
-
-      if (accepted.length === 0) return prev;
-      return [...prev, ...accepted];
-    });
+    setUploadError(errors.length > 0 ? errors.join(" ") : null);
+    if (accepted.length > 0) {
+      setPrimaryFile(accepted[0]!);
+    }
   };
 
-  const handleDrop = (e: DragEvent<HTMLDivElement>) => {
+  const acceptSecondaryFiles = (incoming: FileList | File[]) => {
+    setServerError(null);
+    const list = Array.from(incoming);
+    if (list.length === 0) {
+      setUploadError(null);
+      return;
+    }
+
+    const slotsLeft = MAX_SECONDARY_FILES - secondaryFiles.length;
+    if (slotsLeft <= 0) {
+      setUploadError(
+        `Máximo ${MAX_SECONDARY_FILES} documentos secundarios — quitá alguno para agregar más.`,
+      );
+      return;
+    }
+
+    const seen = buildSeenKeys();
+    const { accepted, errors } = validateIncomingFiles(
+      list,
+      seen,
+      slotsLeft,
+      `Máximo ${MAX_SECONDARY_FILES} documentos secundarios`,
+    );
+    setUploadError(errors.length > 0 ? errors.join(" ") : null);
+    if (accepted.length > 0) {
+      setSecondaryFiles((prev) => [...prev, ...accepted]);
+    }
+  };
+
+  const handlePrimaryDrop = (e: DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     const files = e.dataTransfer.files;
     if (!files || files.length === 0) return;
-    // Materialize the FileList into a real array immediately. DataTransfer
-    // objects are short-lived and the spec lets browsers null them out once
-    // the drop event has been dispatched.
-    acceptFiles(Array.from(files));
+    acceptPrimaryFiles(Array.from(files));
   };
 
-  const handlePick = (e: ChangeEvent<HTMLInputElement>) => {
+  const handleSecondaryDrop = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const files = e.dataTransfer.files;
+    if (!files || files.length === 0) return;
+    acceptSecondaryFiles(Array.from(files));
+  };
+
+  const handlePrimaryPick = (e: ChangeEvent<HTMLInputElement>) => {
     const fileList = e.target.files;
     if (!fileList || fileList.length === 0) return;
-    // Snapshot the FileList BEFORE resetting the input's value. Setting
-    // `value = ""` clears the input's associated FileList in some browsers,
-    // which would leave `acceptFiles` with an empty iterable and silently
-    // drop the selection — that's the bug that made step 1 look like
-    // nothing happened after picking files.
     const files = Array.from(fileList);
     e.target.value = "";
-    acceptFiles(files);
+    acceptPrimaryFiles(files);
   };
 
-  const removeFile = (index: number) => {
-    setSelectedFiles((prev) => prev.filter((_, i) => i !== index));
+  const handleSecondaryPick = (e: ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
+    const files = Array.from(fileList);
+    e.target.value = "";
+    acceptSecondaryFiles(files);
+  };
+
+  const removePrimary = () => {
+    setPrimaryFile(null);
     setUploadError(null);
     setServerError(null);
   };
 
-  const clearFiles = () => {
-    setSelectedFiles([]);
+  const removeSecondary = (index: number) => {
+    setSecondaryFiles((prev) => prev.filter((_, i) => i !== index));
+    setUploadError(null);
+    setServerError(null);
+  };
+
+  const clearSecondaryFiles = () => {
+    setSecondaryFiles([]);
     setUploadError(null);
     setServerError(null);
   };
@@ -410,17 +492,18 @@ export function SupplierWorkflow() {
    * categorías del brief (todavía no hay filas).
    */
   const startAnalysis = async () => {
-    if (selectedFiles.length === 0 || analyzing || isExistingSupplier === null) {
+    if (!primaryFile || analyzing || isExistingSupplier === null) {
       return;
     }
     setAnalyzing(true);
     setServerError(null);
     setProgress(4);
+    resetConfigState();
+    setStep(2);
     try {
-      // Un análisis INDEPENDIENTE por documento (Cambio v2 #4): cada archivo
-      // genera su propio brief para que la IA no mezcle documentos distintos.
+      const files = selectedFiles;
       const responses = await Promise.all(
-        selectedFiles.map((f) =>
+        files.map((f) =>
           api.supplierIntelligence.analyzeBrief([f], {
             comments,
             isExistingSupplier,
@@ -536,9 +619,8 @@ export function SupplierWorkflow() {
       setMetas(responses.map((r) => r.meta));
       setChatHistories(newBriefs.map(() => []));
       setBriefVersions(newBriefs.map(() => 0));
-      setFileLabels(selectedFiles.map((f) => f.name));
+      setFileLabels(files.map((f) => f.name));
       setActiveTab(0);
-      setStep(2);
     } catch (err) {
       if (err instanceof ApiError) {
         setServerError(err.message);
@@ -656,6 +738,11 @@ export function SupplierWorkflow() {
     }
   };
 
+  const handleGridReady = useCallback(() => {
+    setProgress(100);
+    setPreparingGrid(false);
+  }, []);
+
   /**
    * Step 2 → 3: el usuario confirmó TODOS los briefs (uno por documento).
    * Corremos la extracción enviando el array de briefs validados; el backend
@@ -664,8 +751,9 @@ export function SupplierWorkflow() {
    */
   const confirmConfig = async () => {
     if (
-      selectedFiles.length === 0 ||
+      !primaryFile ||
       extracting ||
+      preparingGrid ||
       refiningTab !== null ||
       isExistingSupplier === null ||
       briefs.length === 0
@@ -676,15 +764,20 @@ export function SupplierWorkflow() {
     const finalBriefs = source.map(normalizeBrief);
     setEditedBriefs(finalBriefs);
     setExtracting(true);
+    setPreparingGrid(false);
     setServerError(null);
+    setProgress(4);
+    setResult(null);
+    setStep(3);
     try {
       const response = await api.supplierIntelligence.extract(selectedFiles, {
         comments,
         isExistingSupplier,
         confirmedConfigs: finalBriefs,
       });
+      setProgress(100);
       setResult(response);
-      setStep(3);
+      setPreparingGrid(true);
     } catch (err) {
       if (err instanceof ApiError) {
         setServerError(err.message);
@@ -693,6 +786,7 @@ export function SupplierWorkflow() {
           "No pudimos conectar con el servidor. Revisa tu conexión e intenta de nuevo.",
         );
       }
+      setProgress(0);
     } finally {
       setExtracting(false);
     }
@@ -711,7 +805,8 @@ export function SupplierWorkflow() {
 
   const reset = () => {
     setStep(1);
-    setSelectedFiles([]);
+    setPrimaryFile(null);
+    setSecondaryFiles([]);
     setResult(null);
     setUploadError(null);
     setServerError(null);
@@ -723,10 +818,21 @@ export function SupplierWorkflow() {
     setMatchingPhase(null);
     setApprovedPayload(null);
     setExtracting(false);
+    setPreparingGrid(false);
     resetConfigState();
   };
 
-  /** Step 2 ← 3: volver del config a la carga sin perder los archivos. */
+  /** Step 3 ← error o volver: regresa al Paso 2 conservando briefs y archivos. */
+  const backToConfig = () => {
+    setStep(2);
+    setServerError(null);
+    setProgress(0);
+    setExtracting(false);
+    setPreparingGrid(false);
+    setResult(null);
+  };
+
+  /** Step 2 ← 1: volver del config a la carga sin perder los archivos. */
   const backToUpload = () => {
     setStep(1);
     setServerError(null);
@@ -802,23 +908,58 @@ export function SupplierWorkflow() {
       <div key={step} className="animate-page-enter">
         {step === 1 && (
           <UploadStep
-            files={selectedFiles}
+            primaryFile={primaryFile}
+            secondaryFiles={secondaryFiles}
             uploadError={uploadError}
             serverError={serverError}
             analyzing={analyzing}
-            progress={progress}
-            matchingPhase={matchingPhase}
-            fileInputRef={fileInputRef}
+            primaryFileInputRef={primaryFileInputRef}
+            secondaryFileInputRef={secondaryFileInputRef}
             comments={comments}
             onCommentsChange={setComments}
             isExistingSupplier={isExistingSupplier}
             onExistingSupplierChange={setIsExistingSupplier}
-            onDrop={handleDrop}
-            onPick={handlePick}
-            onRemoveFile={removeFile}
-            onClearAll={clearFiles}
+            onPrimaryDrop={handlePrimaryDrop}
+            onSecondaryDrop={handleSecondaryDrop}
+            onPrimaryPick={handlePrimaryPick}
+            onSecondaryPick={handleSecondaryPick}
+            onRemovePrimary={removePrimary}
+            onRemoveSecondary={removeSecondary}
+            onClearSecondary={clearSecondaryFiles}
             onStart={startAnalysis}
           />
+        )}
+
+        {step === 2 && analyzing && briefs.length === 0 && (
+          <div className="px-5 sm:px-8 py-7">
+            <AnalysisProgressCard
+              files={selectedFiles}
+              totalBytes={selectedFiles.reduce((acc, f) => acc + f.size, 0)}
+              progress={progress}
+              matchingPhase={matchingPhase}
+              footerDescription={STEP2_ANALYSIS_FOOTER}
+            />
+          </div>
+        )}
+
+        {step === 2 && !analyzing && briefs.length === 0 && serverError && (
+          <div className="px-5 sm:px-8 py-7 space-y-4">
+            <div
+              role="alert"
+              className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2.5 text-[13px] text-destructive"
+            >
+              <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+              <span>{serverError}</span>
+            </div>
+            <button
+              type="button"
+              onClick={backToUpload}
+              className="inline-flex items-center justify-center gap-2 h-11 px-4 rounded-lg border border-border bg-secondary/40 text-[13.5px] text-foreground hover:bg-secondary/70 transition-colors"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              Volver
+            </button>
+          </div>
         )}
 
         {step === 2 && briefs.length > 0 && (
@@ -926,12 +1067,78 @@ export function SupplierWorkflow() {
           </div>
         )}
 
+        {step === 3 && extracting && (
+          <div className="px-5 sm:px-8 py-7">
+            <AnalysisProgressCard
+              files={selectedFiles}
+              totalBytes={selectedFiles.reduce((acc, f) => acc + f.size, 0)}
+              progress={progress}
+              matchingPhase={null}
+              getPhase={extractionPhase}
+              footerDescription={STEP3_EXTRACT_FOOTER}
+            />
+          </div>
+        )}
+
+        {step === 3 && !extracting && !result && serverError && (
+          <div className="px-5 sm:px-8 py-7 space-y-4">
+            <div
+              role="alert"
+              className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2.5 text-[13px] text-destructive"
+            >
+              <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+              <span>{serverError}</span>
+            </div>
+            <div className="flex flex-col-reverse sm:flex-row sm:items-center gap-2">
+              <button
+                type="button"
+                onClick={backToConfig}
+                className="inline-flex items-center justify-center gap-2 h-11 px-4 rounded-lg border border-border bg-secondary/40 text-[13.5px] text-foreground hover:bg-secondary/70 transition-colors"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                Volver a configuración
+              </button>
+              <button
+                type="button"
+                onClick={() => confirmConfig()}
+                className="btn-premium inline-flex items-center justify-center gap-2 h-11 px-5 rounded-lg text-[13.5px]"
+              >
+                <RotateCcw className="w-4 h-4" />
+                Reintentar extracción
+              </button>
+            </div>
+          </div>
+        )}
+
+        {step === 3 && preparingGrid && result && (
+          <div className="px-5 sm:px-8 py-7">
+            <AnalysisProgressCard
+              files={selectedFiles}
+              totalBytes={selectedFiles.reduce((acc, f) => acc + f.size, 0)}
+              progress={progress}
+              matchingPhase={null}
+              getPhase={gridRenderPhase}
+              footerDescription={STEP3_RENDER_FOOTER}
+            />
+          </div>
+        )}
+
         {step === 3 && result && (
-          <ReviewStep
-            result={result}
-            catalogPrefill={catalogPrefill}
-            onApprove={approve}
-          />
+          <div
+            className={
+              preparingGrid
+                ? "fixed opacity-0 pointer-events-none -z-10 h-0 overflow-hidden"
+                : undefined
+            }
+            aria-hidden={preparingGrid}
+          >
+            <ReviewStep
+              result={result}
+              catalogPrefill={catalogPrefill}
+              onApprove={approve}
+              onGridReady={preparingGrid ? handleGridReady : undefined}
+            />
+          </div>
         )}
 
         {step === 4 && result && approvedPayload && (
@@ -945,7 +1152,7 @@ export function SupplierWorkflow() {
     </section>
 
     <div className="text-center mt-4 space-y-1">
-      <p className="text-[11px] text-muted-foreground/60">Version 1.5.0 - Junio 16</p>
+      <p className="text-[11px] text-muted-foreground/60">Version 1.6.0 - Junio 17</p>
       <a
         href="https://forms.gle/GANUbdcuAS3P7szS8"
         target="_blank"
@@ -964,120 +1171,131 @@ export function SupplierWorkflow() {
    ========================================================================== */
 
 function UploadStep({
-  files,
+  primaryFile,
+  secondaryFiles,
   uploadError,
   serverError,
   analyzing,
-  progress,
-  matchingPhase,
-  fileInputRef,
+  primaryFileInputRef,
+  secondaryFileInputRef,
   comments,
   onCommentsChange,
   isExistingSupplier,
   onExistingSupplierChange,
-  onDrop,
-  onPick,
-  onRemoveFile,
-  onClearAll,
+  onPrimaryDrop,
+  onSecondaryDrop,
+  onPrimaryPick,
+  onSecondaryPick,
+  onRemovePrimary,
+  onRemoveSecondary,
+  onClearSecondary,
   onStart,
 }: {
-  files: File[];
+  primaryFile: File | null;
+  secondaryFiles: File[];
   uploadError: string | null;
   serverError: string | null;
   analyzing: boolean;
-  progress: number;
-  matchingPhase: "local" | "ai" | null;
-  fileInputRef: React.RefObject<HTMLInputElement | null>;
+  primaryFileInputRef: React.RefObject<HTMLInputElement | null>;
+  secondaryFileInputRef: React.RefObject<HTMLInputElement | null>;
   comments: string;
   onCommentsChange: (value: string) => void;
   isExistingSupplier: boolean | null;
   onExistingSupplierChange: (value: boolean) => void;
-  onDrop: (e: DragEvent<HTMLDivElement>) => void;
-  onPick: (e: ChangeEvent<HTMLInputElement>) => void;
-  onRemoveFile: (index: number) => void;
-  onClearAll: () => void;
+  onPrimaryDrop: (e: DragEvent<HTMLDivElement>) => void;
+  onSecondaryDrop: (e: DragEvent<HTMLDivElement>) => void;
+  onPrimaryPick: (e: ChangeEvent<HTMLInputElement>) => void;
+  onSecondaryPick: (e: ChangeEvent<HTMLInputElement>) => void;
+  onRemovePrimary: () => void;
+  onRemoveSecondary: (index: number) => void;
+  onClearSecondary: () => void;
   onStart: () => void;
 }) {
-  const [dragActive, setDragActive] = useState(false);
   const COMMENTS_MAX = 5000;
-  const totalBytes = useMemo(
-    () => files.reduce((acc, f) => acc + f.size, 0),
-    [files],
-  );
-  const hasFiles = files.length > 0;
-  const slotsLeft = MAX_FILES_PER_REQUEST - files.length;
-  const canAddMore = slotsLeft > 0 && !analyzing;
-  const canSubmit = hasFiles && !analyzing && isExistingSupplier !== null;
+  const secondarySlotsLeft = MAX_SECONDARY_FILES - secondaryFiles.length;
+  const canAddSecondary = secondarySlotsLeft > 0 && !analyzing;
+  const canSubmit = !!primaryFile && !analyzing && isExistingSupplier !== null;
 
   return (
     <div className="px-5 sm:px-8 py-7 space-y-5">
-      <div
-        onDragOver={(e) => {
-          e.preventDefault();
-          if (canAddMore) setDragActive(true);
-        }}
-        onDragLeave={() => setDragActive(false)}
-        onDrop={(e) => {
-          setDragActive(false);
-          if (!canAddMore) {
-            e.preventDefault();
-            return;
-          }
-          onDrop(e);
-        }}
-        onClick={() => {
-          if (canAddMore) fileInputRef.current?.click();
-        }}
-        role="button"
-        tabIndex={0}
-        aria-disabled={!canAddMore}
-        onKeyDown={(e) => {
-          if ((e.key === "Enter" || e.key === " ") && canAddMore) {
-            e.preventDefault();
-            fileInputRef.current?.click();
-          }
-        }}
-        className={`group rounded-2xl border-2 border-dashed p-8 sm:p-10 text-center transition-all ${
-          !canAddMore
-            ? "cursor-not-allowed opacity-60 border-border bg-secondary/20"
-            : dragActive
-              ? "cursor-pointer border-primary bg-primary/10 shadow-[0_0_30px_0_hsl(var(--primary)/0.25)]"
-              : "cursor-pointer border-border bg-secondary/20 hover:border-primary/50 hover:bg-primary/5"
-        }`}
-      >
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept={ACCEPT_ATTR}
+      <div className="grid gap-5 lg:grid-cols-2">
+        <DocumentUploadSection
+          title="Documento principal"
+          description="El contrato o cotización base. Solo se acepta 1 archivo."
+          disabled={analyzing}
+          inputRef={primaryFileInputRef}
+          multiple={false}
+          onDrop={onPrimaryDrop}
+          onPick={onPrimaryPick}
+          emptyTitle="Arrastra el documento principal aquí"
+          emptyHint="o haz click para buscar en tu equipo"
+        >
+          {primaryFile && (
+            <UploadedFileRow file={primaryFile} onRemove={onRemovePrimary} />
+          )}
+        </DocumentUploadSection>
+
+        <DocumentUploadSection
+          title="Documentos secundarios"
+          badge="opcional"
+          description="Listas de precios, anexos, catálogos u otros archivos de apoyo. Podés subir hasta 9."
+          disabled={!canAddSecondary}
+          inputRef={secondaryFileInputRef}
           multiple
-          onChange={onPick}
-          className="hidden"
-        />
-        <div className="mx-auto w-14 h-14 rounded-2xl bg-primary/15 border border-primary/30 flex items-center justify-center animate-pulse-glow">
-          <CloudUpload className="w-6 h-6 text-primary" />
-        </div>
-        <p className="mt-4 text-[15px] font-semibold text-foreground">
-          {hasFiles
-            ? "Arrastra documentos adicionales aquí"
-            : "Arrastra tus contratos aquí"}
-        </p>
-        <p className="mt-1 text-[12.5px] text-muted-foreground">
-          o{" "}
-          <span className="text-primary font-medium">
-            haz click para buscar
-          </span>
-          {hasFiles ? " más archivos" : ""} en tu equipo
-        </p>
-        <div className="mt-4 inline-flex flex-wrap items-center justify-center gap-1.5 text-[11px] text-muted-foreground/80">
-          <Badge label="PDF" />
-          <Badge label="DOCX" />
-          <Badge label="XLSX" />
-          <Badge label="JPG" />
-          <Badge label="PNG" />
-          <span className="opacity-60">
-            · hasta 20 MB c/u · máx {MAX_FILES_PER_REQUEST} archivos
-          </span>
-        </div>
+          onDrop={onSecondaryDrop}
+          onPick={onSecondaryPick}
+          emptyTitle="Arrastra documentos de apoyo aquí"
+          emptyHint={
+            secondaryFiles.length > 0
+              ? "o haz click para agregar más archivos"
+              : "o haz click para buscar en tu equipo"
+          }
+        >
+          {secondaryFiles.length > 0 && (
+            <div className="mt-3 rounded-lg border border-border/60 bg-card/40 divide-y divide-border/60">
+              <header className="flex items-center justify-between px-3 py-2 border-b border-border/60">
+                <p className="text-[11.5px] font-medium text-foreground">
+                  {secondaryFiles.length}{" "}
+                  {secondaryFiles.length === 1 ? "archivo" : "archivos"}
+                </p>
+                {secondaryFiles.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={onClearSecondary}
+                    className="text-[10.5px] text-muted-foreground hover:text-destructive transition-colors"
+                  >
+                    Quitar todos
+                  </button>
+                )}
+              </header>
+              <ul>
+                {secondaryFiles.map((f, idx) => (
+                  <UploadedFileRow
+                    key={`${f.name}|${f.size}|${idx}`}
+                    file={f}
+                    onRemove={() => onRemoveSecondary(idx)}
+                  />
+                ))}
+              </ul>
+              {canAddSecondary && (
+                <div className="px-3 py-2 border-t border-border/60">
+                  <button
+                    type="button"
+                    onClick={() => secondaryFileInputRef.current?.click()}
+                    className="inline-flex items-center gap-1.5 text-[11.5px] text-primary hover:text-primary/80 transition-colors"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    Agregar otro
+                    <span className="text-muted-foreground/80">
+                      ({secondarySlotsLeft}{" "}
+                      {secondarySlotsLeft === 1 ? "disponible" : "disponibles"})
+                    </span>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </DocumentUploadSection>
       </div>
 
       {uploadError && (
@@ -1098,101 +1316,6 @@ function UploadStep({
           <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
           <span>{serverError}</span>
         </div>
-      )}
-
-      {hasFiles && !analyzing && (
-        <div className="rounded-xl border border-border bg-card/60">
-          <header className="flex items-center justify-between px-4 py-3 border-b border-border/60">
-            <p className="text-[12.5px] font-semibold text-foreground">
-              {files.length === 1
-                ? "Documento listo para analizar"
-                : `${files.length} documentos listos para analizar`}
-            </p>
-            <div className="flex items-center gap-3">
-              <p className="text-[11.5px] text-muted-foreground">
-                {humanSize(totalBytes)} total
-              </p>
-              {files.length > 1 && (
-                <button
-                  type="button"
-                  onClick={onClearAll}
-                  className="text-[11px] text-muted-foreground hover:text-destructive transition-colors"
-                >
-                  Quitar todos
-                </button>
-              )}
-            </div>
-          </header>
-          <ul className="divide-y divide-border/60">
-            {files.map((f, idx) => {
-              const fkind = inferKind(f.type, f.name);
-              return (
-                <li
-                  key={`${f.name}|${f.size}|${idx}`}
-                  className="flex items-center gap-3 px-4 py-3"
-                >
-                  <div className="w-8 h-8 rounded-lg bg-secondary/70 border border-border/60 flex items-center justify-center shrink-0">
-                    {fkind ? (
-                      fileIcon(fkind)
-                    ) : (
-                      <FileText className="w-4 h-4 text-muted-foreground" />
-                    )}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-[13px] text-foreground truncate">
-                      {idx === 0 && files.length > 1 ? (
-                        <>
-                          <span className="text-primary font-medium">
-                            Principal:
-                          </span>{" "}
-                          {f.name}
-                        </>
-                      ) : (
-                        f.name
-                      )}
-                    </p>
-                    <p className="text-[11px] text-muted-foreground">
-                      {humanSize(f.size)}
-                      {fkind ? ` · ${fkind.toUpperCase()}` : ""}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => onRemoveFile(idx)}
-                    aria-label={`Quitar ${f.name}`}
-                    className="text-muted-foreground hover:text-destructive transition-colors"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-          {canAddMore && (
-            <div className="px-4 py-2.5 border-t border-border/60">
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="inline-flex items-center gap-1.5 text-[12px] text-primary hover:text-primary/80 transition-colors"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                Agregar otro documento
-                <span className="text-muted-foreground/80">
-                  ({slotsLeft} {slotsLeft === 1 ? "disponible" : "disponibles"})
-                </span>
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-
-      {hasFiles && analyzing && (
-        <AnalysisProgressCard
-          files={files}
-          totalBytes={totalBytes}
-          progress={progress}
-          matchingPhase={matchingPhase}
-        />
       )}
 
       <ExistingSupplierToggle
@@ -1218,9 +1341,7 @@ function UploadStep({
           {analyzing ? (
             <>
               <Loader2 className="w-4 h-4 animate-spin" />
-              {matchingPhase === "ai"
-                ? "Buscando proveedor con IA…"
-                : "Analizando contrato…"}
+              Analizando contrato…
             </>
           ) : (
             <>
@@ -1230,6 +1351,156 @@ function UploadStep({
           )}
         </button>
       </div>
+    </div>
+  );
+}
+
+function DocumentUploadSection({
+  title,
+  badge,
+  description,
+  disabled,
+  inputRef,
+  multiple,
+  onDrop,
+  onPick,
+  emptyTitle,
+  emptyHint,
+  children,
+}: {
+  title: string;
+  badge?: string;
+  description: string;
+  disabled: boolean;
+  inputRef: React.RefObject<HTMLInputElement | null>;
+  multiple: boolean;
+  onDrop: (e: DragEvent<HTMLDivElement>) => void;
+  onPick: (e: ChangeEvent<HTMLInputElement>) => void;
+  emptyTitle: string;
+  emptyHint: string;
+  children?: ReactNode;
+}) {
+  const [dragActive, setDragActive] = useState(false);
+  const hasContent = !!children;
+
+  return (
+    <div className="space-y-2">
+      <div>
+        <p className="text-[13px] font-semibold text-foreground">
+          {title}
+          {badge && (
+            <span className="ml-2 inline-flex items-center rounded border border-border bg-secondary/40 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+              {badge}
+            </span>
+          )}
+        </p>
+        <p className="mt-0.5 text-[11.5px] text-muted-foreground">{description}</p>
+      </div>
+
+      <div
+        onDragOver={(e) => {
+          e.preventDefault();
+          if (!disabled) setDragActive(true);
+        }}
+        onDragLeave={() => setDragActive(false)}
+        onDrop={(e) => {
+          setDragActive(false);
+          if (disabled) {
+            e.preventDefault();
+            return;
+          }
+          onDrop(e);
+        }}
+        onClick={() => {
+          if (!disabled) inputRef.current?.click();
+        }}
+        role="button"
+        tabIndex={0}
+        aria-disabled={disabled}
+        onKeyDown={(e) => {
+          if ((e.key === "Enter" || e.key === " ") && !disabled) {
+            e.preventDefault();
+            inputRef.current?.click();
+          }
+        }}
+        className={`group rounded-2xl border-2 border-dashed p-6 sm:p-7 text-center transition-all ${
+          disabled
+            ? "cursor-not-allowed opacity-60 border-border bg-secondary/20"
+            : dragActive
+              ? "cursor-pointer border-primary bg-primary/10 shadow-[0_0_30px_0_hsl(var(--primary)/0.25)]"
+              : "cursor-pointer border-border bg-secondary/20 hover:border-primary/50 hover:bg-primary/5"
+        }`}
+      >
+        <input
+          ref={inputRef}
+          type="file"
+          accept={ACCEPT_ATTR}
+          multiple={multiple}
+          onChange={onPick}
+          className="hidden"
+        />
+        {!hasContent && (
+          <>
+            <div className="mx-auto w-12 h-12 rounded-2xl bg-primary/15 border border-primary/30 flex items-center justify-center animate-pulse-glow">
+              <CloudUpload className="w-5 h-5 text-primary" />
+            </div>
+            <p className="mt-3 text-[14px] font-semibold text-foreground">
+              {emptyTitle}
+            </p>
+            <p className="mt-1 text-[12px] text-muted-foreground">
+              {emptyHint}
+            </p>
+            <div className="mt-3 inline-flex flex-wrap items-center justify-center gap-1.5 text-[10.5px] text-muted-foreground/80">
+              <Badge label="PDF" />
+              <Badge label="DOCX" />
+              <Badge label="XLSX" />
+              <Badge label="JPG" />
+              <Badge label="PNG" />
+              <span className="opacity-60">· hasta 20 MB c/u</span>
+            </div>
+          </>
+        )}
+        {hasContent && children}
+      </div>
+    </div>
+  );
+}
+
+function UploadedFileRow({
+  file,
+  onRemove,
+}: {
+  file: File;
+  onRemove: () => void;
+}) {
+  const fkind = inferKind(file.type, file.name);
+  return (
+    <div className="flex items-center gap-3 px-3 py-2.5">
+      <div className="w-8 h-8 rounded-lg bg-secondary/70 border border-border/60 flex items-center justify-center shrink-0">
+        {fkind ? (
+          fileIcon(fkind)
+        ) : (
+          <FileText className="w-4 h-4 text-muted-foreground" />
+        )}
+      </div>
+      <div className="flex-1 min-w-0 text-left">
+        <p className="text-[13px] text-foreground truncate">{file.name}</p>
+        <p className="text-[11px] text-muted-foreground">
+          {humanSize(file.size)}
+          {fkind ? ` · ${fkind.toUpperCase()}` : ""}
+        </p>
+      </div>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onRemove();
+        }}
+        aria-label={`Quitar ${file.name}`}
+        className="text-muted-foreground hover:text-destructive transition-colors"
+      >
+        <X className="w-4 h-4" />
+      </button>
     </div>
   );
 }
@@ -1395,6 +1666,21 @@ function Badge({ label }: { label: string }) {
  * y luego la extracción completa (Opus 4.7) que genera todas las filas — esta
  * última es la que se lleva la mayor parte del tiempo, de ahí el tramo ancho.
  */
+function extractionPhase(progress: number): string {
+  if (progress < 12) return "Iniciando extracción de tarifas…";
+  if (progress < 35) return "Procesando habitaciones y temporadas…";
+  if (progress < 70) return "Generando combinaciones habitación × temporada × ocupación…";
+  if (progress < 90) return "Estructurando filas para la grilla…";
+  if (progress < 100) return "Finalizando extracción…";
+  return "Listo";
+}
+
+function gridRenderPhase(progress: number): string {
+  if (progress < 50) return "Preparando columnas de la tabla…";
+  if (progress < 85) return "Cargando filas generadas…";
+  return "Aplicando formato a la grilla…";
+}
+
 function analysisPhase(progress: number): string {
   if (progress < 14) return "Preparando el documento…";
   if (progress < 32) return "Analizando reglas globales del contrato…";
@@ -1408,15 +1694,20 @@ function AnalysisProgressCard({
   totalBytes,
   progress,
   matchingPhase,
+  footerDescription,
+  getPhase,
 }: {
   files: File[];
   totalBytes: number;
   progress: number;
   matchingPhase: "local" | "ai" | null;
+  footerDescription?: string;
+  getPhase?: (progress: number) => string;
 }) {
   const pct = Math.max(0, Math.min(100, Math.round(progress)));
-  const phase =
-    matchingPhase === "ai"
+  const phase = getPhase
+    ? getPhase(progress)
+    : matchingPhase === "ai"
       ? "Buscando coincidencia en el maestro con IA…"
       : matchingPhase === "local"
         ? "Buscando coincidencia en el maestro…"
@@ -1476,18 +1767,19 @@ function AnalysisProgressCard({
           />
         </div>
         <p className="text-[11px] text-muted-foreground">
-          {matchingPhase === "ai"
-            ? "Pidiéndole a Claude que elija el proveedor del catálogo. Opus 4.7 puede tardar 30-60s para contratos con muchas combinaciones."
-            : files.length > 1
-              ? `Corre en dos fases: un pre-análisis rápido (Sonnet 4.6) que ` +
-                `detecta las reglas globales y luego la extracción completa ` +
-                `(Opus 4.7) que consolida ${files.length} documentos. Puede ` +
-                `tardar varios minutos — mantené esta pestaña abierta.`
-              : "Corre en dos fases: un pre-análisis rápido (Sonnet 4.6) que " +
-                "detecta las reglas globales (impuestos, bancos, persona " +
-                "adicional) y luego la extracción completa (Opus 4.7). Los " +
-                "contratos densos pueden tardar varios minutos — mantené esta " +
-                "pestaña abierta."}
+          {footerDescription ??
+            (matchingPhase === "ai"
+              ? "Pidiéndole a Claude que elija el proveedor del catálogo. Opus 4.7 puede tardar 30-60s para contratos con muchas combinaciones."
+              : files.length > 1
+                ? `Corre en dos fases: un pre-análisis rápido (Opus) que ` +
+                  `detecta las reglas globales y luego la extracción completa ` +
+                  `que consolida ${files.length} documentos. Puede ` +
+                  `tardar varios minutos — mantené esta pestaña abierta.`
+                : "Corre en dos fases: un pre-análisis rápido (Opus) que " +
+                  "detecta las reglas globales (impuestos, bancos, persona " +
+                  "adicional) y luego la extracción completa. Los " +
+                  "contratos densos pueden tardar varios minutos — mantené esta " +
+                  "pestaña abierta.")}
         </p>
       </div>
     </div>
@@ -1806,13 +2098,29 @@ function ReviewStep({
   result,
   catalogPrefill,
   onApprove,
+  onGridReady,
 }: {
   result: ExtractContractResponse;
   catalogPrefill: CatalogPrefill | null;
   onApprove: (payload: ApprovedPayload) => void;
+  onGridReady?: () => void;
 }) {
   const { data, validation, meta } = result;
   const conf = CONFIANZA_STYLES[data.confianza];
+
+  useEffect(() => {
+    if (!onGridReady) return;
+    let active = true;
+    const raf = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (active) onGridReady();
+      });
+    });
+    return () => {
+      active = false;
+      cancelAnimationFrame(raf);
+    };
+  }, [onGridReady]);
 
   // Shared state (34 keys)
   const [sharedValues, setSharedValues] = useState<

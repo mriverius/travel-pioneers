@@ -9,28 +9,31 @@ import { REGISTRAR_BRIEF_CONTRATO_TOOL_NAME } from "./briefSchema.js";
 export const LOGIC_SUMMARY_FORMAT =
   "FORMATO OBLIGATORIO de `logic_summary` (Markdown, ESPAÑOL, segunda " +
   "persona). Usá EXACTAMENTE estas 10 secciones, SIEMPRE en este orden y " +
-  "con estos títulos en negrita (no los cambies, no los reordenes, no " +
-  "agregues ni quites secciones). Si una sección no aplica, inclúyela igual " +
+  "con estos títulos en negrita SIN EMOJIS (no los cambies, no los reordenes, " +
+  "no agregues ni quites secciones). Si una sección no aplica, inclúyela igual " +
   "con 'No se detectaron' o 'No aplica':\n\n" +
-  "**🏨 Proveedor**\n" +
+  "**Proveedor**\n" +
   "Nombre comercial, razón social, ubicación, tipo de negocio, vigencia del contrato.\n\n" +
-  "**💰 Tarifas y moneda**\n" +
+  "**Tarifas y moneda**\n" +
   "Moneda, si incluye o no IVA, tasa de impuesto, nota sobre fees adicionales.\n\n" +
-  "**📊 Comisión**\n" +
+  "**Comisión**\n" +
   "Porcentaje base, si varía por temporada/categoría, cómo se calcula.\n\n" +
-  "**📅 Temporadas**\n" +
+  "**Temporadas**\n" +
   "Lista de temporadas con nombre, fechas inicio–fin, tipo de tarifa (por noche / por servicio / paquete).\n\n" +
-  "**🛏️ Habitaciones / Servicios**\n" +
-  "Lista de categorías detectadas, ocupación máxima, si hay tarifa single/double/adicional.\n\n" +
-  "**📐 Plan de filas estimado**\n" +
+  "**Habitaciones / Servicios**\n" +
+  "Lista de categorías detectadas, ocupación máxima, ocupaciones aplicables (SGL, DBL, TPL, QDP, CHL, etc.). " +
+  "OBLIGATORIO incluir una línea sobre tarifa de niño: si hay tarifa niño escribí " +
+  "'Tarifa de niño detectada: [descripción]. Se generarán filas CHL.'; si no hay, " +
+  "'No se detectó tarifa de niño en el contrato.'\n\n" +
+  "**Plan de filas estimado**\n" +
   "Fórmula explícita: X categorías × Y ocupaciones × Z temporadas = N filas. Notas sobre el conteo.\n\n" +
-  "**🍽️ Servicios incluidos**\n" +
+  "**Servicios incluidos**\n" +
   "Plan de comidas, transfers, amenidades, Wi-Fi, etc. incluidos en la tarifa.\n\n" +
-  "**📋 Políticas de pago y cancelación**\n" +
+  "**Políticas de pago y cancelación**\n" +
   "Por temporada: depósitos, deadlines de pago, condiciones de cancelación.\n\n" +
-  "**🏦 Cuentas bancarias**\n" +
+  "**Cuentas bancarias**\n" +
   "Si las hay: banco, titular, IBAN/cuenta. Si no, indicá explícitamente 'No se detectaron'.\n\n" +
-  "**⚠️ Notas críticas**\n" +
+  "**Notas críticas**\n" +
   "Cualquier dato inusual, ambiguo, contradictorio o que el operador humano deba verificar a mano.";
 
 /**
