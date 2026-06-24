@@ -35,6 +35,7 @@ import {
 import {
   api,
   ApiError,
+  describeRequestFailure,
   type AnalyzeBriefMeta,
   type BriefChatMessage,
   type ContractConfigVariables,
@@ -622,13 +623,12 @@ export function SupplierWorkflow() {
       setFileLabels(files.map((f) => f.name));
       setActiveTab(0);
     } catch (err) {
-      if (err instanceof ApiError) {
-        setServerError(err.message);
-      } else {
-        setServerError(
+      setServerError(
+        describeRequestFailure(
+          err,
           "No pudimos conectar con el servidor. Revisa tu conexión e intenta de nuevo.",
-        );
-      }
+        ),
+      );
       setProgress(0);
     } finally {
       setAnalyzing(false);
@@ -763,6 +763,14 @@ export function SupplierWorkflow() {
     const source = briefs.map((b, i) => editedBriefs[i] ?? b);
     const finalBriefs = source.map(normalizeBrief);
     setEditedBriefs(finalBriefs);
+    const filesToExtract = selectedFiles;
+    const staleFile = filesToExtract.find((f) => f.size <= 0);
+    if (staleFile) {
+      setServerError(
+        `El archivo "${staleFile.name}" ya no está disponible. Volvé al Paso 1 y cargá los documentos de nuevo.`,
+      );
+      return;
+    }
     setExtracting(true);
     setPreparingGrid(false);
     setServerError(null);
@@ -770,7 +778,7 @@ export function SupplierWorkflow() {
     setResult(null);
     setStep(3);
     try {
-      const response = await api.supplierIntelligence.extract(selectedFiles, {
+      const response = await api.supplierIntelligence.extract(filesToExtract, {
         comments,
         isExistingSupplier,
         confirmedConfigs: finalBriefs,
@@ -779,13 +787,12 @@ export function SupplierWorkflow() {
       setResult(response);
       setPreparingGrid(true);
     } catch (err) {
-      if (err instanceof ApiError) {
-        setServerError(err.message);
-      } else {
-        setServerError(
+      setServerError(
+        describeRequestFailure(
+          err,
           "No pudimos conectar con el servidor. Revisa tu conexión e intenta de nuevo.",
-        );
-      }
+        ),
+      );
       setProgress(0);
     } finally {
       setExtracting(false);

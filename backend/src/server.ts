@@ -5,11 +5,21 @@ import prisma from "./config/prisma.js";
 
 const PORT = Number(process.env.PORT ?? 4000);
 
+/** 15 min — alineado con Railway (máx HTTP) y el timeout del cliente en `api.ts`. */
+const HTTP_REQUEST_TIMEOUT_MS = 15 * 60 * 1000;
+
 const server = app.listen(PORT, () => {
   logger.info(`Backend listening on port ${PORT}`, {
     env: process.env.NODE_ENV ?? "development",
   });
 });
+
+// Node 20+ default requestTimeout = 300s. Las extracciones Opus (Paso 3) pueden
+// superar 5 min; sin esto el socket se corta, el browser ve "Failed to fetch"
+// y el frontend muestra "No pudimos conectar con el servidor".
+server.requestTimeout = HTTP_REQUEST_TIMEOUT_MS;
+server.headersTimeout = HTTP_REQUEST_TIMEOUT_MS + 60_000;
+server.keepAliveTimeout = 75_000;
 
 async function gracefulShutdown(signal: string): Promise<void> {
   logger.info(`Received ${signal} — shutting down`);

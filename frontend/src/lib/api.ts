@@ -95,6 +95,34 @@ interface RequestOptions extends Omit<RequestInit, "body"> {
 const CLIENT_TIMEOUT_MESSAGE =
   "La solicitud tardó demasiado. Intenta de nuevo o usa un archivo más pequeño.";
 
+const NETWORK_FAILURE_MESSAGE =
+  "La conexión con el servidor se interrumpió durante la extracción. " +
+  "Los contratos extensos pueden tardar varios minutos — mantené esta pestaña abierta e intentá de nuevo.";
+
+/**
+ * Convierte errores de red (Failed to fetch, etc.) en mensajes accionables.
+ * Los `ApiError` del backend pasan con su mensaje original.
+ */
+export function describeRequestFailure(
+  err: unknown,
+  fallback: string,
+): string {
+  if (err instanceof ApiError) return err.message;
+  if (err instanceof Error) {
+    const m = err.message.toLowerCase();
+    if (
+      m.includes("failed to fetch") ||
+      m.includes("networkerror") ||
+      m.includes("load failed") ||
+      m.includes("network request failed")
+    ) {
+      return NETWORK_FAILURE_MESSAGE;
+    }
+    if (err.message.trim()) return err.message;
+  }
+  return fallback;
+}
+
 /**
  * Wire an `AbortSignal` that fires after `timeoutMs`. Returns the signal plus
  * a cleanup function the caller must invoke once the request settles so the
