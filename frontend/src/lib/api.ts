@@ -108,18 +108,39 @@ export function describeRequestFailure(
   fallback: string,
 ): string {
   if (err instanceof ApiError) return err.message;
+  if (typeof DOMException !== "undefined" && err instanceof DOMException) {
+    if (err.name === "AbortError") return CLIENT_TIMEOUT_MESSAGE;
+    if (err.name === "NotReadableError") {
+      return (
+        "No se pudo leer uno de los archivos cargados. " +
+        "Volvé al Paso 1 y seleccioná los documentos de nuevo."
+      );
+    }
+    if (err.message.trim()) return err.message;
+    return NETWORK_FAILURE_MESSAGE;
+  }
   if (err instanceof Error) {
     const m = err.message.toLowerCase();
     if (
       m.includes("failed to fetch") ||
       m.includes("networkerror") ||
+      m.includes("network error") ||
       m.includes("load failed") ||
-      m.includes("network request failed")
+      m.includes("network request failed") ||
+      m.includes("terminated") ||
+      m.includes("aborted")
     ) {
       return NETWORK_FAILURE_MESSAGE;
     }
+    if (m.includes("could not be read") || m.includes("notreadable")) {
+      return (
+        "No se pudo leer uno de los archivos cargados. " +
+        "Volvé al Paso 1 y seleccioná los documentos de nuevo."
+      );
+    }
     if (err.message.trim()) return err.message;
   }
+  if (typeof err === "string" && err.trim()) return err;
   return fallback;
 }
 

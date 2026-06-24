@@ -217,6 +217,23 @@ export function humanSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/**
+ * Copia un `File` del picker/drop a memoria. Tras varios minutos en Paso 2,
+ * algunos browsers invalidan la referencia original y el Paso 3 falla al
+ * re-subir el mismo archivo ("Failed to fetch" / NotReadableError).
+ */
+async function materializeUploadFile(file: File): Promise<File> {
+  const buffer = await file.arrayBuffer();
+  return new File([buffer], file.name, {
+    type: file.type || "application/octet-stream",
+    lastModified: file.lastModified,
+  });
+}
+
+async function materializeUploadFiles(files: File[]): Promise<File[]> {
+  return Promise.all(files.map(materializeUploadFile));
+}
+
 function fileIcon(kind: FileKind) {
   if (kind === "xlsx")
     return <FileSpreadsheet className="w-4 h-4 text-emerald-300" />;
@@ -377,7 +394,7 @@ export function SupplierWorkflow() {
     return seen;
   };
 
-  const acceptPrimaryFiles = (incoming: FileList | File[]) => {
+  const acceptPrimaryFiles = async (incoming: FileList | File[]) => {
     setServerError(null);
     const list = Array.from(incoming);
     if (list.length === 0) {
@@ -403,11 +420,20 @@ export function SupplierWorkflow() {
 
     setUploadError(errors.length > 0 ? errors.join(" ") : null);
     if (accepted.length > 0) {
-      setPrimaryFile(accepted[0]!);
+      try {
+        setPrimaryFile(await materializeUploadFile(accepted[0]!));
+      } catch (err) {
+        setUploadError(
+          describeRequestFailure(
+            err,
+            `No se pudo leer "${accepted[0]!.name}". Intentá seleccionarlo de nuevo.`,
+          ),
+        );
+      }
     }
   };
 
-  const acceptSecondaryFiles = (incoming: FileList | File[]) => {
+  const acceptSecondaryFiles = async (incoming: FileList | File[]) => {
     setServerError(null);
     const list = Array.from(incoming);
     if (list.length === 0) {
@@ -432,7 +458,17 @@ export function SupplierWorkflow() {
     );
     setUploadError(errors.length > 0 ? errors.join(" ") : null);
     if (accepted.length > 0) {
-      setSecondaryFiles((prev) => [...prev, ...accepted]);
+      try {
+        const persisted = await materializeUploadFiles(accepted);
+        setSecondaryFiles((prev) => [...prev, ...persisted]);
+      } catch (err) {
+        setUploadError(
+          describeRequestFailure(
+            err,
+            "No se pudieron leer uno o más archivos. Intentá seleccionarlos de nuevo.",
+          ),
+        );
+      }
     }
   };
 
@@ -440,14 +476,14 @@ export function SupplierWorkflow() {
     e.preventDefault();
     const files = e.dataTransfer.files;
     if (!files || files.length === 0) return;
-    acceptPrimaryFiles(Array.from(files));
+    void acceptPrimaryFiles(Array.from(files));
   };
 
   const handleSecondaryDrop = (e: DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     const files = e.dataTransfer.files;
     if (!files || files.length === 0) return;
-    acceptSecondaryFiles(Array.from(files));
+    void acceptSecondaryFiles(Array.from(files));
   };
 
   const handlePrimaryPick = (e: ChangeEvent<HTMLInputElement>) => {
@@ -455,7 +491,7 @@ export function SupplierWorkflow() {
     if (!fileList || fileList.length === 0) return;
     const files = Array.from(fileList);
     e.target.value = "";
-    acceptPrimaryFiles(files);
+    void acceptPrimaryFiles(files);
   };
 
   const handleSecondaryPick = (e: ChangeEvent<HTMLInputElement>) => {
@@ -463,7 +499,7 @@ export function SupplierWorkflow() {
     if (!fileList || fileList.length === 0) return;
     const files = Array.from(fileList);
     e.target.value = "";
-    acceptSecondaryFiles(files);
+    void acceptSecondaryFiles(files);
   };
 
   const removePrimary = () => {
@@ -751,7 +787,6 @@ export function SupplierWorkflow() {
    */
   const confirmConfig = async () => {
     if (
-      !primaryFile ||
       extracting ||
       preparingGrid ||
       refiningTab !== null ||
@@ -760,17 +795,16 @@ export function SupplierWorkflow() {
     ) {
       return;
     }
-    const source = briefs.map((b, i) => editedBriefs[i] ?? b);
-    const finalBriefs = source.map(normalizeBrief);
-    setEditedBriefs(finalBriefs);
-    const filesToExtract = selectedFiles;
-    const staleFile = filesToExtract.find((f) => f.size <= 0);
-    if (staleFile) {
+    if (!primaryFile) {
+      setStep(3);
       setServerError(
-        `El archivo "${staleFile.name}" ya no está disponible. Volvé al Paso 1 y cargá los documentos de nuevo.`,
+        "Los documentos ya no están disponibles en esta sesión. Volvé al Paso 1 y cargá los archivos de nuevo.",
       );
       return;
     }
+    const source = briefs.map((b, i) => editedBriefs[i] ?? b);
+    const finalBriefs = source.map(normalizeBrief);
+    setEditedBriefs(finalBriefs);
     setExtracting(true);
     setPreparingGrid(false);
     setServerError(null);
@@ -778,6 +812,7 @@ export function SupplierWorkflow() {
     setResult(null);
     setStep(3);
     try {
+      const filesToExtract = await materializeUploadFiles(selectedFiles);
       const response = await api.supplierIntelligence.extract(filesToExtract, {
         comments,
         isExistingSupplier,
