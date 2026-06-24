@@ -1,8 +1,10 @@
 /**
  * Thin fetch wrapper for the Travel Pioneers backend.
  *
- * - Base URL comes from `NEXT_PUBLIC_API_URL` (see `.env.example`),
- *   defaulting to `http://localhost:4000` in dev.
+ * - Base URL: en dev `NEXT_PUBLIC_API_URL` (default `http://localhost:4000`).
+ *   En producción el browser usa el proxy same-origin `/api/backend` (ver
+ *   `src/app/api/backend/[...path]/route.ts`) para evitar CORS en extracciones
+ *   largas; el proxy reenvía a `BACKEND_URL` en el servidor Next.js.
  * - Non-2xx responses are thrown as `ApiError` so callers can branch on
  *   status (409 email-taken, 400 validation, 401 bad credentials, …) and
  *   surface backend-provided messages without re-formatting them.
@@ -11,9 +13,25 @@
  *   session so the AuthGuard kicks the user back to /login.
  */
 
-const API_URL =
-  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ??
-  "http://localhost:4000";
+const DEFAULT_API_URL = "http://localhost:4000";
+
+/**
+ * Base URL del backend. En el browser de producción usamos el proxy same-origin
+ * (`/api/backend`) para evitar CORS y cortes de conexión cross-origin en
+ * `/extract` y otros uploads largos. En localhost seguimos yendo directo al
+ * puerto 4000 (CORS ya está configurado en el backend).
+ */
+function getApiBaseUrl(): string {
+  if (typeof window !== "undefined") {
+    const host = window.location.hostname;
+    if (host !== "localhost" && host !== "127.0.0.1") {
+      return "/api/backend";
+    }
+  }
+  return (
+    process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ?? DEFAULT_API_URL
+  );
+}
 
 export interface ValidationDetail {
   field: string;
@@ -201,7 +219,7 @@ async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
 
   let res: Response;
   try {
-    res = await fetch(`${API_URL}${path}`, {
+    res = await fetch(`${getApiBaseUrl()}${path}`, {
       ...rest,
       headers: finalHeaders,
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -292,7 +310,7 @@ async function requestForm<T>(
 
   let res: Response;
   try {
-    res = await fetch(`${API_URL}${path}`, {
+    res = await fetch(`${getApiBaseUrl()}${path}`, {
       ...rest,
       method: "POST",
       headers: finalHeaders,
@@ -386,7 +404,7 @@ async function requestBlob(
 
   let res: Response;
   try {
-    res = await fetch(`${API_URL}${path}`, {
+    res = await fetch(`${getApiBaseUrl()}${path}`, {
       ...rest,
       headers: finalHeaders,
       body: body === undefined ? undefined : JSON.stringify(body),
