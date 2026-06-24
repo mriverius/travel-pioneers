@@ -11,12 +11,14 @@ const CODE_FOR_STATUS: Record<number, string> = {
   401: "unauthorized",
   403: "forbidden",
   404: "not_found",
+  402: "payment_required",
   413: "file_too_large",
   415: "unsupported_file_type",
   422: "validation_failed",
   429: "rate_limited",
   500: "internal_error",
   502: "upstream_unavailable",
+  503: "service_unavailable",
 };
 
 /**

@@ -539,14 +539,15 @@ export function SupplierWorkflow() {
     setStep(2);
     try {
       const files = selectedFiles;
-      const responses = await Promise.all(
-        files.map((f) =>
-          api.supplierIntelligence.analyzeBrief([f], {
+      const responses: Awaited<ReturnType<typeof api.supplierIntelligence.analyzeBrief>>[] = [];
+      for (const f of files) {
+        responses.push(
+          await api.supplierIntelligence.analyzeBrief([f], {
             comments,
             isExistingSupplier,
           }),
-        ),
-      );
+        );
+      }
       setProgress(100);
 
       // El documento PRIMARIO (primero) maneja el matching contra el catálogo.
@@ -1194,7 +1195,7 @@ export function SupplierWorkflow() {
     </section>
 
     <div className="text-center mt-4 space-y-1">
-      <p className="text-[11px] text-muted-foreground/60">Version 1.7.0 - Junio 23</p>
+      <p className="text-[11px] text-muted-foreground/60">Version 1.7.1 - Junio 23</p>
       <a
         href="https://forms.gle/GANUbdcuAS3P7szS8"
         target="_blank"

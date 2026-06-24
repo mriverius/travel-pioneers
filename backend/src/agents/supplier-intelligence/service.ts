@@ -59,13 +59,10 @@ export const SUPPLIER_INTELLIGENCE_MODEL = "claude-opus-4-7";
 
 /**
  * Modelo de la pasada de BRIEF / Variables de Configuración (Fase 1).
- *
- * Subido a Opus 4.7 (el más potente disponible en el SDK): el análisis del
- * documento es la fase más crítica del pipeline — si Opus entiende mejor la
- * lógica del proveedor acá, todo lo demás mejora en cascada. El presupuesto
- * de créditos ya no es limitante; la prioridad es máxima precisión.
+ * Sonnet 4.5: rápido y barato para estructurar reglas globales; Opus se
+ * reserva para la extracción de filas (pasada principal).
  */
-export const SUPPLIER_INTELLIGENCE_BRIEF_MODEL = "claude-opus-4-7";
+export const SUPPLIER_INTELLIGENCE_BRIEF_MODEL = "claude-sonnet-4-5";
 
 /**
  * Pricing oficial de Claude Opus 4.7 (USD por millón de tokens).
@@ -231,6 +228,54 @@ function isTransientTransportError(err: unknown): boolean {
     code === "UND_ERR_SOCKET" ||
     code === "UND_ERR_HEADERS_TIMEOUT" ||
     code === "UND_ERR_BODY_TIMEOUT"
+  );
+}
+
+/**
+ * Convierte errores de la API de Anthropic en `ApiError` con mensajes claros
+ * para el operador. Antes todo se mapeaba a un 502 genérico — p. ej. créditos
+ * agotados (400) parecía "servicio no disponible" y el Paso 2 llegaba vacío.
+ */
+function mapAnthropicApiError(err: APIError): ApiError {
+  const lower = (err.message ?? "").toLowerCase();
+
+  if (
+    lower.includes("credit balance") ||
+    lower.includes("purchase credits") ||
+    lower.includes("billing")
+  ) {
+    return new ApiError(
+      402,
+      "Los créditos de Anthropic están agotados. Contactá al administrador para recargar la cuenta antes de continuar.",
+    );
+  }
+  if (err.status === 429) {
+    return new ApiError(
+      429,
+      "Demasiadas solicitudes al servicio de IA. Esperá un minuto e intentá de nuevo.",
+    );
+  }
+  if (err.status === 529) {
+    return new ApiError(
+      503,
+      "El servicio de IA está saturado. Intentá de nuevo en unos minutos.",
+    );
+  }
+  if (
+    err.status === 401 ||
+    lower.includes("authentication") ||
+    lower.includes("invalid api key") ||
+    lower.includes("api key")
+  ) {
+    return new ApiError(
+      502,
+      "La clave de API de Anthropic no es válida. Contactá al administrador.",
+    );
+  }
+
+  return new ApiError(
+    502,
+    "El servicio de extracción no está disponible en este momento. Intenta de nuevo en unos minutos.",
   );
 }
 
@@ -1010,16 +1055,15 @@ interface BriefResult {
  * globales + inventario del contrato. Comparte system + tools + documento con
  * la pasada principal (mismo prefijo) para reusar el cache del documento.
  *
- * Best-effort: si Anthropic falla o devuelve algo raro, NO abortamos la
- * extracción — devolvemos `null` y la pasada principal corre como antes (sin
- * inyección de brief). El brief mejora la fidelidad; no es un bloqueante.
+ * Best-effort solo cuando se llama desde `extractContract` sin brief confirmado
+ * (Fase 1 opcional). Desde `analyzeContractBrief` los errores se propagan.
  */
 async function extractContractBrief(
   docs: PreparedDocumentInput[],
   requestId: string | undefined,
   context: ExtractionContext | undefined,
   refine?: BriefRefineContext,
-): Promise<BriefResult | null> {
+): Promise<BriefResult> {
   const client = getAnthropicClient();
   const mode = refine ? "refine" : "brief";
   let response: Message;
@@ -1047,17 +1091,18 @@ async function extractContractBrief(
     );
   } catch (err) {
     // Diagnóstico EXPLÍCITO: si el brief falla, el step de Variables de
-    // Configuración llega vacío. Logueamos el error completo (mensaje +
-    // status si es APIError + stack) para no tener que adivinar por qué la
-    // pantalla quedó en blanco.
-    logger.error("Contract brief pass FAILED — config screen will be empty", {
+    // Configuración no puede mostrar datos inventados — propagamos el error.
+    logger.error("Contract brief pass FAILED", {
       requestId,
       model: SUPPLIER_INTELLIGENCE_BRIEF_MODEL,
       error: err instanceof Error ? err.message : String(err),
       status: err instanceof APIError ? err.status : undefined,
       stack: err instanceof Error ? err.stack : undefined,
     });
-    return null;
+    if (err instanceof APIError) {
+      throw mapAnthropicApiError(err);
+    }
+    throw ApiError.internal("Error al invocar al agente de análisis.");
   }
 
   const usage = usageFromMessage(response, SUPPLIER_INTELLIGENCE_BRIEF_MODEL);
@@ -1331,15 +1376,9 @@ export async function analyzeContractBrief(
     throw ApiError.badRequest("Se requiere al menos un documento para analizar.");
   }
   const result = await extractContractBrief(docs, requestId, context);
-  const usage = result?.usage ?? {
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheWriteTokens: 0,
-    cacheReadTokens: 0,
-    costUsd: 0,
-  };
+  const usage = result.usage;
   return {
-    brief: result?.brief ?? coerceBrief({}),
+    brief: result.brief,
     model: SUPPLIER_INTELLIGENCE_BRIEF_MODEL,
     usage: {
       inputTokens: usage.inputTokens,
@@ -1434,8 +1473,18 @@ export async function extractContract(
       seasons: brief.seasons_detail.length,
     });
   } else {
-    briefResult = await extractContractBrief(docs, requestId, context);
-    brief = briefResult?.brief ?? null;
+    try {
+      briefResult = await extractContractBrief(docs, requestId, context);
+      brief = briefResult.brief;
+    } catch (err) {
+      // Best-effort en extracción sin brief confirmado: si Fase 1 falla,
+      // seguimos sin inyección de brief en lugar de abortar toda la extracción.
+      logger.warn("Contract brief pass failed during extract — continuing without brief", {
+        requestId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      brief = null;
+    }
   }
 
   // ── Fase 2: EXTRACCIÓN PRINCIPAL ─────────────────────────────────────────
@@ -1486,10 +1535,7 @@ export async function extractContract(
         status: err.status,
         message: err.message,
       });
-      throw new ApiError(
-        502,
-        "El servicio de extracción no está disponible en este momento. Intenta de nuevo en unos minutos.",
-      );
+      throw mapAnthropicApiError(err);
     }
     logger.error("Unexpected error calling Anthropic", {
       requestId,
