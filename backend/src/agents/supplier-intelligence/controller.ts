@@ -11,6 +11,12 @@ import {
   type PreparedDocumentInput,
 } from "./service.js";
 import type { BriefChatMessage, ContractBrief } from "./types.js";
+import {
+  completeExtractionJob,
+  createExtractionJob,
+  failExtractionJob,
+  getExtractionJob,
+} from "./extractionJobs.js";
 
 /**
  * Maximum length for the optional user comments field. Picked to be generous
@@ -370,6 +376,131 @@ export async function refineBriefHandler(
  * The global error handler emits `{ error: { message, requestId } }` for
  * failures — this controller only deals with the success path.
  */
+/** Map mínimo HTTP status → código legible para el cliente. */
+function codeForStatus(status: number): string {
+  switch (status) {
+    case 400:
+      return "bad_request";
+    case 413:
+      return "file_too_large";
+    case 415:
+      return "unsupported_file_type";
+    case 422:
+      return "validation_failed";
+    case 429:
+      return "rate_limited";
+    case 502:
+      return "upstream_unavailable";
+    default:
+      return status >= 500 ? "internal_error" : "error";
+  }
+}
+
+interface ExtractionJobParams {
+  prepared: PreparedDocumentInput[];
+  requestId: string;
+  context: ExtractionContext;
+  briefsOverride: ContractBrief[] | null;
+  combinedFilename: string;
+  totalBytes: number;
+  isExistingSupplier: boolean;
+  fileCount: number;
+}
+
+/**
+ * Corre la extracción Opus en segundo plano (no la espera ninguna conexión
+ * HTTP) y deposita el resultado o el error en el job store. El frontend lo
+ * recoge vía `GET /extract/:jobId`.
+ */
+async function runExtractionJob(
+  jobId: string,
+  p: ExtractionJobParams,
+): Promise<void> {
+  try {
+    const { data, validation, model, usage, brief, manualPrefill } =
+      await extractContract(
+        p.prepared,
+        p.requestId,
+        p.context,
+        p.briefsOverride,
+      );
+
+    logger.info("Supplier Intelligence extraction finished", {
+      jobId,
+      requestId: p.requestId,
+      filename: p.combinedFilename,
+      fileCount: p.fileCount,
+      confianza: data.confianza,
+      warnings: validation.warnings.length,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      costUsd: usage.costUsd,
+      rowCount: data.rows.length,
+      brief: brief
+        ? {
+            pricesIncludeTax: brief.prices_include_tax,
+            taxRatePct: brief.tax_rate_pct,
+            bankAccounts: brief.bank_accounts.length,
+            additionalPersonRules: brief.additional_person.length,
+            sections: brief.sections.length,
+            expectedRows: brief.expected_row_estimate,
+          }
+        : null,
+    });
+
+    completeExtractionJob(jobId, {
+      success: true,
+      data,
+      validation,
+      meta: {
+        filename: p.combinedFilename,
+        size_bytes: p.totalBytes,
+        model,
+        processed_at: new Date().toISOString(),
+        is_existing_supplier: p.isExistingSupplier,
+        // Telemetría real reportada por Anthropic — el frontend la persiste
+        // junto con el run en el step 3 (saveRun).
+        input_tokens: usage.inputTokens,
+        output_tokens: usage.outputTokens,
+        cost_usd: usage.costUsd,
+        // Prefill de cuentas bancarias 2 y 3 (del brief).
+        manual_prefill: manualPrefill,
+      },
+    });
+  } catch (err) {
+    const isApiError = err instanceof ApiError;
+    const status = isApiError ? err.statusCode : 500;
+    const message =
+      isApiError && err.message
+        ? err.message
+        : "Error interno del servidor durante la extracción. Intenta de nuevo.";
+
+    logger.error("Supplier Intelligence extraction job failed", {
+      jobId,
+      requestId: p.requestId,
+      statusCode: status,
+      message: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
+
+    failExtractionJob(jobId, {
+      status,
+      code: codeForStatus(status),
+      message,
+      details: isApiError ? err.details : undefined,
+    });
+  }
+}
+
+/**
+ * POST /api/supplier-intelligence/extract
+ *
+ * Arranca un job de extracción y responde 202 con `{ success, job_id }` al
+ * instante. El trabajo pesado (Opus, varios minutos) corre en segundo plano;
+ * el frontend encuesta `GET /api/supplier-intelligence/extract/:jobId`. Así
+ * ninguna conexión HTTP queda abierta durante toda la extracción — evita los
+ * cortes de los proxies intermedios en requests largas.
+ */
 export async function extractContractHandler(
   req: Request,
   res: Response,
@@ -388,8 +519,13 @@ export async function extractContractHandler(
       return single ? [single] : null;
     })();
 
-  logger.info("Supplier Intelligence extraction started", {
-    requestId: req.id,
+  const combinedFilename = combineFilenames(files);
+  const requestId = req.id;
+  const job = createExtractionJob();
+
+  logger.info("Supplier Intelligence extraction job started", {
+    jobId: job.id,
+    requestId,
     fileCount: files.length,
     filenames: files.map((f) => f.originalname),
     totalSize: totalBytes,
@@ -398,55 +534,68 @@ export async function extractContractHandler(
     confirmedBriefCount: briefsOverride?.length ?? 0,
   });
 
-  const { data, validation, model, usage, brief, manualPrefill } =
-    await extractContract(prepared, req.id, context, briefsOverride);
+  // Responde YA con el id del job; el trabajo sigue en segundo plano.
+  res.status(202).json({ success: true, job_id: job.id });
 
-  const combinedFilename = combineFilenames(files);
-
-  logger.info("Supplier Intelligence extraction finished", {
-    requestId: req.id,
-    filename: combinedFilename,
+  void runExtractionJob(job.id, {
+    prepared,
+    requestId,
+    context,
+    briefsOverride,
+    combinedFilename,
+    totalBytes,
+    isExistingSupplier: isExistingSupplier ?? false,
     fileCount: files.length,
-    confianza: data.confianza,
-    warnings: validation.warnings.length,
-    inputTokens: usage.inputTokens,
-    outputTokens: usage.outputTokens,
-    costUsd: usage.costUsd,
-    rowCount: data.rows.length,
-    // Brief (Fase 1): observabilidad de las reglas globales detectadas y de
-    // la meta de completitud vs. filas realmente generadas.
-    brief: brief
-      ? {
-          pricesIncludeTax: brief.prices_include_tax,
-          taxRatePct: brief.tax_rate_pct,
-          bankAccounts: brief.bank_accounts.length,
-          additionalPersonRules: brief.additional_person.length,
-          sections: brief.sections.length,
-          expectedRows: brief.expected_row_estimate,
-        }
-      : null,
   });
+}
 
-  res.status(200).json({
-    success: true,
-    data,
-    validation,
-    meta: {
-      filename: combinedFilename,
-      size_bytes: totalBytes,
-      model,
-      processed_at: new Date().toISOString(),
-      is_existing_supplier: isExistingSupplier,
-      // Telemetría real reportada por Anthropic — el frontend la persiste
-      // junto con el run en el step 3 (saveRun). Si Anthropic no reportó
-      // usage (edge case), inputTokens/outputTokens vienen en 0 y costUsd
-      // como 0 — preferible a omitir el campo y romper el contrato.
-      input_tokens: usage.inputTokens,
-      output_tokens: usage.outputTokens,
-      cost_usd: usage.costUsd,
-      // Prefill de cuentas bancarias 2 y 3 (del brief). El frontend pre-llena
-      // los campos manuales de Step 2 con esto. `null` si hay una sola cuenta.
-      manual_prefill: manualPrefill,
-    },
-  });
+/**
+ * GET /api/supplier-intelligence/extract/:jobId
+ *
+ * Encuesta el estado de un job de extracción.
+ *   - processing → 200 { success, status: "processing" }
+ *   - done       → 200 { success, status: "done", data, validation, meta }
+ *   - error      → status original con { success: false, status: "error", error }
+ */
+export async function getExtractionStatusHandler(
+  req: Request,
+  res: Response,
+): Promise<void> {
+  const jobId = typeof req.params.jobId === "string" ? req.params.jobId : "";
+  const job = getExtractionJob(jobId);
+
+  if (!job) {
+    throw new ApiError(
+      404,
+      "El trabajo de extracción no existe o expiró. Volvé al Paso 2 e intentá de nuevo.",
+    );
+  }
+
+  if (job.state === "processing") {
+    res.status(200).json({ success: true, status: "processing" });
+    return;
+  }
+
+  if (job.state === "error") {
+    const e = job.error ?? {
+      status: 500,
+      code: "internal_error",
+      message: "Error interno del servidor durante la extracción.",
+    };
+    res.status(e.status).json({
+      success: false,
+      status: "error",
+      error: {
+        code: e.code,
+        message: e.message,
+        ...(e.details !== undefined ? { details: e.details } : {}),
+      },
+    });
+    return;
+  }
+
+  // done — `result` ya es la envolvente { success, data, validation, meta }.
+  res
+    .status(200)
+    .json({ status: "done", ...(job.result as Record<string, unknown>) });
 }

@@ -1194,7 +1194,7 @@ export function SupplierWorkflow() {
     </section>
 
     <div className="text-center mt-4 space-y-1">
-      <p className="text-[11px] text-muted-foreground/60">Version 1.6.0 - Junio 17</p>
+      <p className="text-[11px] text-muted-foreground/60">Version 1.7.0 - Junio 23</p>
       <a
         href="https://forms.gle/GANUbdcuAS3P7szS8"
         target="_blank"

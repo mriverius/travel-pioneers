@@ -447,6 +447,95 @@ async function requestBlob(
   return { blob, filename };
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Arranca la extracción como job asíncrono y encuesta su estado hasta que
+ * termina. Cada request es corto, así que NINGUNA conexión queda abierta los
+ * varios minutos que tarda la extracción Opus — eso evita que los proxies
+ * intermedios (edge de Railway, Next.js) corten la conexión y devuelvan
+ * errores engañosos (CORS / 5xx) en medio de una extracción que en realidad
+ * sigue corriendo bien en el backend.
+ *
+ * Devuelve exactamente la misma forma que la antigua llamada síncrona
+ * (`ExtractContractResponse`), así el resto del flujo no cambia.
+ */
+async function startAndPollExtraction(
+  form: FormData,
+): Promise<ExtractContractResponse> {
+  // 1) Arranca el job. Es solo el upload + arranque → 3 min holgan de sobra.
+  const start = await requestForm<ExtractJobStartResponse>(
+    "/api/supplier-intelligence/extract",
+    form,
+    { timeoutMs: 3 * 60 * 1000 },
+  );
+  const jobId = start.job_id;
+  if (!jobId) {
+    throw new ApiError(
+      500,
+      "El servidor no devolvió un identificador de extracción. Intenta de nuevo.",
+      [],
+      "no_job_id",
+    );
+  }
+
+  // 2) Encuesta el estado cada POLL_INTERVAL_MS hasta done/error o deadline.
+  const POLL_INTERVAL_MS = 3000;
+  const MAX_WAIT_MS = 15 * 60 * 1000;
+  const MAX_CONSECUTIVE_FAILURES = 6;
+  const deadline = Date.now() + MAX_WAIT_MS;
+  let consecutiveFailures = 0;
+
+  for (;;) {
+    await sleep(POLL_INTERVAL_MS);
+    if (Date.now() > deadline) {
+      throw new ApiError(408, CLIENT_TIMEOUT_MESSAGE, [], "client_timeout");
+    }
+
+    let status: ExtractStatusResponse;
+    try {
+      status = await request<ExtractStatusResponse>(
+        `/api/supplier-intelligence/extract/${encodeURIComponent(jobId)}`,
+        { timeoutMs: 30 * 1000 },
+      );
+      consecutiveFailures = 0;
+    } catch (err) {
+      // Un error con `code` del backend (job falló, 404 expirado, etc.) es
+      // terminal → propaga. Los blips de red / timeouts del propio poll /
+      // 5xx de proxy (sin envolvente) son transitorios → reintenta unas
+      // cuantas veces antes de rendirse.
+      const isTerminal =
+        err instanceof ApiError &&
+        err.code !== null &&
+        err.code !== "client_timeout";
+      if (isTerminal) throw err;
+      consecutiveFailures += 1;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) throw err;
+      continue;
+    }
+
+    if (status.status === "done") {
+      if (!status.data || !status.validation || !status.meta) {
+        throw new ApiError(
+          500,
+          "La extracción terminó pero el servidor devolvió una respuesta incompleta. Intenta de nuevo.",
+          [],
+          "incomplete_result",
+        );
+      }
+      return {
+        success: true,
+        data: status.data,
+        validation: status.validation,
+        meta: status.meta,
+      };
+    }
+    // status === "processing" → seguir encuestando.
+  }
+}
+
 /* ------------------------------ auth endpoints ---------------------------- */
 
 export type Role = "admin" | "member";
@@ -667,6 +756,21 @@ export interface ExtractContractResponse {
   data: ExtractedContract;
   validation: ExtractionValidation;
   meta: ExtractionMeta;
+}
+
+/** Respuesta de POST /extract: arranca el job y devuelve su id. */
+interface ExtractJobStartResponse {
+  success: true;
+  job_id: string;
+}
+
+/** Respuesta de GET /extract/:jobId mientras el job corre o al terminar. */
+interface ExtractStatusResponse {
+  success?: boolean;
+  status: "processing" | "done";
+  data?: ExtractedContract;
+  validation?: ExtractionValidation;
+  meta?: ExtractionMeta;
 }
 
 export interface ExtractContractInput {
@@ -1092,18 +1196,14 @@ export const api = {
       } else if (input.confirmedConfig) {
         form.append("brief", JSON.stringify(input.confirmedConfig));
       }
-      // AI extraction is slow, and now runs in TWO sequential Anthropic
-      // passes: a focused "contract brief" (global rules + inventory) followed
-      // by the full grid-fill extraction. A dense contract (100+ rows) can
-      // spend ~7-8 min in the main pass alone, plus ~1 min for the brief, so
-      // an 8-minute ceiling now trips on exactly the documents that used to
-      // just barely fit. 15 minutes covers both passes with margin while still
-      // bounding a truly stuck backend.
-      return requestForm<ExtractContractResponse>(
-        "/api/supplier-intelligence/extract",
-        form,
-        { timeoutMs: 15 * 60 * 1000 },
-      );
+      // La extracción Opus tarda varios minutos (un contrato denso de 100+
+      // filas puede gastar ~7-8 min en el pase principal). Mantener una sola
+      // conexión HTTP abierta tanto tiempo se cae en los proxies intermedios
+      // (edge de Railway, Next.js). Por eso el backend ahora corre el trabajo
+      // como JOB ASÍNCRONO: arrancamos el job y encuestamos su estado con
+      // peticiones cortas hasta que termina. El retorno es el mismo
+      // `ExtractContractResponse`, así el flujo de los 4 pasos no cambia.
+      return startAndPollExtraction(form);
     },
     /**
      * Fase 1 del flujo gated: sube los documentos y devuelve las Variables de

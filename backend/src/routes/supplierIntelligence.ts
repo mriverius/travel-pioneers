@@ -5,6 +5,7 @@ import { requireAuth } from "../middleware/auth.js";
 import {
   analyzeBriefHandler,
   extractContractHandler,
+  getExtractionStatusHandler,
   refineBriefHandler,
 } from "../agents/supplier-intelligence/controller.js";
 import {
@@ -75,6 +76,23 @@ const generateLimiter = rateLimit({
  * Cap de payload: 600 candidatos × ~250 bytes + overhead. 1 MB es holgado y
  * sigue siendo un límite duro contra requests basura.
  */
+/**
+ * Polling de estado de extracción: el frontend encuesta cada ~3s mientras el
+ * job corre (hasta 15 min), así que el cap debe holgar ese ritmo. 120/min deja
+ * margen incluso con varios tabs.
+ */
+const extractStatusLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: {
+      message: "Demasiadas consultas de estado. Intenta de nuevo en un minuto.",
+    },
+  },
+});
+
 const matchJsonParser = json({ limit: "1mb" });
 
 /**
@@ -131,6 +149,18 @@ router.post(
   extractLimiter,
   handleContractUpload,
   asyncHandler(extractContractHandler),
+);
+
+/**
+ * GET /api/supplier-intelligence/extract/:jobId
+ *
+ * Encuesta el estado de un job de extracción arrancado por POST /extract.
+ * Peticiones cortas → no dependen de timeouts de proxy para requests largas.
+ */
+router.get(
+  "/extract/:jobId",
+  extractStatusLimiter,
+  asyncHandler(getExtractionStatusHandler),
 );
 
 /**
