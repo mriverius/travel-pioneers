@@ -298,11 +298,11 @@ const rowSchema = {
       type: ["string", "null"],
       description:
         "Código corto de ocupación. Convención del maestro: 'DBL' = " +
-        "doble, 'SGL' = single, 'TPL' = triple, 'QDP' = cuádruple, 'FAM' " +
-        "= familiar. Si el contrato dice 'sencilla o doble', devolver 'DBL'. " +
-        "NO generes filas TPL/QDP manualmente cuando hay tarifa por persona " +
-        "adicional — el servidor las crea solo (ver tarifa_persona_adicional " +
-        "y regla 16b del system prompt).",
+        "doble, 'SGL' = single, 'TPL' = triple, 'QDP' = cuádruple, 'QTN' = " +
+        "quíntuple, 'CHL' = niño, 'FAM' = familiar. Si la tabla del contrato " +
+        "tiene columnas Triple/Quadruple/Quintuple con precios, generá esas " +
+        "filas con TPL/QDP/QTN. Solo usá tarifa_persona_adicional (regla 16b) " +
+        "cuando NO haya precios explícitos por ocupación.",
     },
     tarifa_persona_adicional: {
       type: ["string", "null"],

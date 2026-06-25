@@ -72,10 +72,21 @@ Para cada categoría de habitación/servicio, genera una fila por CADA código d
 que aplique según el contrato. Nunca asumas que porque una categoría tiene SGL/DBL
 automáticamente excluye CHL — son independientes.
 
+REGLA CRÍTICA — COLUMNAS EXPLÍCITAS TRIPLE / CUÁDRUPLE / QUÍNTUPLE:
+Si la tabla de tarifas del contrato tiene COLUMNAS separadas con precios para Triple,
+Quadruple o Quintuple (en inglés o español: "Triple", "Quadruple", "Quíntuple",
+"3 personas", etc.), DEBES generar filas con ocupacion TPL, QDP y/o QTN usando esos
+precios exactos del documento. Cada columna con precio propio = una fila distinta.
+NO omitas TPL/QDP/QTN solo porque ya generaste SGL y DBL. NO uses
+tarifa_persona_adicional cuando el contrato ya lista precios explícitos por ocupación.
+Ejemplo real: Garden Suite · Green Season con Single $912, Double $1.417, Triple
+$2.115, Children $411 → cuatro filas: SGL, DBL, TPL, CHL (una por columna).
+
 VERIFICACIÓN ANTES DE GENERAR EL EXCEL:
-Antes de finalizar la respuesta, revisa mentalmente: ¿El contrato menciona tarifas de niño?
-Si sí → ¿generé filas CHL para todas las categorías correspondientes?
-Si no las generé → agrégalas ahora antes de responder.
+Antes de finalizar la respuesta, revisa mentalmente:
+  1) ¿El contrato tiene columnas Triple/Quadruple/Quintuple con precios? → ¿generé TPL/QDP/QTN?
+  2) ¿El contrato menciona tarifas de niño? → ¿generé filas CHL?
+Si falta alguna → agrégalas ahora antes de responder.
 
 ═══════════════════════════════════════════════════════════════════════════
 
@@ -398,11 +409,21 @@ REGLAS POR CAMPO (rows[])
     = triple, 'QDP' = cuádruple, 'FAM' = familiar). Si el contrato dice
     "sencilla o doble", devolver "DBL".
 
-16b. OCUPACIÓN TRIPLE / CUÁDRUPLE — tarifa por persona adicional:
+16b. OCUPACIÓN TRIPLE / CUÁDRUPLE / QUÍNTUPLE — dos caminos (prioridad):
+
+    PRIORIDAD 1 — PRECIOS EXPLÍCITOS EN LA TABLA:
+    Si el documento lista tarifas explícitas por columna/fila para triple,
+    cuádruple o quíntuple (ej. columnas "Triple", "Quadruple", "Quintuple"
+    con montos distintos), generá esas filas vos mismo con ocupacion
+    "TPL"/"QDP"/"QTN" y sus precios reales. Dejá tarifa_persona_adicional
+    en null. Esta regla GANA sobre la de persona adicional.
+
+    PRIORIDAD 2 — TARIFA POR PERSONA ADICIONAL (solo si NO hay precios explícitos):
     Cuando el documento define una "tarifa por persona adicional" (ej.
-    "Tarifa persona adicional $46 + imp"), NO generes vos las filas TPL/QDP.
-    En su lugar, en CADA fila base de hospedaje a la que aplica, llená el
-    campo \`tarifa_persona_adicional\` con ese monto. El SERVIDOR materializa
+    "Tarifa persona adicional $46 + imp") y NO hay columnas Triple/Quadruple
+    con precios propios, NO generes vos las filas TPL/QDP. En su lugar, en
+    CADA fila base de hospedaje a la que aplica, llená el campo
+    \`tarifa_persona_adicional\` con ese monto. El SERVIDOR materializa
     automáticamente las filas de ocupación triple (TPL = base + 1×adicional)
     y cuádruple (QDP = base + 2×adicional) para cada habitación × temporada.
 
@@ -417,16 +438,15 @@ REGLAS POR CAMPO (rows[])
       - Dejá la \`ocupacion\` de la fila base como está (DBL/SGL/FAM). El
         servidor crea las filas TPL/QDP aparte.
 
-    EXCEPCIÓN: si el documento YA lista tarifas explícitas para triple/
-    cuádruple, generá esas filas vos mismo (con ocupacion "TPL"/"QDP" y sus
+    EXCEPCIÓN (ver PRIORIDAD 1 arriba): si el documento YA lista tarifas explícitas para triple/
+    cuádruple/quíntuple, generá esas filas vos mismo (con ocupacion "TPL"/"QDP"/"QTN" y sus
     precios reales) y dejá \`tarifa_persona_adicional\` en null para no
     duplicar. Cortesías de niños (ej. "menores de 2 años sin costo") van en
     kids_policy/notes — NO disparan filas de ocupación.
 
-    APLICA SIEMPRE QUE HAYA TARIFA POR PERSONA ADICIONAL, aunque el
-    documento diga "ocupación sencilla y doble" o liste capacidades máximas
-    por habitación: la existencia de la tarifa por persona adicional implica
-    que se puede pagar por más huéspedes, así que generamos TPL y QDP igual.
+    APLICA LA PRIORIDAD 2 SOLO cuando NO existan columnas Triple/Quadruple/
+    Quintuple con precios en la tabla. Si hay tarifa por persona adicional
+    Y también columnas explícitas, usá las columnas explícitas (PRIORIDAD 1).
 
 17. "season_name": tal cual aparece en el contrato (ej. "PEAK", "ALTA",
     "BAJA", "GREEN SEASON", "TEMPORADA ALTA").

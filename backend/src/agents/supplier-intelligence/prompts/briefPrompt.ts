@@ -21,7 +21,9 @@ export const LOGIC_SUMMARY_FORMAT =
   "**Temporadas**\n" +
   "Lista de temporadas con nombre, fechas inicio–fin, tipo de tarifa (por noche / por servicio / paquete).\n\n" +
   "**Habitaciones / Servicios**\n" +
-  "Lista de categorías detectadas, ocupación máxima, ocupaciones aplicables (SGL, DBL, TPL, QDP, CHL, etc.). " +
+  "Lista de categorías detectadas, ocupación máxima, ocupaciones aplicables (SGL, DBL, TPL, QDP, QTN, CHL, etc.). " +
+  "Si la tabla tiene COLUMNAS explícitas Triple/Quadruple/Quintuple con precios, contalas como ocupaciones " +
+  "separadas en el row_plan (ej. SGL+DBL+TPL+CHL = 4 ocupaciones). " +
   "OBLIGATORIO incluir una línea sobre tarifa de niño: si hay tarifa niño escribí " +
   "'Tarifa de niño detectada: [descripción]. Se generarán filas CHL.'; si no hay, " +
   "'No se detectó tarifa de niño en el contrato.'\n\n" +
@@ -336,6 +338,7 @@ export function renderContractBriefBlock(brief: {
     const seasonCount =
       brief.row_plan?.seasons_count ??
       ((brief.seasons_detail?.length ?? 0) || brief.seasons.length);
+    const occPerCat = brief.row_plan?.occupancies_per_category;
     const perSeason =
       seasonCount > 0 ? Math.round(targetRows / seasonCount) : 0;
     const perSeasonLine =
@@ -344,6 +347,13 @@ export function renderContractBriefBlock(brief: {
           `${seasonCount} temporadas — generá ese bloque completo para cada ` +
           `temporada antes de pasar a la siguiente.`
         : "";
+    if (occPerCat != null && occPerCat >= 3) {
+      lines.push(
+        `• OCUPACIONES ESPERADAS: ~${occPerCat} por categoría — si el PDF tiene ` +
+          `columnas Triple/Quadruple/Quintuple con precios propios, generá filas ` +
+          `TPL/QDP/QTN (no solo SGL/DBL). CHL es aparte si hay tarifa niño.`,
+      );
+    }
     lines.push(
       `• META DE COMPLETITUD: generá aproximadamente ` +
         `${targetRows} filas base (combinaciones ` +

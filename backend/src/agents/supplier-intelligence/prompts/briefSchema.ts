@@ -333,8 +333,10 @@ export const REGISTRAR_BRIEF_CONTRATO_TOOL: Tool = {
           occupancies_per_category: {
             type: ["number", "null"],
             description:
-              "Cuántas ocupaciones distintas por categoría (ej. 1=solo doble, " +
-              "2=sencilla+doble). null si no está claro.",
+              "Cuántas ocupaciones distintas por categoría (ej. 4 = SGL+DBL+TPL+CHL " +
+              "cuando la tabla tiene columnas Single/Double/Triple/Children). " +
+              "Contá TPL/QDP/QTN como ocupaciones separadas si el PDF las lista " +
+              "con precio propio. null si no está claro.",
           },
           seasons_count: {
             type: ["number", "null"],

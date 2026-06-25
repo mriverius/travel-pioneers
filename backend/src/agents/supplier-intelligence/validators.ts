@@ -633,6 +633,55 @@ function expandOccupancy(
   return { ...extraction, rows: newRows, paginas_origen_rows: newPages };
 }
 
+const ADULT_OCCUPANCIES = ["SGL", "DBL", "TPL", "QDP", "QTN", "FAM"];
+
+/**
+ * Cruza filas generadas vs. row_plan del brief: si el contrato implica 3+
+ * ocupaciones adultas por categoría pero faltan TPL/QDP/QTN en algún grupo
+ * product × season, agrega warnings accionables (caso típico: tablas con
+ * columnas Triple/Quadruple que Opus omitió).
+ */
+function validateOccupancyCompleteness(
+  extraction: ExtractedContract,
+  brief: ContractBrief,
+  warnings: string[],
+): void {
+  const expectedOcc = brief.row_plan?.occupancies_per_category;
+  if (expectedOcc == null || expectedOcc < 3) return;
+
+  const groups = new Map<string, Set<string>>();
+  for (const row of extraction.rows) {
+    const product = (row.product_name ?? "").trim();
+    const season = (row.season_name ?? "").trim();
+    if (!product || !season) continue;
+    const occ = (row.ocupacion ?? "").trim().toUpperCase();
+    if (!occ || occ === "CHL" || occ === "DAY" || occ === "UNI") continue;
+    const key = `${product} · ${season}`;
+    if (!groups.has(key)) groups.set(key, new Set());
+    groups.get(key)!.add(occ);
+  }
+
+  for (const [label, occs] of groups) {
+    const hasBase = ADULT_OCCUPANCIES.some((o) => occs.has(o));
+    if (!hasBase) continue;
+    if (expectedOcc >= 3 && !occs.has("TPL")) {
+      warnings.push(
+        `Falta ocupación TPL (triple) en ${label}. Si el contrato lista precio triple explícito, agregá la fila.`,
+      );
+    }
+    if (expectedOcc >= 4 && !occs.has("QDP")) {
+      warnings.push(
+        `Falta ocupación QDP (cuádruple) en ${label}. Si el contrato lista precio cuádruple explícito, agregá la fila.`,
+      );
+    }
+    if (expectedOcc >= 5 && !occs.has("QTN")) {
+      warnings.push(
+        `Falta ocupación QTN (quíntuple) en ${label}. Si el contrato lista precio quíntuple explícito, agregá la fila.`,
+      );
+    }
+  }
+}
+
 /* -------------------------------------------------------------------------- */
 /*           Brief-driven checks (Variables de Configuración)                 */
 /* -------------------------------------------------------------------------- */
@@ -1062,6 +1111,7 @@ export function validateExtraction(
 
   // Cruce contra las Variables de Configuración confirmadas (si las hay).
   if (brief) {
+    validateOccupancyCompleteness(extraction, brief, warnings);
     validateAgainstBrief(extraction, brief, warnings);
   }
 

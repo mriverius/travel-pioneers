@@ -22,6 +22,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
+import { combinePipelineUsage } from "@/lib/anthropicUsage";
 import {
   useCallback,
   useEffect,
@@ -1188,6 +1189,7 @@ export function SupplierWorkflow() {
           <DownloadStep
             payload={approvedPayload}
             meta={result.meta}
+            briefMetas={metas}
             onReset={reset}
           />
         )}
@@ -1195,7 +1197,7 @@ export function SupplierWorkflow() {
     </section>
 
     <div className="text-center mt-4 space-y-1">
-      <p className="text-[11px] text-muted-foreground/60">Version 1.7.1 - Junio 23</p>
+      <p className="text-[11px] text-muted-foreground/60">Version 1.7.2 - Junio 23</p>
       <a
         href="https://forms.gle/GANUbdcuAS3P7szS8"
         target="_blank"
@@ -2825,10 +2827,13 @@ function CellEditor({
 function DownloadStep({
   payload,
   meta,
+  briefMetas,
   onReset,
 }: {
   payload: ApprovedPayload;
   meta: ExtractContractResponse["meta"];
+  /** Telemetría del pre-análisis (Paso 2), uno por documento. */
+  briefMetas: AnalyzeBriefMeta[];
   onReset: () => void;
 }) {
   const [phase, setPhase] = useState<"generating" | "ready" | "error">(
@@ -2894,6 +2899,7 @@ function DownloadStep({
         // de Historial (el usuario puede re-procesar el contrato).
         const fileKind = inferKind("", meta.filename);
         if (fileKind) {
+          const pipelineUsage = combinePipelineUsage(meta, briefMetas);
           void api.supplierIntelligence
             .saveRun({
               filename: meta.filename,
@@ -2904,12 +2910,10 @@ function DownloadStep({
               rows: payload.rows,
               catalog_prefill: payload.catalogPrefill,
               manual_fields: payload.manualFields,
-              // Telemetría real del extract — se persiste con el run.
-              // Si el backend es viejo y no las trajo en meta, el
-              // saveRun las omite y se guarda como null en BD.
-              input_tokens: meta.input_tokens,
-              output_tokens: meta.output_tokens,
-              cost_usd: meta.cost_usd,
+              // Pre-análisis (Paso 2) + extracción (Paso 3), tarifa Opus 4.8.
+              input_tokens: pipelineUsage.input_tokens,
+              output_tokens: pipelineUsage.output_tokens,
+              cost_usd: pipelineUsage.cost_usd,
             })
             .catch((err) => {
               // Logueamos a console para que sea visible en dev / Sentry,
@@ -2928,7 +2932,7 @@ function DownloadStep({
         setPhase("error");
       }
     })();
-  }, [payload, meta]);
+  }, [payload, meta, briefMetas]);
 
   // Revoca el blob URL al desmontar el componente (ej. cuando el usuario
   // hace clic en "Procesar otro contrato"). Hasta entonces lo mantenemos
