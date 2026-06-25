@@ -347,6 +347,16 @@ export interface ContractBrief {
   logic_summary: string | null;
   /** Inventario estructurado para estimar cuántas filas generará Opus. */
   row_plan: ContractBriefRowPlan | null;
+  /**
+   * N = tarifa por noche, S = tarifa por servicio/paquete (Full Experience,
+   * paquetes 2N/3D, etc.). Lo detecta el brief y lo confirma el operador.
+   */
+  tipo_unidad: "N" | "S" | null;
+  /**
+   * Códigos de ocupación del catálogo Utopía que aplican (SGL, DBL, TPL…).
+   * Opus debe generar una fila por cada uno en cada producto × temporada.
+   */
+  occupancy_codes: string[];
 }
 
 /** Mensaje del chat de refinamiento del brief (Paso 2). */

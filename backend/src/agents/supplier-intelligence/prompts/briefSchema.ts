@@ -300,6 +300,22 @@ export const REGISTRAR_BRIEF_CONTRATO_TOOL: Tool = {
           "Cualquier otra regla global relevante que no encaje arriba " +
           "(tarifa de guía, estadía mínima, niños, recargos, etc.).",
       },
+      tipo_unidad: {
+        type: ["string", "null"],
+        description:
+          "N = tarifa POR NOCHE (hotel estándar). S = tarifa POR SERVICIO/PAQUETE " +
+          "(Full Experience, all-inclusive, paquete 2N/3D — el precio es el total " +
+          "del paquete, no una noche). null si no está claro.",
+      },
+      occupancy_codes: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "Códigos de ocupación del catálogo Utopía presentes en las tablas de " +
+          "tarifas: SGL, DBL, TPL, QDP, QTN, CHL. Listá TODOS los que el documento " +
+          "muestre como columnas o tarifas explícitas (ej. Single+Double+Triple+Children " +
+          "→ [\"SGL\",\"DBL\",\"TPL\",\"CHL\"]).",
+      },
       logic_summary: {
         type: ["string", "null"],
         description:

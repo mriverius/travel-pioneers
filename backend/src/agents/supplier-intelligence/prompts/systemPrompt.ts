@@ -324,7 +324,8 @@ REGLAS POR CAMPO (rows[])
     de ESTA fila (override) o, en su defecto, el tipo_servicio shared.
     NUNCA dejar null: usar "STD" como último recurso para HO y "UNI"
     para todo lo demás. Mapear el producto al código más cercano:
-    - "Standard" / "Garden" / "Tropical" → "STD"
+    - "Standard" / "Garden" / "Tropical" → "STD" (solo si NO contiene "Suite")
+    - "Garden Suite" / "River View Suite" / cualquier "* Suite" → "SUI"
     - "Premium" (sin "Suite") → "PRM"
     - "Vista Suites" / cualquier "Suite" no específica → "SUI"
     - "Junior Suite" → "JUN"
@@ -357,9 +358,8 @@ REGLAS POR CAMPO (rows[])
     varias noches a un precio fijo por habitación (ej. encabezado "2N/3D"
     = 2 noches / 3 días, y el neto $1,987.30 YA es el total por las 2
     noches para esa habitación doble), el tipo_unidad es "S", NO "N" —
-    aunque sea una habitación de hotel. La señal es que el precio cubre
-    toda la estadía / el paquete, no una sola noche. Lo mismo para
-    "honeymoon package", "3 nights all inclusive", etc.
+    aunque sea una habitación de hotel. Lo mismo para lodges "Full Experience",
+    "All Inclusive Package", tarifas por persona en paquete cerrado, etc.
     Si la tarifa es claramente por noche → "N". Si coincide con el shared,
     devolver null.
 

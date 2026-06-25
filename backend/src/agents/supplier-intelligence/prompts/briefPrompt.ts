@@ -24,6 +24,11 @@ export const LOGIC_SUMMARY_FORMAT =
   "Lista de categorías detectadas, ocupación máxima, ocupaciones aplicables (SGL, DBL, TPL, QDP, QTN, CHL, etc.). " +
   "Si la tabla tiene COLUMNAS explícitas Triple/Quadruple/Quintuple con precios, contalas como ocupaciones " +
   "separadas en el row_plan (ej. SGL+DBL+TPL+CHL = 4 ocupaciones). " +
+  "OBLIGATORIO: llená `occupancy_codes` con los códigos exactos del catálogo Utopía.\n\n" +
+  "**Tipo de tarifa (tipo_unidad)**\n" +
+  "N = por noche (hotel estándar). S = por servicio/paquete (Full Experience, all-inclusive, " +
+  "paquete 2N/3D — el precio es el total del paquete, NO una noche). Lodges tipo Pacuare " +
+  "Full Experience → S.\n\n" +
   "OBLIGATORIO incluir una línea sobre tarifa de niño: si hay tarifa niño escribí " +
   "'Tarifa de niño detectada: [descripción]. Se generarán filas CHL.'; si no hay, " +
   "'No se detectó tarifa de niño en el contrato.'\n\n" +
@@ -185,6 +190,8 @@ export function renderContractBriefBlock(brief: {
     seasons_count: number | null;
     expected_rows: number | null;
   } | null;
+  tipo_unidad?: "N" | "S" | null;
+  occupancy_codes?: string[];
 }): string {
   const lines: string[] = [];
   lines.push(
@@ -332,6 +339,30 @@ export function renderContractBriefBlock(brief: {
         `seguido). ${inv.join(" | ")}.`,
     );
   }
+
+  if (brief.tipo_unidad === "S") {
+    lines.push(
+      "• TIPO UNIDAD: S (por servicio/paquete) — el precio es el total del " +
+        "paquete/experiencia, NO por noche. Poné tipo_unidad=S en TODAS las filas.",
+    );
+  } else if (brief.tipo_unidad === "N") {
+    lines.push(
+      "• TIPO UNIDAD: N (por noche) — multiplicá noches × tarifa para el total.",
+    );
+  }
+
+  const occCodes =
+    brief.occupancy_codes && brief.occupancy_codes.length > 0
+      ? brief.occupancy_codes.map((c) => c.toUpperCase())
+      : null;
+  if (occCodes && occCodes.length > 0) {
+    lines.push(
+      `• OCUPACIONES OBLIGATORIAS (catálogo Utopía): por CADA producto × ` +
+        `temporada generá una fila con cada código: ${occCodes.join(", ")}. ` +
+        "Usá los precios exactos del documento para cada columna.",
+    );
+  }
+
   if (brief.expected_row_estimate && brief.expected_row_estimate > 0) {
     const targetRows =
       brief.row_plan?.expected_rows ?? brief.expected_row_estimate;

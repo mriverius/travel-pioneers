@@ -887,6 +887,10 @@ export interface ContractConfigVariables {
   logic_summary: string | null;
   /** Inventario estructurado de filas estimadas. */
   row_plan: ConfigRowPlan | null;
+  /** N = por noche, S = por servicio/paquete (Full Experience, etc.). */
+  tipo_unidad?: "N" | "S" | null;
+  /** Códigos de ocupación del catálogo Utopía (SGL, DBL, TPL, CHL…). */
+  occupancy_codes?: string[];
 }
 
 export interface AnalyzeBriefMeta {

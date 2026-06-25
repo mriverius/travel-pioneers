@@ -1020,6 +1020,9 @@ export function coerceBrief(input: unknown): ContractBrief {
       rowPlan?.expected_rows ??
       null,
     notes: stringOrNull(r.notes),
+    tipo_unidad:
+      r.tipo_unidad === "N" || r.tipo_unidad === "S" ? r.tipo_unidad : null,
+    occupancy_codes: stringArray(r.occupancy_codes).map((c) => c.toUpperCase()),
   };
   const logicSummary =
     stringOrNull(r.logic_summary) ?? buildLogicSummaryFallback(base);
@@ -1430,6 +1433,26 @@ export async function refineContractBrief(
   };
 }
 
+/** Une occupancy_codes / tipo_unidad de todos los briefs confirmados. */
+function mergeBriefsForValidation(
+  primary: ContractBrief,
+  all: ContractBrief[] | null,
+): ContractBrief {
+  if (!all || all.length <= 1) return primary;
+  const occupancy_codes = [
+    ...new Set(
+      all.flatMap((b) => (b.occupancy_codes ?? []).map((c) => c.toUpperCase())),
+    ),
+  ];
+  const packageBrief = all.find((b) => b.tipo_unidad === "S");
+  return {
+    ...primary,
+    occupancy_codes:
+      occupancy_codes.length > 0 ? occupancy_codes : primary.occupancy_codes,
+    tipo_unidad: packageBrief?.tipo_unidad ?? primary.tipo_unidad,
+  };
+}
+
 export async function extractContract(
   docs: PreparedDocumentInput[],
   requestId?: string,
@@ -1614,7 +1637,10 @@ export async function extractContract(
     );
   }
 
-  const { extraction, validation } = validateExtraction(raw, brief);
+  const { extraction, validation } = validateExtraction(
+    raw,
+    brief ? mergeBriefsForValidation(brief, confirmedBriefs) : null,
+  );
 
   // Reconciliación de cuentas bancarias + términos de pago: la extracción
   // principal trae todas las cuentas y los payment_terms. Rellenamos la cuenta
