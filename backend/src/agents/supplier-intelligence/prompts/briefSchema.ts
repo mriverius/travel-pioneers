@@ -311,10 +311,36 @@ export const REGISTRAR_BRIEF_CONTRATO_TOOL: Tool = {
         type: "array",
         items: { type: "string" },
         description:
-          "Códigos de ocupación del catálogo Utopía presentes en las tablas de " +
-          "tarifas: SGL, DBL, TPL, QDP, QTN, CHL. Listá TODOS los que el documento " +
-          "muestre como columnas o tarifas explícitas (ej. Single+Double+Triple+Children " +
-          "→ [\"SGL\",\"DBL\",\"TPL\",\"CHL\"]).",
+          "Unión de TODOS los códigos de ocupación que aparecen en el contrato " +
+          "(referencia global). Ej: [\"SGL\",\"DBL\",\"TPL\",\"QDP\",\"QTN\",\"CHL\"]. " +
+          "NO uses esta lista plana para todos los productos — completá " +
+          "`occupancies_by_product` con las columnas reales de cada habitación.",
+      },
+      occupancies_by_product: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            product: {
+              type: "string",
+              description:
+                "Nombre de la categoría/habitación (ej. \"Garden Suite\", \"Jaguar Villa\").",
+            },
+            occupancy_codes: {
+              type: "array",
+              items: { type: "string" },
+              description:
+                "Códigos Utopía que ESA habitación publica en el PDF. " +
+                "Suites: SGL+DBL+TPL+CHL. Villas medianas: +QDP. Jaguar/large: +QTN.",
+            },
+          },
+          required: ["product", "occupancy_codes"],
+          additionalProperties: false,
+        },
+        description:
+          "OBLIGATORIO cuando distintas habitaciones tienen columnas distintas " +
+          "(ej. Pacuare: suites sin cuádruple, villas con cuádruple, Jaguar con quíntuple). " +
+          "Una entrada por categoría detectada.",
       },
       logic_summary: {
         type: ["string", "null"],

@@ -1077,8 +1077,8 @@ export function validateExtraction(
     if (missingOcc && extraction.confianza !== "baja") {
       extraction = { ...extraction, confianza: "baja" };
       warnings.push(
-        "Confianza bajada a 'baja' — faltan ocupaciones que el brief indica. " +
-          "Revisá y completá filas TPL/QDP/QTN/CHL en el Paso 3.",
+        "Confianza bajada a 'baja' — faltan ocupaciones esperadas para algún " +
+          "producto × temporada. Revisá y completá filas en el Paso 3.",
       );
     }
   }

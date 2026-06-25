@@ -889,8 +889,13 @@ export interface ContractConfigVariables {
   row_plan: ConfigRowPlan | null;
   /** N = por noche, S = por servicio/paquete (Full Experience, etc.). */
   tipo_unidad?: "N" | "S" | null;
-  /** Códigos de ocupación del catálogo Utopía (SGL, DBL, TPL, CHL…). */
+  /** Códigos de ocupación del catálogo Utopía (referencia global). */
   occupancy_codes?: string[];
+  /** Ocupaciones por producto cuando el PDF las publica distinto. */
+  occupancies_by_product?: Array<{
+    product: string;
+    occupancy_codes: string[];
+  }>;
 }
 
 export interface AnalyzeBriefMeta {

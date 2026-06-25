@@ -303,6 +303,13 @@ export interface ContractBriefRowPlan {
   expected_rows: number | null;
 }
 
+/** Ocupaciones esperadas para un producto/categoría del contrato. */
+export interface ProductOccupancySpec {
+  /** Nombre o fragmento del producto/categoría (ej. "Garden Suite"). */
+  product: string;
+  occupancy_codes: string[];
+}
+
 /**
  * Resultado de la pasada de BRIEF (Fase 1). Captura las reglas GLOBALES del
  * contrato + un inventario, en una llamada chica y focalizada — sin filas de
@@ -353,10 +360,15 @@ export interface ContractBrief {
    */
   tipo_unidad: "N" | "S" | null;
   /**
-   * Códigos de ocupación del catálogo Utopía que aplican (SGL, DBL, TPL…).
-   * Opus debe generar una fila por cada uno en cada producto × temporada.
+   * Unión de todos los códigos de ocupación presentes en el contrato (referencia
+   * global). La validación usa `occupancies_by_product`, no esta lista plana.
    */
   occupancy_codes: string[];
+  /**
+   * Ocupaciones por producto/categoría cuando el PDF las publica distinto
+   * (ej. suites SGL+DBL+TPL+CHL; villas +QDP; Jaguar Villa +QTN).
+   */
+  occupancies_by_product: ProductOccupancySpec[];
 }
 
 /** Mensaje del chat de refinamiento del brief (Paso 2). */

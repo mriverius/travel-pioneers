@@ -81,9 +81,17 @@ NO omitas TPL/QDP/QTN solo porque ya generaste SGL y DBL. NO uses
 tarifa_persona_adicional cuando el contrato ya lista precios explícitos por ocupación.
 Ejemplo real: Garden Suite · Green Season con Single $912, Double $1.417, Triple
 $2.115, Children $411 → cuatro filas: SGL, DBL, TPL, CHL (una por columna).
+NO agregues QDP/QTN a suites si su bloque de columnas no las publica.
+
+REGLA — COLUMNAS DISTINTAS POR HABITACIÓN (Pacuare y similares):
+Algunos tarifarios publican columnas diferentes según el tipo de habitación:
+  · Suites (Garden, River View): SGL + DBL + TPL + CHL — sin cuádruple/quíntuple.
+  · Villas (Linda Vista, Canopy): + Cuádruple (QDP).
+  · Villas grandes (Jaguar): + Quíntuple (QTN).
+Respetá SOLO las columnas que ESA habitación muestra en el PDF. El CONTRACT BRIEF
+lista las ocupaciones por producto — seguilo al pie de la letra.
 
 VERIFICACIÓN ANTES DE GENERAR EL EXCEL:
-Antes de finalizar la respuesta, revisa mentalmente:
   1) ¿El contrato tiene columnas Triple/Quadruple/Quintuple con precios? → ¿generé TPL/QDP/QTN?
   2) ¿El contrato menciona tarifas de niño? → ¿generé filas CHL?
 Si falta alguna → agrégalas ahora antes de responder.

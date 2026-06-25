@@ -21,10 +21,10 @@ export const LOGIC_SUMMARY_FORMAT =
   "**Temporadas**\n" +
   "Lista de temporadas con nombre, fechas inicio–fin, tipo de tarifa (por noche / por servicio / paquete).\n\n" +
   "**Habitaciones / Servicios**\n" +
-  "Lista de categorías detectadas, ocupación máxima, ocupaciones aplicables (SGL, DBL, TPL, QDP, QTN, CHL, etc.). " +
-  "Si la tabla tiene COLUMNAS explícitas Triple/Quadruple/Quintuple con precios, contalas como ocupaciones " +
-  "separadas en el row_plan (ej. SGL+DBL+TPL+CHL = 4 ocupaciones). " +
-  "OBLIGATORIO: llená `occupancy_codes` con los códigos exactos del catálogo Utopía.\n\n" +
+  "Lista de categorías detectadas, ocupación máxima y ocupaciones POR CATEGORÍA. " +
+  "Si la tabla tiene columnas distintas por habitación (ej. suites SGL+DBL+TPL+Niño; " +
+  "villas +Cuádruple; Jaguar +Quíntuple), llená `occupancies_by_product` — NO asumas " +
+  "que QDP/QTN aplican a todas. `occupancy_codes` es solo la unión global de referencia.\n\n" +
   "**Tipo de tarifa (tipo_unidad)**\n" +
   "N = por noche (hotel estándar). S = por servicio/paquete (Full Experience, all-inclusive, " +
   "paquete 2N/3D — el precio es el total del paquete, NO una noche). Lodges tipo Pacuare " +
@@ -192,6 +192,10 @@ export function renderContractBriefBlock(brief: {
   } | null;
   tipo_unidad?: "N" | "S" | null;
   occupancy_codes?: string[];
+  occupancies_by_product?: Array<{
+    product: string;
+    occupancy_codes: string[];
+  }>;
 }): string {
   const lines: string[] = [];
   lines.push(
@@ -351,15 +355,29 @@ export function renderContractBriefBlock(brief: {
     );
   }
 
+  const perProduct =
+    brief.occupancies_by_product && brief.occupancies_by_product.length > 0
+      ? brief.occupancies_by_product
+      : null;
   const occCodes =
     brief.occupancy_codes && brief.occupancy_codes.length > 0
       ? brief.occupancy_codes.map((c) => c.toUpperCase())
       : null;
-  if (occCodes && occCodes.length > 0) {
+  if (perProduct && perProduct.length > 0) {
     lines.push(
-      `• OCUPACIONES OBLIGATORIAS (catálogo Utopía): por CADA producto × ` +
-        `temporada generá una fila con cada código: ${occCodes.join(", ")}. ` +
-        "Usá los precios exactos del documento para cada columna.",
+      "• OCUPACIONES POR PRODUCTO (catálogo Utopía) — generá SOLO las filas " +
+        "que correspondan a cada habitación; NO copies QDP/QTN a suites si el " +
+        "PDF no las publica:",
+    );
+    for (const spec of perProduct) {
+      const codes = spec.occupancy_codes.map((c) => c.toUpperCase()).join(", ");
+      lines.push(`  – ${spec.product}: ${codes}`);
+    }
+  } else if (occCodes && occCodes.length > 0) {
+    lines.push(
+      `• OCUPACIONES (referencia global): ${occCodes.join(", ")}. ` +
+        "Si el PDF publica columnas distintas por habitación, respetá eso " +
+        "(suites ≠ villas).",
     );
   }
 

@@ -21,6 +21,7 @@ import {
   SUPPLIER_INTELLIGENCE_SYSTEM_PROMPT,
 } from "./prompts/index.js";
 import { validateExtraction, normalizeCurrency } from "./validators.js";
+import { enrichBriefOccupancies } from "./catalogRules.js";
 import type {
   BriefChatMessage,
   Confianza,
@@ -28,6 +29,7 @@ import type {
   ContractBriefAdditionalPerson,
   ContractBriefBankAccount,
   ContractBriefRowPlan,
+  ProductOccupancySpec,
   ContractBriefSeason,
   ContractBriefSharedFields,
   ContractRow,
@@ -887,6 +889,23 @@ function coerceBriefSharedFields(v: unknown): ContractBriefSharedFields {
   };
 }
 
+function coerceOccupanciesByProduct(v: unknown): ProductOccupancySpec[] {
+  if (!Array.isArray(v)) return [];
+  const out: ProductOccupancySpec[] = [];
+  for (const item of v) {
+    if (!item || typeof item !== "object") continue;
+    const r = item as Record<string, unknown>;
+    const product = stringOrNull(r.product);
+    const occupancy_codes = stringArray(r.occupancy_codes).map((c) =>
+      c.toUpperCase(),
+    );
+    if (product && occupancy_codes.length > 0) {
+      out.push({ product, occupancy_codes });
+    }
+  }
+  return out;
+}
+
 function coerceRowPlan(v: unknown): ContractBriefRowPlan | null {
   if (!v || typeof v !== "object") return null;
   const r = v as Record<string, unknown>;
@@ -1023,6 +1042,7 @@ export function coerceBrief(input: unknown): ContractBrief {
     tipo_unidad:
       r.tipo_unidad === "N" || r.tipo_unidad === "S" ? r.tipo_unidad : null,
     occupancy_codes: stringArray(r.occupancy_codes).map((c) => c.toUpperCase()),
+    occupancies_by_product: coerceOccupanciesByProduct(r.occupancies_by_product),
   };
   const logicSummary =
     stringOrNull(r.logic_summary) ?? buildLogicSummaryFallback(base);
@@ -1035,11 +1055,11 @@ export function coerceBrief(input: unknown): ContractBrief {
       seasons_count: reconciled.seasons_detail.length || reconciled.seasons.length || null,
     };
   }
-  return {
+  return enrichBriefOccupancies({
     ...base,
     logic_summary: logicSummary,
     row_plan: rowPlan,
-  };
+  });
 }
 
 /**
@@ -1433,24 +1453,43 @@ export async function refineContractBrief(
   };
 }
 
-/** Une occupancy_codes / tipo_unidad de todos los briefs confirmados. */
+/** Une occupancy_codes / tipo_unidad / occupancies_by_product de todos los briefs. */
 function mergeBriefsForValidation(
   primary: ContractBrief,
   all: ContractBrief[] | null,
 ): ContractBrief {
-  if (!all || all.length <= 1) return primary;
+  if (!all || all.length <= 1) return enrichBriefOccupancies(primary);
   const occupancy_codes = [
     ...new Set(
       all.flatMap((b) => (b.occupancy_codes ?? []).map((c) => c.toUpperCase())),
     ),
   ];
   const packageBrief = all.find((b) => b.tipo_unidad === "S");
-  return {
+  const specMap = new Map<string, { product: string; codes: Set<string> }>();
+  for (const b of all) {
+    for (const spec of enrichBriefOccupancies(b).occupancies_by_product) {
+      const key = spec.product.toLowerCase();
+      const existing = specMap.get(key);
+      if (!existing) {
+        specMap.set(key, {
+          product: spec.product,
+          codes: new Set(spec.occupancy_codes),
+        });
+      } else {
+        for (const c of spec.occupancy_codes) existing.codes.add(c);
+      }
+    }
+  }
+  return enrichBriefOccupancies({
     ...primary,
     occupancy_codes:
       occupancy_codes.length > 0 ? occupancy_codes : primary.occupancy_codes,
     tipo_unidad: packageBrief?.tipo_unidad ?? primary.tipo_unidad,
-  };
+    occupancies_by_product: [...specMap.values()].map(({ product, codes }) => ({
+      product,
+      occupancy_codes: [...codes],
+    })),
+  });
 }
 
 export async function extractContract(
@@ -1639,7 +1678,11 @@ export async function extractContract(
 
   const { extraction, validation } = validateExtraction(
     raw,
-    brief ? mergeBriefsForValidation(brief, confirmedBriefs) : null,
+    brief
+      ? enrichBriefOccupancies(
+          mergeBriefsForValidation(brief, confirmedBriefs),
+        )
+      : null,
   );
 
   // Reconciliación de cuentas bancarias + términos de pago: la extracción

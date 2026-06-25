@@ -1,4 +1,9 @@
-import type { ContractBrief, ContractRow, ExtractedContract } from "./types.js";
+import type {
+  ContractBrief,
+  ContractRow,
+  ExtractedContract,
+  ProductOccupancySpec,
+} from "./types.js";
 
 /**
  * Reglas determinísticas del catálogo Utopía — aplicadas post-extracción para
@@ -17,12 +22,47 @@ export const CATALOG_OCCUPANCY_CODES = [
   "UNI",
 ] as const;
 
+export type ProductOccupancyTier = "suite" | "villa_quad" | "villa_quint" | "unknown";
+
+const TIER_OCCUPANCY_CODES: Record<
+  Exclude<ProductOccupancyTier, "unknown">,
+  string[]
+> = {
+  suite: ["SGL", "DBL", "TPL", "CHL"],
+  villa_quad: ["SGL", "DBL", "TPL", "QDP", "CHL"],
+  villa_quint: ["SGL", "DBL", "TPL", "QDP", "QTN", "CHL"],
+};
+
+function normalizeOccupancyCode(code: string): string {
+  return code.trim().toUpperCase();
+}
+
+function filterCatalogCodes(codes: string[]): string[] {
+  return [
+    ...new Set(
+      codes
+        .map(normalizeOccupancyCode)
+        .filter((c) =>
+          (CATALOG_OCCUPANCY_CODES as readonly string[]).includes(c),
+        ),
+    ),
+  ];
+}
+
+/** Base del nombre de producto sin sufijo de paquete/sección. */
+export function productBaseName(productName: string | null): string {
+  const raw = (productName ?? "").trim();
+  if (!raw) return "";
+  const dash = raw.indexOf(" - ");
+  return dash >= 0 ? raw.slice(0, dash).trim() : raw;
+}
+
 /**
  * Mapea el nombre del producto al código de categoría HO más cercano.
  * El orden importa: "Suite" antes que "Garden"→STD.
  */
 export function inferCategoriaHospedaje(productName: string | null): string {
-  const n = (productName ?? "").toLowerCase();
+  const n = productBaseName(productName).toLowerCase();
   if (!n.trim()) return "STD";
   if (/\bvilla\b/.test(n)) return "VIL";
   if (/\bmaster suite\b/.test(n)) return "MAS";
@@ -37,6 +77,18 @@ export function inferCategoriaHospedaje(productName: string | null): string {
   if (/\bdeluxe\b/.test(n)) return "DLX";
   if (/\bocean view\b/.test(n)) return "OCV";
   return "STD";
+}
+
+/** Infiera el tier de ocupaciones según el tipo de habitación. */
+export function inferProductOccupancyTier(
+  productName: string | null,
+): ProductOccupancyTier {
+  const n = productBaseName(productName).toLowerCase();
+  if (!n) return "unknown";
+  if (/\bjaguar\b/.test(n) && /\bvilla\b/.test(n)) return "villa_quint";
+  if (/\bvilla\b/.test(n)) return "villa_quad";
+  if (/\bsuite\b/.test(n)) return "suite";
+  return "unknown";
 }
 
 function briefTextHaystack(brief: ContractBrief): string {
@@ -80,14 +132,10 @@ export function detectPackagePricing(
   );
 }
 
-/** Ocupaciones esperadas: del brief o inferidas del row_plan / texto. */
+/** Ocupaciones globales de referencia (fallback para productos sin tier). */
 export function resolveExpectedOccupancyCodes(brief: ContractBrief): string[] {
-  const fromBrief = (brief.occupancy_codes ?? [])
-    .map((c) => c.trim().toUpperCase())
-    .filter((c) =>
-      (CATALOG_OCCUPANCY_CODES as readonly string[]).includes(c),
-    );
-  if (fromBrief.length > 0) return [...new Set(fromBrief)];
+  const fromBrief = filterCatalogCodes(brief.occupancy_codes ?? []);
+  if (fromBrief.length > 0) return fromBrief;
 
   const haystack = briefTextHaystack(brief);
   const codes: string[] = ["SGL", "DBL"];
@@ -110,7 +158,107 @@ export function resolveExpectedOccupancyCodes(brief: ContractBrief): string[] {
   if (mentionsQuint) codes.push("QTN");
   if (mentionsChild) codes.push("CHL");
 
-  return [...new Set(codes)];
+  return filterCatalogCodes(codes);
+}
+
+/** Ocupaciones esperadas para un producto concreto. */
+export function inferOccupancyCodesFromProductName(
+  productName: string,
+  brief: ContractBrief | null,
+): string[] {
+  const tier = inferProductOccupancyTier(productName);
+  if (tier !== "unknown") return [...TIER_OCCUPANCY_CODES[tier]];
+  if (brief) return resolveExpectedOccupancyCodes(brief);
+  return ["SGL", "DBL"];
+}
+
+function productNamesMatch(specProduct: string, rowProduct: string): boolean {
+  const spec = specProduct.toLowerCase().trim();
+  const row = rowProduct.toLowerCase().trim();
+  const rowBase = productBaseName(rowProduct).toLowerCase();
+  if (!spec || !row) return false;
+  return (
+    row.includes(spec) ||
+    spec.includes(row) ||
+    rowBase.includes(spec) ||
+    spec.includes(rowBase)
+  );
+}
+
+function findBestProductOccupancySpec(
+  productName: string,
+  specs: ProductOccupancySpec[],
+): ProductOccupancySpec | null {
+  let best: ProductOccupancySpec | null = null;
+  let bestLen = 0;
+  for (const spec of specs) {
+    if (!productNamesMatch(spec.product, productName)) continue;
+    const len = spec.product.trim().length;
+    if (len >= bestLen) {
+      best = spec;
+      bestLen = len;
+    }
+  }
+  return best;
+}
+
+/** Construye specs por producto desde categorías del brief. */
+export function buildOccupanciesByProductFromCategories(
+  categories: string[],
+  brief: ContractBrief | null,
+): ProductOccupancySpec[] {
+  return categories.map((product) => ({
+    product,
+    occupancy_codes: inferOccupancyCodesFromProductName(product, brief),
+  }));
+}
+
+/** Lista efectiva de specs por producto (brief + filas extraídas). */
+export function collectProductOccupancySpecs(
+  brief: ContractBrief,
+  extraction: ExtractedContract,
+): ProductOccupancySpec[] {
+  const specs: ProductOccupancySpec[] = (brief.occupancies_by_product ?? [])
+    .map((s) => ({
+      product: s.product.trim(),
+      occupancy_codes: filterCatalogCodes(s.occupancy_codes),
+    }))
+    .filter((s) => s.product && s.occupancy_codes.length > 0);
+
+  if (specs.length === 0 && brief.product_categories.length > 0) {
+    specs.push(
+      ...buildOccupanciesByProductFromCategories(
+        brief.product_categories,
+        brief,
+      ),
+    );
+  }
+
+  const seen = new Set(specs.map((s) => s.product.toLowerCase()));
+  for (const row of extraction.rows) {
+    const base = productBaseName(row.product_name);
+    if (!base || seen.has(base.toLowerCase())) continue;
+    specs.push({
+      product: base,
+      occupancy_codes: inferOccupancyCodesFromProductName(base, brief),
+    });
+    seen.add(base.toLowerCase());
+  }
+
+  return specs;
+}
+
+/** Ocupaciones esperadas para validar un producto × temporada. */
+export function resolveExpectedOccupancyCodesForProduct(
+  productName: string,
+  brief: ContractBrief,
+  specs: ProductOccupancySpec[],
+): string[] {
+  const matched = findBestProductOccupancySpec(productName, specs);
+  if (matched && matched.occupancy_codes.length > 0) {
+    return matched.occupancy_codes;
+  }
+  return inferOccupancyCodesFromProductName(productName, brief);
 }
 
 function effectiveTipoServicio(
@@ -186,24 +334,21 @@ export function normalizeCatalogFields(
   return { ...extraction, shared_fields: shared, rows };
 }
 
-/** Valida que cada grupo product×season tenga las ocupaciones esperadas. */
+/** Valida ocupaciones por producto × temporada (no lista global plana). */
 export function validateExpectedOccupancies(
   extraction: ExtractedContract,
   brief: ContractBrief,
   warnings: string[],
 ): void {
-  const expected = resolveExpectedOccupancyCodes(brief);
-  if (expected.length === 0) return;
-
-  const adultExpected = expected.filter((c) => c !== "CHL");
-  const needsChild = expected.includes("CHL");
+  const specs = collectProductOccupancySpecs(brief, extraction);
+  if (specs.length === 0) return;
 
   const groups = new Map<string, Set<string>>();
   for (const row of extraction.rows) {
     const product = (row.product_name ?? "").trim();
     const season = (row.season_name ?? "").trim();
     if (!product || !season) continue;
-    const occ = (row.ocupacion ?? "").trim().toUpperCase();
+    const occ = normalizeOccupancyCode(row.ocupacion ?? "");
     if (!occ) continue;
     const key = `${product} · ${season}`;
     if (!groups.has(key)) groups.set(key, new Set());
@@ -211,18 +356,40 @@ export function validateExpectedOccupancies(
   }
 
   for (const [label, occs] of groups) {
+    const product = label.split(" · ")[0] ?? label;
+    const expected = resolveExpectedOccupancyCodesForProduct(
+      product,
+      brief,
+      specs,
+    );
+    if (expected.length === 0) continue;
+
+    const adultExpected = expected.filter((c) => c !== "CHL");
+    const needsChild = expected.includes("CHL");
+
     for (const code of adultExpected) {
       if (!occs.has(code)) {
         warnings.push(
-          `Falta ocupación ${code} en ${label}. El brief indica que aplica ` +
+          `Falta ocupación ${code} en ${label}. Para este producto aplican ` +
             `[${expected.join(", ")}] — revisá precios en el Paso 3.`,
         );
       }
     }
     if (needsChild && !occs.has("CHL")) {
-      warnings.push(
-        `Falta ocupación CHL (niño) en ${label}.`,
-      );
+      warnings.push(`Falta ocupación CHL (niño) en ${label}.`);
     }
   }
+}
+
+/** Completa occupancies_by_product desde categorías si el brief no lo trae. */
+export function enrichBriefOccupancies(brief: ContractBrief): ContractBrief {
+  if ((brief.occupancies_by_product ?? []).length > 0) return brief;
+  if (brief.product_categories.length === 0) return brief;
+  return {
+    ...brief,
+    occupancies_by_product: buildOccupanciesByProductFromCategories(
+      brief.product_categories,
+      brief,
+    ),
+  };
 }
