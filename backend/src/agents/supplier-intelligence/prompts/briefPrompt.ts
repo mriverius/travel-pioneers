@@ -95,10 +95,12 @@ export const CONTRACT_BRIEF_INSTRUCTION =
   "  6. PERIODOS ESPECIALES: políticas de Navidad/peak/etc. de prepago o " +
   "cancelación.\n" +
   "  6b. TEMPORADAS CON FECHAS: llená seasons_detail con el nombre y las fechas " +
-  "de CADA temporada (obligatorio, no lo dejes vacío). OJO: dos tablas de " +
-  "tarifas lado a lado con rangos de fecha distintos (ej. 'Alta: Nov-Abr' y " +
-  "'Baja: May-Oct') son DOS temporadas — capturá ambas. Cuidado también con " +
-  "rangos partidos.\n" +
+  "de CADA temporada (obligatorio, no lo dejes vacío). Si una misma temporada " +
+  "(ej. Alta, Green) tiene VARIOS tramos no contiguos en el calendario, " +
+  "registrá UNA entrada en seasons_detail POR CADA tramo (mismo name, fechas " +
+  "distintas). OJO: dos tablas de tarifas lado a lado con rangos de fecha " +
+  "distintos (ej. 'Alta: Nov-Abr' y 'Baja: May-Oct') son DOS temporadas — " +
+  "capturá ambas. Cuidado también con rangos partidos.\n" +
   "  7. INVENTARIO: lista de categorías/habitaciones, temporadas y secciones " +
   "de tarifas (paquetes, noche adicional, experiencias, transfers, spa, " +
   "amenidades…), y un estimado de cuántas filas debería tener el contrato " +

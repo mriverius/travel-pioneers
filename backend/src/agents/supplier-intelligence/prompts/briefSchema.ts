@@ -241,16 +241,18 @@ export const REGISTRAR_BRIEF_CONTRATO_TOOL: Tool = {
       seasons_detail: {
         type: "array",
         description:
-          "OBLIGATORIO: una entrada por CADA temporada del contrato, con sus " +
-          "fechas. Debe contener EXACTAMENTE las mismas temporadas que el " +
-          "array `seasons` (no dejes este vacío si `seasons` tiene nombres). " +
-          "MUY IMPORTANTE — detección de temporadas: dos tablas de tarifas " +
-          "puestas LADO A LADO, cada una con su propio rango de fechas y su " +
-          "nombre (ej. 'Temporada Alta: 01 Nov 2025 - 30 Abr 2026' a la " +
-          "izquierda y 'Temporada Baja: 1 May - 31 Oct 2026' a la derecha) " +
-          "son DOS temporadas distintas — capturá las dos. No las colapses en " +
-          "una sola. CRÍTICO con rangos partidos (ej. 'Wildlife: May 1-Jun 19 " +
-          "y Aug 21-Oct 31'): poné el PRIMER tramo en starts/ends y el texto " +
+          "OBLIGATORIO: una entrada por CADA temporada o tramo de fechas del " +
+          "contrato. Debe cubrir todas las temporadas del array `seasons`. " +
+          "Si una misma temporada (ej. Alta, Green) tiene VARIOS tramos " +
+          "calendario no contiguos, registrá UNA entrada por tramo con el " +
+          "mismo `name` y fechas distintas (ej. Alta 1-dic–17-dic, Alta " +
+          "6-ene–30-abr). MUY IMPORTANTE — detección de temporadas: dos tablas " +
+          "de tarifas puestas LADO A LADO, cada una con su propio rango de " +
+          "fechas y su nombre (ej. 'Temporada Alta: 01 Nov 2025 - 30 Abr 2026' " +
+          "a la izquierda y 'Temporada Baja: 1 May - 31 Oct 2026' a la " +
+          "derecha) son DOS temporadas distintas — capturá las dos. No las " +
+          "colapses en una sola. Para rangos partidos de UNA temporada, " +
+          "preferí varias entradas con el mismo name; opcionalmente el texto " +
           "completo en raw_range. Normalizá a YYYY-MM-DD inferiendo el año.",
         items: {
           type: "object",

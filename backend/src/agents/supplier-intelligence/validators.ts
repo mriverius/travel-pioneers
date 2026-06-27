@@ -11,8 +11,11 @@ import {
 } from "./generated/serviceTypesData.js";
 import {
   detectOccupancyPolicy,
+  expandChildOccupancyRows,
+  expandSeasonPeriods,
   normalizeCatalogFields,
   removeForbiddenOccupancyRows,
+  stripDisallowedAdultOccupancies,
   syncSeasonDatesFromBrief,
   validateExpectedOccupancies,
 } from "./catalogRules.js";
@@ -854,12 +857,15 @@ export function validateExtraction(
     occupancyPolicy,
     warnings,
   );
+  extraction = stripDisallowedAdultOccupancies(extraction, warnings);
 
   // Catálogo Utopía: categoría (Suite→SUI), tipo unidad S para paquetes, etc.
   extraction = normalizeCatalogFields(extraction, brief, warnings);
 
   if (brief) {
     extraction = syncSeasonDatesFromBrief(extraction, brief, warnings);
+    extraction = expandSeasonPeriods(extraction, brief, warnings);
+    extraction = expandChildOccupancyRows(extraction, brief, warnings);
   }
 
   // Guardrail amenidades de comida/bebida → AL. La IA tiende a clasificar

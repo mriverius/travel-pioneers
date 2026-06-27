@@ -1,8 +1,10 @@
 import type {
   ContractBrief,
+  ContractBriefAdditionalPerson,
   ContractRow,
   ExtractedContract,
   ProductOccupancySpec,
+  SourcePage,
 } from "./types.js";
 
 /**
@@ -64,6 +66,7 @@ export function productBaseName(productName: string | null): string {
 export function inferCategoriaHospedaje(productName: string | null): string {
   const n = productBaseName(productName).toLowerCase();
   if (!n.trim()) return "STD";
+  if (/\bconnecting\b/.test(n)) return "STD";
   if (/\bvilla\b/.test(n)) return "VIL";
   if (/\bmaster suite\b/.test(n)) return "MAS";
   if (/\bpenthouse\b/.test(n)) return "PNT";
@@ -267,7 +270,13 @@ export function resolveExpectedOccupancyCodesForProduct(
     codes = inferOccupancyCodesFromProductName(productName, brief, policy);
   }
   const effectivePolicy = policy ?? detectOccupancyPolicy(brief, undefined);
-  return filterOccupancyCodesByPolicy(codes, effectivePolicy);
+  let filtered = filterOccupancyCodesByPolicy(codes, effectivePolicy);
+  if (!productAllowsAdditionalPerson(productName)) {
+    filtered = filtered.filter(
+      (c) => c !== "TPL" && c !== "QDP" && c !== "QTN",
+    );
+  }
+  return filtered;
 }
 
 function effectiveTipoServicio(
@@ -312,7 +321,17 @@ export function normalizeCatalogFields(
   rows = rows.map((row) => {
     let next = row;
     if (isHospedajeRow(row, sharedTipo)) {
-      const inferredCat = inferCategoriaHospedaje(row.product_name);
+      let inferredCat = inferCategoriaHospedaje(row.product_name);
+      let occ = (row.ocupacion ?? "").trim().toUpperCase();
+      if (/\bconnecting\b/i.test(row.product_name ?? "")) {
+        if (occ === "FAM" || occ === "") {
+          next = { ...next, ocupacion: "DBL" };
+          occ = "DBL";
+        }
+        if ((next.categoria ?? "").toUpperCase() === "FAM") {
+          inferredCat = "STD";
+        }
+      }
       if (row.categoria !== inferredCat) {
         next = { ...next, categoria: inferredCat };
         catFixed += 1;
@@ -571,6 +590,253 @@ export function syncSeasonDatesFromBrief(
   }
 
   return { ...extraction, rows };
+}
+
+/** Habitaciones sin persona adicional (Belmar, Forest, etc.). */
+export function productAllowsAdditionalPerson(
+  productName: string | null | undefined,
+): boolean {
+  const n = productBaseName(productName ?? "").toLowerCase();
+  if (!n) return true;
+  if (/\bpen[ií]nsula superior\b/.test(n)) return false;
+  if (n === "belmar" || n === "forest") return false;
+  if (/\bsunrise\b/.test(n)) return false;
+  return true;
+}
+
+export function productAllowsChildOccupancy(
+  _productName: string | null | undefined,
+): boolean {
+  return true;
+}
+
+function parseMoneyValue(v: string | null | undefined): number | null {
+  if (v == null || v === "") return null;
+  const n = parseFloat(String(v).replace(/[^\d.-]/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+
+function findChildAdditionalRule(
+  brief: ContractBrief,
+): ContractBriefAdditionalPerson | null {
+  for (const ap of brief.additional_person) {
+    const t = `${ap.scope ?? ""} ${ap.applies_to ?? ""}`.toLowerCase();
+    if (/niño|nino|child|chl|menor/.test(t)) return ap;
+  }
+  const haystack = contractTextHaystack(brief, undefined);
+  if (/niño\s*\$?\s*40|child.*\$?\s*40|\$40.*niño/.test(haystack)) {
+    return { scope: "Niño", applies_to: null, rack: "45.2", net: "40" };
+  }
+  return null;
+}
+
+function childRowKey(row: ContractRow): string {
+  return [
+    (row.product_name ?? "").trim().toLowerCase(),
+    normalizeSeasonKey(row.season_name ?? ""),
+    row.season_starts ?? "",
+    row.season_ends ?? "",
+  ].join("__");
+}
+
+/** Genera filas CHL desde tarifa niño del brief ($40 + imp, sin comisión). */
+export function expandChildOccupancyRows(
+  extraction: ExtractedContract,
+  brief: ContractBrief | null | undefined,
+  warnings: string[],
+): ExtractedContract {
+  if (!brief) return extraction;
+  const childRule = findChildAdditionalRule(brief);
+  if (!childRule) return extraction;
+
+  const rackRaw = childRule.rack ?? childRule.net;
+  const netRaw = childRule.net ?? childRule.rack;
+  const rackNum = parseMoneyValue(rackRaw);
+  const netNum = parseMoneyValue(netRaw);
+  if (rackNum === null && netNum === null) return extraction;
+
+  const rack =
+    rackNum !== null
+      ? String(rackNum)
+      : netNum !== null && brief.prices_include_tax !== false
+        ? String(Math.round(netNum * 1.13 * 100) / 100)
+        : netRaw;
+  const net =
+    netNum !== null
+      ? String(netNum)
+      : rackNum !== null
+        ? String(rackNum)
+        : rack;
+
+  const existingChl = new Set(
+    extraction.rows
+      .filter((r) => normalizeOccupancyCode(r.ocupacion ?? "") === "CHL")
+      .map(childRowKey),
+  );
+
+  const templateByKey = new Map<string, ContractRow>();
+  for (const row of extraction.rows) {
+    const occ = normalizeOccupancyCode(row.ocupacion ?? "");
+    if (occ !== "DBL" && occ !== "TPL") continue;
+    if (!productAllowsChildOccupancy(row.product_name)) continue;
+    const key = childRowKey(row);
+    if (!templateByKey.has(key)) templateByKey.set(key, row);
+  }
+
+  const newRows = [...extraction.rows];
+  const newPages = [...extraction.paginas_origen_rows];
+  let added = 0;
+
+  for (const [key, template] of templateByKey) {
+    if (existingChl.has(key)) continue;
+    newRows.push({
+      ...template,
+      ocupacion: "CHL",
+      precios_neto_iva: net,
+      precio_rack_iva: rack,
+      precios_neto_iva_fds: net,
+      precio_rack_iva_fds: rack,
+      porcentaje_comision: "0",
+      porcentaje_comision_fds: "0",
+      tarifa_persona_adicional: null,
+    });
+    newPages.push({});
+    added += 1;
+  }
+
+  if (added > 0) {
+    warnings.push(
+      `Se generaron ${added} fila(s) CHL (niño) desde la tarifa adicional del ` +
+        "brief — comisión 0% según contrato.",
+    );
+  }
+
+  return {
+    ...extraction,
+    rows: newRows,
+    paginas_origen_rows:
+      newPages.length === newRows.length
+        ? newPages
+        : extraction.paginas_origen_rows,
+  };
+}
+
+/** Elimina TPL/QDP/QTN en productos que no admiten persona adicional. */
+export function stripDisallowedAdultOccupancies(
+  extraction: ExtractedContract,
+  warnings: string[],
+): ExtractedContract {
+  let removed = 0;
+  const rows: ContractRow[] = [];
+  const pages: Record<string, SourcePage>[] = [];
+
+  extraction.rows.forEach((row, i) => {
+    const occ = normalizeOccupancyCode(row.ocupacion ?? "");
+    if (
+      !productAllowsAdditionalPerson(row.product_name) &&
+      (occ === "TPL" || occ === "QDP" || occ === "QTN")
+    ) {
+      removed += 1;
+      return;
+    }
+    rows.push(row);
+    pages.push(extraction.paginas_origen_rows[i] ?? {});
+  });
+
+  if (removed > 0) {
+    warnings.push(
+      `Se eliminaron ${removed} fila(s) TPL/QDP/QTN en categorías que no ` +
+        "admiten persona adicional (Belmar, Forest, Peninsula Superior, Sunrise).",
+    );
+  }
+
+  return {
+    ...extraction,
+    rows,
+    paginas_origen_rows: pages.length > 0 ? pages : extraction.paginas_origen_rows,
+  };
+}
+
+/** Agrupa tramos de fechas por nombre de temporada (Alta/Green con varios rangos). */
+export function collectSeasonPeriods(
+  brief: ContractBrief,
+): Map<string, Array<{ starts: string; ends: string }>> {
+  const map = new Map<string, Array<{ starts: string; ends: string }>>();
+  for (const sd of brief.seasons_detail) {
+    const key = normalizeSeasonKey(sd.name ?? "");
+    if (!key || !sd.starts || !sd.ends) continue;
+    if (!map.has(key)) map.set(key, []);
+    const list = map.get(key)!;
+    if (!list.some((p) => p.starts === sd.starts && p.ends === sd.ends)) {
+      list.push({ starts: sd.starts, ends: sd.ends });
+    }
+  }
+  return map;
+}
+
+/** Duplica filas por cada tramo de temporada confirmado en el brief. */
+export function expandSeasonPeriods(
+  extraction: ExtractedContract,
+  brief: ContractBrief | null | undefined,
+  warnings: string[],
+): ExtractedContract {
+  if (!brief?.seasons_detail?.length) return extraction;
+
+  const periodMap = collectSeasonPeriods(brief);
+  if ([...periodMap.values()].every((p) => p.length <= 1)) return extraction;
+
+  const newRows: ContractRow[] = [];
+  const newPages: Record<string, SourcePage>[] = [];
+  const emitted = new Set<string>();
+  let expandedGroups = 0;
+
+  extraction.rows.forEach((row, i) => {
+    const product = (row.product_name ?? "").trim();
+    const seasonKey = normalizeSeasonKey(row.season_name ?? "");
+    const occ = normalizeOccupancyCode(row.ocupacion ?? "");
+    const page = extraction.paginas_origen_rows[i] ?? {};
+
+    if (!product || !seasonKey) {
+      newRows.push(row);
+      newPages.push(page);
+      return;
+    }
+
+    const groupKey = `${product.toLowerCase()}__${seasonKey}__${occ}`;
+    const periods = periodMap.get(seasonKey);
+
+    if (!periods || periods.length <= 1) {
+      newRows.push(row);
+      newPages.push(page);
+      return;
+    }
+
+    if (emitted.has(groupKey)) return;
+
+    emitted.add(groupKey);
+    expandedGroups += 1;
+    for (const p of periods) {
+      newRows.push({
+        ...row,
+        season_starts: p.starts,
+        season_ends: p.ends,
+      });
+      newPages.push(page);
+    }
+  });
+
+  if (expandedGroups > 0) {
+    warnings.push(
+      `Se expandieron ${expandedGroups} grupo(s) producto×temporada en múltiples ` +
+        "tramos de fechas según seasons_detail del brief.",
+    );
+  }
+
+  return {
+    ...extraction,
+    rows: newRows,
+    paginas_origen_rows: newPages,
+  };
 }
 
 /** Completa occupancies_by_product desde categorías si el brief no lo trae. */
