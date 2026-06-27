@@ -165,11 +165,15 @@ export function resolveExpectedOccupancyCodes(brief: ContractBrief): string[] {
 export function inferOccupancyCodesFromProductName(
   productName: string,
   brief: ContractBrief | null,
+  policy?: OccupancyPolicy,
 ): string[] {
   const tier = inferProductOccupancyTier(productName);
-  if (tier !== "unknown") return [...TIER_OCCUPANCY_CODES[tier]];
-  if (brief) return resolveExpectedOccupancyCodes(brief);
-  return ["SGL", "DBL"];
+  let codes: string[];
+  if (tier !== "unknown") codes = [...TIER_OCCUPANCY_CODES[tier]];
+  else if (brief) codes = resolveExpectedOccupancyCodes(brief);
+  else codes = ["SGL", "DBL"];
+  const effectivePolicy = policy ?? detectOccupancyPolicy(brief, undefined);
+  return filterOccupancyCodesByPolicy(codes, effectivePolicy);
 }
 
 function productNamesMatch(specProduct: string, rowProduct: string): boolean {
@@ -253,12 +257,17 @@ export function resolveExpectedOccupancyCodesForProduct(
   productName: string,
   brief: ContractBrief,
   specs: ProductOccupancySpec[],
+  policy?: OccupancyPolicy,
 ): string[] {
   const matched = findBestProductOccupancySpec(productName, specs);
+  let codes: string[];
   if (matched && matched.occupancy_codes.length > 0) {
-    return matched.occupancy_codes;
+    codes = matched.occupancy_codes;
+  } else {
+    codes = inferOccupancyCodesFromProductName(productName, brief, policy);
   }
-  return inferOccupancyCodesFromProductName(productName, brief);
+  const effectivePolicy = policy ?? detectOccupancyPolicy(brief, undefined);
+  return filterOccupancyCodesByPolicy(codes, effectivePolicy);
 }
 
 function effectiveTipoServicio(
@@ -343,6 +352,8 @@ export function validateExpectedOccupancies(
   const specs = collectProductOccupancySpecs(brief, extraction);
   if (specs.length === 0) return;
 
+  const policy = detectOccupancyPolicy(brief, extraction);
+
   const groups = new Map<string, Set<string>>();
   for (const row of extraction.rows) {
     const product = (row.product_name ?? "").trim();
@@ -361,6 +372,7 @@ export function validateExpectedOccupancies(
       product,
       brief,
       specs,
+      policy,
     );
     if (expected.length === 0) continue;
 
@@ -381,15 +393,213 @@ export function validateExpectedOccupancies(
   }
 }
 
+/** Política de ocupación inferida del contrato. */
+export interface OccupancyPolicy {
+  quadrupleAllowed: boolean;
+  quintupleAllowed: boolean;
+}
+
+function normalizeSeasonKey(name: string): string {
+  return name.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function contractTextHaystack(
+  brief: ContractBrief | null | undefined,
+  extraction?: ExtractedContract,
+): string {
+  const parts: string[] = [];
+  if (brief) {
+    for (const p of [
+      brief.notes,
+      brief.logic_summary,
+      brief.meal_plan_note,
+      brief.commission_summary,
+      ...brief.sections,
+      ...brief.product_categories,
+    ]) {
+      if (p && p.trim()) parts.push(p);
+    }
+  }
+  if (extraction) {
+    if (extraction.shared_fields.notes) parts.push(extraction.shared_fields.notes);
+    for (const row of extraction.rows) {
+      if (row.kids_policy) parts.push(row.kids_policy);
+      if (row.other_included) parts.push(row.other_included);
+      if (row.feeds_adicionales) parts.push(row.feeds_adicionales);
+    }
+  }
+  return parts.filter((p): p is string => !!p && p.trim() !== "").join(" ").toLowerCase();
+}
+
+/** Detecta si el contrato prohíbe cuádruple/quíntuple (ej. Belmar: max 2 adultos). */
+export function detectOccupancyPolicy(
+  brief: ContractBrief | null | undefined,
+  extraction?: ExtractedContract,
+): OccupancyPolicy {
+  if (brief?.quadruple_allowed === false) {
+    return { quadrupleAllowed: false, quintupleAllowed: false };
+  }
+  if (
+    brief?.max_adults_per_room != null &&
+    brief.max_adults_per_room <= 3
+  ) {
+    return { quadrupleAllowed: false, quintupleAllowed: false };
+  }
+
+  const haystack = contractTextHaystack(brief, extraction);
+  const prohibitsQuad =
+    /no se admiten?\s*4\s*adultos/.test(haystack) ||
+    /no\s*(se\s*)?(permit|admit)[a-z\s]*cu[aá]druple/.test(haystack) ||
+    /cu[aá]druple\s*no\s*(se\s*)?(permit|aplica)/.test(haystack) ||
+    (/ocupaci[oó]n\s+base\s*2\s*personas/.test(haystack) &&
+      /no.*4\s*adultos/.test(haystack)) ||
+    /m[aá]ximo\s*2\s*(adultos?|personas?|hu[eé]spedes?)/.test(haystack) ||
+    /maximum\s*occupancy\s*(of\s*)?2/.test(haystack);
+
+  if (prohibitsQuad) {
+    return { quadrupleAllowed: false, quintupleAllowed: false };
+  }
+
+  return { quadrupleAllowed: true, quintupleAllowed: true };
+}
+
+export function filterOccupancyCodesByPolicy(
+  codes: string[],
+  policy: OccupancyPolicy,
+): string[] {
+  return codes.filter((c) => {
+    if (c === "QDP" && !policy.quadrupleAllowed) return false;
+    if (c === "QTN" && !policy.quintupleAllowed) return false;
+    return true;
+  });
+}
+
+/** Extrae días de prepago/crédito desde range_payment_policy (ej. "45 días"). */
+export function derivePlazoDaysFromPaymentPolicy(
+  text: string | null | undefined,
+): string | null {
+  const raw = (text ?? "").trim();
+  if (!raw) return null;
+  const match = raw.match(/(\d{1,3})\s*d[ií]as?/i);
+  return match?.[1] ?? null;
+}
+
+/** Elimina filas QDP/QTN cuando el contrato no las permite. */
+export function removeForbiddenOccupancyRows(
+  extraction: ExtractedContract,
+  policy: OccupancyPolicy,
+  warnings: string[],
+): ExtractedContract {
+  if (policy.quadrupleAllowed && policy.quintupleAllowed) return extraction;
+
+  const forbidden = new Set<string>();
+  if (!policy.quadrupleAllowed) forbidden.add("QDP");
+  if (!policy.quintupleAllowed) forbidden.add("QTN");
+
+  let removed = 0;
+  const rows: ContractRow[] = [];
+  const pages: Record<string, import("./types.js").SourcePage>[] = [];
+  extraction.rows.forEach((row, i) => {
+    const occ = normalizeOccupancyCode(row.ocupacion ?? "");
+    if (forbidden.has(occ)) {
+      removed += 1;
+      return;
+    }
+    rows.push(row);
+    pages.push(extraction.paginas_origen_rows[i] ?? {});
+  });
+
+  if (removed > 0) {
+    warnings.push(
+      `Se eliminaron ${removed} fila(s) ${[...forbidden].join("/")} — el contrato ` +
+        "no admite cuádruple/quíntuple en ninguna categoría.",
+    );
+  }
+
+  return {
+    ...extraction,
+    rows,
+    paginas_origen_rows: pages.length > 0 ? pages : extraction.paginas_origen_rows,
+  };
+}
+
+/** Alinea season_starts/season_ends de cada fila con seasons_detail del brief. */
+export function syncSeasonDatesFromBrief(
+  extraction: ExtractedContract,
+  brief: ContractBrief | null | undefined,
+  warnings: string[],
+): ExtractedContract {
+  if (!brief?.seasons_detail?.length) return extraction;
+
+  const bySeason = new Map<
+    string,
+    { starts: string | null; ends: string | null }
+  >();
+  for (const sd of brief.seasons_detail) {
+    const name = (sd.name ?? "").trim();
+    if (!name) continue;
+    bySeason.set(normalizeSeasonKey(name), {
+      starts: sd.starts,
+      ends: sd.ends,
+    });
+  }
+  if (bySeason.size === 0) return extraction;
+
+  let adjusted = 0;
+  const rows = extraction.rows.map((row) => {
+    const seasonName = (row.season_name ?? "").trim();
+    if (!seasonName) return row;
+    const detail = bySeason.get(normalizeSeasonKey(seasonName));
+    if (!detail) return row;
+
+    let next = row;
+    if (detail.starts && row.season_starts !== detail.starts) {
+      next = { ...next, season_starts: detail.starts };
+      adjusted += 1;
+    }
+    if (detail.ends && row.season_ends !== detail.ends) {
+      next = { ...next, season_ends: detail.ends };
+      adjusted += 1;
+    }
+    return next;
+  });
+
+  if (adjusted > 0) {
+    warnings.push(
+      `Se sincronizaron ${adjusted} fecha(s) de temporada según el brief confirmado.`,
+    );
+  }
+
+  return { ...extraction, rows };
+}
+
 /** Completa occupancies_by_product desde categorías si el brief no lo trae. */
 export function enrichBriefOccupancies(brief: ContractBrief): ContractBrief {
-  if ((brief.occupancies_by_product ?? []).length > 0) return brief;
+  const policy = detectOccupancyPolicy(brief, undefined);
+  if ((brief.occupancies_by_product ?? []).length > 0) {
+    return {
+      ...brief,
+      occupancies_by_product: brief.occupancies_by_product.map((spec) => ({
+        ...spec,
+        occupancy_codes: filterOccupancyCodesByPolicy(
+          spec.occupancy_codes,
+          policy,
+        ),
+      })),
+    };
+  }
   if (brief.product_categories.length === 0) return brief;
   return {
     ...brief,
     occupancies_by_product: buildOccupanciesByProductFromCategories(
       brief.product_categories,
       brief,
-    ),
+    ).map((spec) => ({
+      ...spec,
+      occupancy_codes: filterOccupancyCodesByPolicy(
+        spec.occupancy_codes,
+        policy,
+      ),
+    })),
   };
 }

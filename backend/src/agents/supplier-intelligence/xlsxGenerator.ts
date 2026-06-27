@@ -5,6 +5,7 @@ import * as XLSX from "xlsx";
 import type { WorkBook, WorkSheet } from "xlsx";
 import type { ContractRow, ManualFields, SharedFields, TipoUnidad } from "./types.js";
 import { isFoodBeverageProduct, normalizeCurrency } from "./validators.js";
+import { derivePlazoDaysFromPaymentPolicy } from "./catalogRules.js";
 import {
   CATALOG_PREFILL_COL,
   DATE_ROW_FIELDS,
@@ -555,8 +556,21 @@ export function generateContractXlsx(
       ]);
       for (const [key, col] of Object.entries(MANUAL_COL)) {
         if (tipoTarifaCols.has(col)) continue;
+        if (key === "plazo") continue;
         const value = input.manual_fields[key as keyof ManualFields];
         writeCell(dataSheet, col, xlsxRow, value == null ? null : String(value));
+      }
+      const plazoCol = MANUAL_COL.plazo;
+      if (plazoCol) {
+        const plazoRow = derivePlazoDaysFromPaymentPolicy(
+          row.range_payment_policy,
+        );
+        writeCell(
+          dataSheet,
+          plazoCol,
+          xlsxRow,
+          plazoRow ?? input.manual_fields?.plazo ?? null,
+        );
       }
     }
 

@@ -896,6 +896,8 @@ export interface ContractConfigVariables {
     product: string;
     occupancy_codes: string[];
   }>;
+  max_adults_per_room?: number | null;
+  quadruple_allowed?: boolean | null;
 }
 
 export interface AnalyzeBriefMeta {

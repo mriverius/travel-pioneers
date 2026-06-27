@@ -91,6 +91,12 @@ Algunos tarifarios publican columnas diferentes según el tipo de habitación:
 Respetá SOLO las columnas que ESA habitación muestra en el PDF. El CONTRACT BRIEF
 lista las ocupaciones por producto — seguilo al pie de la letra.
 
+REGLA — PROHIBICIÓN GLOBAL DE CUÁDRUPLE (hoteles tipo Belmar):
+Si el contrato dice "ocupación base 2 personas", "máximo 2 adultos" o
+"No se admiten 4 adultos en ninguna categoría", NO generes filas QDP ni QTN
+en NINGUNA habitación — aunque exista tarifa por persona adicional para triple.
+Solo TPL (triple) si el contrato publica precio triple explícito.
+
 VERIFICACIÓN ANTES DE GENERAR EL EXCEL:
   1) ¿El contrato tiene columnas Triple/Quadruple/Quintuple con precios? → ¿generé TPL/QDP/QTN?
   2) ¿El contrato menciona tarifas de niño? → ¿generé filas CHL?
@@ -521,7 +527,9 @@ REGLAS POR CAMPO (rows[])
     varían, copiar el mismo valor en todas las filas (la UI lo colapsa).
     - range_payment_policy describe las CONDICIONES de pago (plazos,
       depósitos, anticipos, penalidades), NO los medios de pago
-      (transferencia, tarjeta, etc.).
+      (transferencia, tarjeta, etc.). Incluí el número de días explícito
+      (ej. "Pago 45 días antes de la llegada") — varía por temporada y
+      alimenta la columna PLAZO del xlsx.
 
 ═══════════════════════════════════════════════════════════════════════════
 FORMATO DE FECHAS — OBLIGATORIO YYYY-MM-DD (Bug #3 — guardrail server-side)

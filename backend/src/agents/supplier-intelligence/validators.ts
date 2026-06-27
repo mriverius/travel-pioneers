@@ -10,7 +10,10 @@ import {
   CATEGORIAS_BY_TIPO_SERVICIO,
 } from "./generated/serviceTypesData.js";
 import {
+  detectOccupancyPolicy,
   normalizeCatalogFields,
+  removeForbiddenOccupancyRows,
+  syncSeasonDatesFromBrief,
   validateExpectedOccupancies,
 } from "./catalogRules.js";
 
@@ -568,7 +571,9 @@ const DOUBLE_OCCUPANCIES = new Set(["DBL", "DOBLE"]);
 function expandOccupancy(
   extraction: ExtractedContract,
   warnings: string[],
+  options?: { allowQuadruple?: boolean },
 ): ExtractedContract {
+  const allowQuadruple = options?.allowQuadruple !== false;
   // PASO 1 — elegir UNA sola fila ancla por grupo product × season desde la
   // que se expande a TPL/QDP. Antes expandíamos por CADA fila base (SGL y
   // DBL), lo que duplicaba TPL/QDP. La ancla correcta es la DOBLE (triple =
@@ -618,7 +623,9 @@ function expandOccupancy(
     const addl = parseAmount(row.tarifa_persona_adicional);
     if (addl === null || addl <= 0) return;
 
-    for (const target of ["TPL", "QDP"] as const) {
+    for (const target of (allowQuadruple
+      ? (["TPL", "QDP"] as const)
+      : (["TPL"] as const))) {
       newRows.push(buildOccupancyRow(row, target, addl));
       newPages.push({ ...pages, ocupacion: "calculado" });
       expanded += 1;
@@ -627,11 +634,12 @@ function expandOccupancy(
 
   if (expanded === 0) return extraction;
 
+  const occLabel = allowQuadruple ? "triple (TPL) y cuádruple (QDP)" : "triple (TPL)";
   warnings.push(
-    `Se generaron ${expanded} fila(s) de ocupación triple (TPL) y ` +
-      `cuádruple (QDP) calculadas a partir de la tarifa por persona ` +
-      `adicional (base doble + 1× para TPL, + 2× para QDP), una sola vez ` +
-      `por producto × temporada. Revisá los montos en Step 2.`,
+    `Se generaron ${expanded} fila(s) de ocupación ${occLabel} calculadas ` +
+      `a partir de la tarifa por persona adicional (base doble + 1× para TPL` +
+      (allowQuadruple ? ", + 2× para QDP" : "") +
+      `), una sola vez por producto × temporada. Revisá los montos en Step 2.`,
   );
 
   return { ...extraction, rows: newRows, paginas_origen_rows: newPages };
@@ -835,14 +843,24 @@ export function validateExtraction(
     }
   }
 
-  // Expansión de ocupación: materializa filas TPL/QDP desde la tarifa por
-  // persona adicional ANTES del resto de las validaciones, para que las
-  // filas derivadas también pasen por las verificaciones de categoría,
-  // precio, duplicados, etc.
-  extraction = expandOccupancy(extraction, warnings);
+  // Expansión de ocupación: materializa filas TPL (y QDP si aplica) desde la
+  // tarifa por persona adicional ANTES del resto de las validaciones.
+  const occupancyPolicy = detectOccupancyPolicy(brief ?? null, extraction);
+  extraction = expandOccupancy(extraction, warnings, {
+    allowQuadruple: occupancyPolicy.quadrupleAllowed,
+  });
+  extraction = removeForbiddenOccupancyRows(
+    extraction,
+    occupancyPolicy,
+    warnings,
+  );
 
   // Catálogo Utopía: categoría (Suite→SUI), tipo unidad S para paquetes, etc.
   extraction = normalizeCatalogFields(extraction, brief, warnings);
+
+  if (brief) {
+    extraction = syncSeasonDatesFromBrief(extraction, brief, warnings);
+  }
 
   // Guardrail amenidades de comida/bebida → AL. La IA tiende a clasificar
   // vino, champagne, frutas, chocolate, etc. como "OT" (otro). El usuario

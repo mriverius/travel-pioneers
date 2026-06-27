@@ -1043,6 +1043,13 @@ export function coerceBrief(input: unknown): ContractBrief {
       r.tipo_unidad === "N" || r.tipo_unidad === "S" ? r.tipo_unidad : null,
     occupancy_codes: stringArray(r.occupancy_codes).map((c) => c.toUpperCase()),
     occupancies_by_product: coerceOccupanciesByProduct(r.occupancies_by_product),
+    max_adults_per_room: numberOrNull(r.max_adults_per_room),
+    quadruple_allowed:
+      r.quadruple_allowed === false
+        ? false
+        : r.quadruple_allowed === true
+          ? true
+          : null,
   };
   const logicSummary =
     stringOrNull(r.logic_summary) ?? buildLogicSummaryFallback(base);

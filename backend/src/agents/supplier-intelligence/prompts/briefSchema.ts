@@ -342,6 +342,18 @@ export const REGISTRAR_BRIEF_CONTRATO_TOOL: Tool = {
           "(ej. Pacuare: suites sin cuádruple, villas con cuádruple, Jaguar con quíntuple). " +
           "Una entrada por categoría detectada.",
       },
+      max_adults_per_room: {
+        type: ["number", "null"],
+        description:
+          "Máximo de adultos por habitación si el contrato lo limita (ej. 2). " +
+          "Si es 2 o 3, NO generes cuádruple (QDP) en ninguna categoría.",
+      },
+      quadruple_allowed: {
+        type: ["boolean", "null"],
+        description:
+          "false si el contrato prohíbe cuádruple en TODAS las habitaciones " +
+          '(ej. "No se admiten 4 adultos en ninguna categoría"). true/null si aplica.',
+      },
       logic_summary: {
         type: ["string", "null"],
         description:

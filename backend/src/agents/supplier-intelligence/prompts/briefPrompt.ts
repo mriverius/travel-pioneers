@@ -24,7 +24,9 @@ export const LOGIC_SUMMARY_FORMAT =
   "Lista de categorías detectadas, ocupación máxima y ocupaciones POR CATEGORÍA. " +
   "Si la tabla tiene columnas distintas por habitación (ej. suites SGL+DBL+TPL+Niño; " +
   "villas +Cuádruple; Jaguar +Quíntuple), llená `occupancies_by_product` — NO asumas " +
-  "que QDP/QTN aplican a todas. `occupancy_codes` es solo la unión global de referencia.\n\n" +
+  "que QDP/QTN aplican a todas. `occupancy_codes` es solo la unión global de referencia.\n" +
+  "Si el contrato limita a 2 adultos por habitación o prohíbe cuádruple, llená " +
+  "`max_adults_per_room: 2` y `quadruple_allowed: false`.\n\n" +
   "**Tipo de tarifa (tipo_unidad)**\n" +
   "N = por noche (hotel estándar). S = por servicio/paquete (Full Experience, all-inclusive, " +
   "paquete 2N/3D — el precio es el total del paquete, NO una noche). Lodges tipo Pacuare " +
@@ -196,6 +198,8 @@ export function renderContractBriefBlock(brief: {
     product: string;
     occupancy_codes: string[];
   }>;
+  max_adults_per_room?: number | null;
+  quadruple_allowed?: boolean | null;
 }): string {
   const lines: string[] = [];
   lines.push(
@@ -379,6 +383,32 @@ export function renderContractBriefBlock(brief: {
         "Si el PDF publica columnas distintas por habitación, respetá eso " +
         "(suites ≠ villas).",
     );
+  }
+
+  if (
+    brief.quadruple_allowed === false ||
+    (brief.max_adults_per_room != null && brief.max_adults_per_room <= 3)
+  ) {
+    lines.push(
+      "• CUÁDRUPLE PROHIBIDA — NO generes filas QDP ni QTN en ninguna " +
+        "categoría. TPL (triple) solo si el contrato publica precio triple.",
+    );
+  }
+
+  if (brief.seasons_detail && brief.seasons_detail.length > 0) {
+    const seasonLines = brief.seasons_detail
+      .filter((s) => s.name)
+      .map(
+        (s) =>
+          `${s.name}: ${s.starts ?? "?"} → ${s.ends ?? "?"}` +
+          (s.raw_range ? ` (${s.raw_range})` : ""),
+      );
+    if (seasonLines.length > 0) {
+      lines.push(
+        "• FECHAS DE TEMPORADA (usar en season_starts/season_ends de cada fila):",
+      );
+      for (const sl of seasonLines) lines.push(`  – ${sl}`);
+    }
   }
 
   if (brief.expected_row_estimate && brief.expected_row_estimate > 0) {

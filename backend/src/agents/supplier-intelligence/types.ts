@@ -369,6 +369,10 @@ export interface ContractBrief {
    * (ej. suites SGL+DBL+TPL+CHL; villas +QDP; Jaguar Villa +QTN).
    */
   occupancies_by_product: ProductOccupancySpec[];
+  /** Máximo adultos por habitación si el contrato lo limita (ej. 2 → sin QDP). */
+  max_adults_per_room: number | null;
+  /** false cuando el contrato prohíbe cuádruple en todas las categorías. */
+  quadruple_allowed: boolean | null;
 }
 
 /** Mensaje del chat de refinamiento del brief (Paso 2). */
