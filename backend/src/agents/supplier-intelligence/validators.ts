@@ -10,11 +10,12 @@ import {
   CATEGORIAS_BY_TIPO_SERVICIO,
 } from "./generated/serviceTypesData.js";
 import {
+  consolidateSeasonPeriodRows,
   detectOccupancyPolicy,
   expandChildOccupancyRows,
-  expandSeasonPeriods,
   normalizeCatalogFields,
   removeForbiddenOccupancyRows,
+  sortExtractedContractRows,
   stripDisallowedAdultOccupancies,
   syncSeasonDatesFromBrief,
   validateExpectedOccupancies,
@@ -309,6 +310,26 @@ export function normalizeDate(raw: unknown): NormalizedDate {
 
   // 7) Nada matcheó — perdemos la fecha pero al menos lo decimos.
   return { value: null, changed: true };
+}
+
+/** Normaliza season_starts/season_ends; admite varios rangos separados por ";". */
+export function normalizeSeasonDateField(raw: unknown): NormalizedDate {
+  if (raw === null || raw === undefined) return { value: null, changed: false };
+  if (typeof raw !== "string") return { value: null, changed: true };
+  const trimmed = raw.trim();
+  if (trimmed === "") return { value: null, changed: true };
+  if (trimmed.toUpperCase() === "NOT AVAILABLE") {
+    return { value: "NOT AVAILABLE", changed: false };
+  }
+  if (!trimmed.includes(";")) return normalizeDate(trimmed);
+
+  const parts = trimmed.split(";").map((p) => p.trim()).filter(Boolean);
+  const normalized = parts.map((p) => normalizeDate(p).value);
+  if (normalized.some((v) => v === null)) {
+    return { value: null, changed: true };
+  }
+  const joined = normalized.join("; ");
+  return { value: joined, changed: joined !== trimmed };
 }
 
 /**
@@ -822,7 +843,7 @@ export function validateExtraction(
       let next = row;
       for (const field of rowDateFields) {
         const original = row[field];
-        const { value, changed } = normalizeDate(original);
+        const { value, changed } = normalizeSeasonDateField(original);
         if (changed) {
           rowsChanged = true;
           next = { ...next, [field]: value };
@@ -864,9 +885,11 @@ export function validateExtraction(
 
   if (brief) {
     extraction = syncSeasonDatesFromBrief(extraction, brief, warnings);
-    extraction = expandSeasonPeriods(extraction, brief, warnings);
+    extraction = consolidateSeasonPeriodRows(extraction, brief, warnings);
     extraction = expandChildOccupancyRows(extraction, brief, warnings);
   }
+
+  extraction = sortExtractedContractRows(extraction);
 
   // Guardrail amenidades de comida/bebida → AL. La IA tiende a clasificar
   // vino, champagne, frutas, chocolate, etc. como "OT" (otro). El usuario

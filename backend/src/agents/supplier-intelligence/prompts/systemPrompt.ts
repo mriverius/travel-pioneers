@@ -466,8 +466,11 @@ REGLAS POR CAMPO (rows[])
     "BAJA", "GREEN SEASON", "TEMPORADA ALTA").
 
 18. "season_starts" / "season_ends": YYYY-MM-DD. Si la temporada tiene
-    rangos múltiples, usar el PRIMER rango (ej. "ALTA: 4-ene al 30-abr,
-    1-jul al 31-ago" → starts=2026-01-04, ends=2026-04-30).
+    rangos múltiples NO contiguos con la MISMA tarifa, poné UNA sola fila
+    por producto×ocupación×temporada y listá todos los tramos en estas
+    columnas separados por "; " (ej. starts="2025-12-01; 2026-01-06;
+    2026-11-15", ends="2025-12-17; 2026-04-30; 2026-11-30"). NO dupliques
+    filas solo por rangos de fecha distintos.
 
 19. "meals_included": en MAYÚSCULAS, usando los NOMBRES DE LAS COMIDAS
     incluidas. Valores válidos: 'BREAKFAST', 'LUNCH', 'DINNER', 'ALL

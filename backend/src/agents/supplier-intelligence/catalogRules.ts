@@ -774,61 +774,201 @@ export function collectSeasonPeriods(
   return map;
 }
 
-/** Duplica filas por cada tramo de temporada confirmado en el brief. */
-export function expandSeasonPeriods(
+/** Índice de orden Utopía para ocupaciones en el xlsx. */
+export const OCCUPANCY_SORT_ORDER = [
+  "SGL",
+  "DBL",
+  "TPL",
+  "QDP",
+  "QTN",
+  "CHL",
+  "DAY",
+  "UNI",
+] as const;
+
+export function occupancySortIndex(code: string | null | undefined): number {
+  const c = normalizeOccupancyCode(code ?? "");
+  const idx = (OCCUPANCY_SORT_ORDER as readonly string[]).indexOf(c);
+  return idx >= 0 ? idx : 999;
+}
+
+/** Ordena filas: producto → temporada → ocupación (SGL, DBL, TPL…). */
+export function sortContractRows(rows: ContractRow[]): ContractRow[] {
+  return [...rows].sort((a, b) => {
+    const byProduct = (a.product_name ?? "").localeCompare(
+      b.product_name ?? "",
+      "es",
+    );
+    if (byProduct !== 0) return byProduct;
+    const bySeason = (a.season_name ?? "").localeCompare(
+      b.season_name ?? "",
+      "es",
+    );
+    if (bySeason !== 0) return bySeason;
+    return (
+      occupancySortIndex(a.ocupacion) - occupancySortIndex(b.ocupacion)
+    );
+  });
+}
+
+export function sortExtractedContractRows(
+  extraction: ExtractedContract,
+): ExtractedContract {
+  const order = extraction.rows.map((_, i) => i);
+  order.sort((ai, bi) => {
+    const a = extraction.rows[ai]!;
+    const b = extraction.rows[bi]!;
+    const byProduct = (a.product_name ?? "").localeCompare(
+      b.product_name ?? "",
+      "es",
+    );
+    if (byProduct !== 0) return byProduct;
+    const bySeason = (a.season_name ?? "").localeCompare(
+      b.season_name ?? "",
+      "es",
+    );
+    if (bySeason !== 0) return bySeason;
+    return (
+      occupancySortIndex(a.ocupacion) - occupancySortIndex(b.ocupacion)
+    );
+  });
+  return {
+    ...extraction,
+    rows: order.map((i) => extraction.rows[i]!),
+    paginas_origen_rows: order.map(
+      (i) => extraction.paginas_origen_rows[i] ?? {},
+    ),
+  };
+}
+
+function splitSeasonDateParts(raw: string): string[] {
+  return raw
+    .split(";")
+    .map((p) => p.trim())
+    .filter(Boolean);
+}
+
+function formatCombinedSeasonDates(
+  periods: Array<{ starts: string; ends: string }>,
+): { starts: string; ends: string } {
+  const sorted = [...periods].sort((a, b) => a.starts.localeCompare(b.starts));
+  return {
+    starts: sorted.map((p) => p.starts).join("; "),
+    ends: sorted.map((p) => p.ends).join("; "),
+  };
+}
+
+function collectPeriodsFromRow(
+  row: ContractRow,
+): Array<{ starts: string; ends: string }> {
+  const startsRaw = (row.season_starts ?? "").trim();
+  const endsRaw = (row.season_ends ?? "").trim();
+  if (!startsRaw || !endsRaw) return [];
+
+  const startParts = splitSeasonDateParts(startsRaw);
+  const endParts = splitSeasonDateParts(endsRaw);
+  if (startParts.length > 1 && startParts.length === endParts.length) {
+    return startParts.map((starts, i) => ({
+      starts,
+      ends: endParts[i]!,
+    }));
+  }
+  return [{ starts: startsRaw, ends: endsRaw }];
+}
+
+function rowPriceSignature(row: ContractRow): string {
+  return [
+    row.precios_neto_iva ?? "",
+    row.precio_rack_iva ?? "",
+    row.porcentaje_comision ?? "",
+    row.precios_neto_iva_fds ?? "",
+    row.precio_rack_iva_fds ?? "",
+    row.porcentaje_comision_fds ?? "",
+    row.categoria ?? "",
+    row.meals_included ?? "",
+  ].join("\t");
+}
+
+function rowDedupeKey(row: ContractRow): string {
+  return [
+    (row.product_name ?? "").trim().toLowerCase(),
+    normalizeSeasonKey(row.season_name ?? ""),
+    normalizeOccupancyCode(row.ocupacion ?? ""),
+    rowPriceSignature(row),
+  ].join("||");
+}
+
+/**
+ * Una fila por producto×temporada×ocupación: rangos múltiples van en
+ * season_starts/season_ends separados por "; " (no filas duplicadas).
+ */
+export function consolidateSeasonPeriodRows(
   extraction: ExtractedContract,
   brief: ContractBrief | null | undefined,
   warnings: string[],
 ): ExtractedContract {
-  if (!brief?.seasons_detail?.length) return extraction;
+  const periodMap = brief ? collectSeasonPeriods(brief) : new Map();
 
-  const periodMap = collectSeasonPeriods(brief);
-  if ([...periodMap.values()].every((p) => p.length <= 1)) return extraction;
-
-  const newRows: ContractRow[] = [];
-  const newPages: Record<string, SourcePage>[] = [];
-  const emitted = new Set<string>();
-  let expandedGroups = 0;
+  const groups = new Map<
+    string,
+    { rows: ContractRow[]; pageIndices: number[] }
+  >();
 
   extraction.rows.forEach((row, i) => {
-    const product = (row.product_name ?? "").trim();
-    const seasonKey = normalizeSeasonKey(row.season_name ?? "");
-    const occ = normalizeOccupancyCode(row.ocupacion ?? "");
-    const page = extraction.paginas_origen_rows[i] ?? {};
-
-    if (!product || !seasonKey) {
-      newRows.push(row);
-      newPages.push(page);
-      return;
-    }
-
-    const groupKey = `${product.toLowerCase()}__${seasonKey}__${occ}`;
-    const periods = periodMap.get(seasonKey);
-
-    if (!periods || periods.length <= 1) {
-      newRows.push(row);
-      newPages.push(page);
-      return;
-    }
-
-    if (emitted.has(groupKey)) return;
-
-    emitted.add(groupKey);
-    expandedGroups += 1;
-    for (const p of periods) {
-      newRows.push({
-        ...row,
-        season_starts: p.starts,
-        season_ends: p.ends,
-      });
-      newPages.push(page);
-    }
+    const key = rowDedupeKey(row);
+    if (!groups.has(key)) groups.set(key, { rows: [], pageIndices: [] });
+    const g = groups.get(key)!;
+    g.rows.push(row);
+    g.pageIndices.push(i);
   });
 
-  if (expandedGroups > 0) {
+  let collapsed = 0;
+  const newRows: ContractRow[] = [];
+  const newPages: Record<string, SourcePage>[] = [];
+
+  for (const group of groups.values()) {
+    const first = group.rows[0]!;
+    const seasonKey = normalizeSeasonKey(first.season_name ?? "");
+
+    const periodSet = new Map<string, { starts: string; ends: string }>();
+    for (const row of group.rows) {
+      for (const p of collectPeriodsFromRow(row)) {
+        periodSet.set(`${p.starts}|${p.ends}`, p);
+      }
+    }
+
+    const briefPeriods = periodMap.get(seasonKey);
+    if (briefPeriods) {
+      for (const p of briefPeriods) {
+        periodSet.set(`${p.starts}|${p.ends}`, p);
+      }
+    }
+
+    const periods = [...periodSet.values()].sort((a, b) =>
+      a.starts.localeCompare(b.starts),
+    );
+
+    let season_starts = first.season_starts;
+    let season_ends = first.season_ends;
+    if (periods.length === 1) {
+      season_starts = periods[0]!.starts;
+      season_ends = periods[0]!.ends;
+    } else if (periods.length > 1) {
+      const combined = formatCombinedSeasonDates(periods);
+      season_starts = combined.starts;
+      season_ends = combined.ends;
+    }
+
+    if (group.rows.length > 1) collapsed += group.rows.length - 1;
+
+    newRows.push({ ...first, season_starts, season_ends });
+    newPages.push(extraction.paginas_origen_rows[group.pageIndices[0]!] ?? {});
+  }
+
+  if (collapsed > 0) {
     warnings.push(
-      `Se expandieron ${expandedGroups} grupo(s) producto×temporada en múltiples ` +
-        "tramos de fechas según seasons_detail del brief.",
+      `Se consolidaron ${collapsed} fila(s) duplicadas por tramos de temporada — ` +
+        "las fechas quedaron en una sola línea (separadas por '; ').",
     );
   }
 
@@ -837,6 +977,15 @@ export function expandSeasonPeriods(
     rows: newRows,
     paginas_origen_rows: newPages,
   };
+}
+
+/** @deprecated Usar consolidateSeasonPeriodRows. */
+export function expandSeasonPeriods(
+  extraction: ExtractedContract,
+  brief: ContractBrief | null | undefined,
+  warnings: string[],
+): ExtractedContract {
+  return consolidateSeasonPeriodRows(extraction, brief, warnings);
 }
 
 /** Completa occupancies_by_product desde categorías si el brief no lo trae. */

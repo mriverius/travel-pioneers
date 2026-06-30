@@ -329,16 +329,17 @@ const rowSchema = {
     season_starts: {
       type: ["string", "null"],
       description:
-        "Fecha de inicio de esta temporada (YYYY-MM-DD). Si la temporada " +
-        "tiene rangos múltiples (ej. 'ALTA: 4-ene al 30-abr, 1-jul al " +
-        "31-ago, 15-nov al 19-dic'), usar la fecha del PRIMER rango.",
+        "Fecha de inicio de esta temporada (YYYY-MM-DD). Si la misma " +
+        "temporada tiene varios tramos calendario con la misma tarifa, " +
+        "listá todos los inicios separados por '; ' en UNA fila (ej. " +
+        "'2025-12-01; 2026-01-06; 2026-11-15') — NO dupliques filas.",
     },
     season_ends: {
       type: ["string", "null"],
       description:
-        "Fecha de fin de esta temporada (YYYY-MM-DD). Si hay rangos " +
-        "múltiples, usar la fecha del PRIMER rango (consistente con " +
-        "season_starts).",
+        "Fecha de fin de esta temporada (YYYY-MM-DD). Si hay varios tramos, " +
+        "listá todos los fines en el mismo orden, separados por '; ' (ej. " +
+        "'2025-12-17; 2026-04-30; 2026-11-30').",
     },
     meals_included: {
       type: ["string", "null"],

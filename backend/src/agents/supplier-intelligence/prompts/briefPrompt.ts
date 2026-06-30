@@ -98,7 +98,8 @@ export const CONTRACT_BRIEF_INSTRUCTION =
   "de CADA temporada (obligatorio, no lo dejes vacío). Si una misma temporada " +
   "(ej. Alta, Green) tiene VARIOS tramos no contiguos en el calendario, " +
   "registrá UNA entrada en seasons_detail POR CADA tramo (mismo name, fechas " +
-  "distintas). OJO: dos tablas de tarifas lado a lado con rangos de fecha " +
+  "distintas). En las filas de tarifas NO dupliques por tramo: combiná fechas " +
+  "en season_starts/season_ends con '; ' en una sola fila. OJO: dos tablas " +
   "distintos (ej. 'Alta: Nov-Abr' y 'Baja: May-Oct') son DOS temporadas — " +
   "capturá ambas. Cuidado también con rangos partidos.\n" +
   "  7. INVENTARIO: lista de categorías/habitaciones, temporadas y secciones " +

@@ -4,8 +4,8 @@ import { fileURLToPath } from "node:url";
 import * as XLSX from "xlsx";
 import type { WorkBook, WorkSheet } from "xlsx";
 import type { ContractRow, ManualFields, SharedFields, TipoUnidad } from "./types.js";
-import { isFoodBeverageProduct, normalizeCurrency } from "./validators.js";
-import { derivePlazoDaysFromPaymentPolicy } from "./catalogRules.js";
+import { isFoodBeverageProduct, normalizeCurrency, normalizeSeasonDateField } from "./validators.js";
+import { derivePlazoDaysFromPaymentPolicy, sortContractRows } from "./catalogRules.js";
 import {
   CATALOG_PREFILL_COL,
   DATE_ROW_FIELDS,
@@ -260,6 +260,13 @@ function normalizeDate(input: unknown): string {
   return "NOT AVAILABLE";
 }
 
+/** season_starts/season_ends pueden listar varios rangos separados por ";". */
+function normalizeSeasonDateCell(input: unknown): string {
+  const { value } = normalizeSeasonDateField(input);
+  if (value === null) return "NOT AVAILABLE";
+  return value;
+}
+
 /**
  * Tipo de tarifa por columna: las columnas "neta" siempre van "1" y las
  * "mayorista" siempre "2" (regla de negocio, incluye sus variantes de fin
@@ -502,6 +509,9 @@ export function generateContractXlsx(
     throw new Error("rows está vacío — no hay datos que escribir.");
   }
 
+  const sorted = sortContractRows(input.rows);
+  input = { ...input, rows: sorted };
+
   const templateBuf = loadTemplate();
   const workbook: WorkBook = XLSX.read(templateBuf, {
     type: "buffer",
@@ -580,7 +590,7 @@ export function generateContractXlsx(
       const value = row[key as keyof ContractRow];
       // Bug #3 — fechas de temporada siempre YYYY-MM-DD.
       if (DATE_ROW_FIELDS.includes(key as (typeof DATE_ROW_FIELDS)[number])) {
-        writeCell(dataSheet, col, xlsxRow, normalizeDate(value));
+        writeCell(dataSheet, col, xlsxRow, normalizeSeasonDateCell(value));
         continue;
       }
       writeCell(dataSheet, col, xlsxRow, value == null ? null : String(value));
