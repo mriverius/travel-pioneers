@@ -19,6 +19,7 @@ import {
   sortExtractedContractRows,
   stripDisallowedAdultOccupancies,
   stripDisallowedChildOccupancies,
+  normalizeDriverRoomOccupancies,
   syncSeasonDatesFromBrief,
   validateExpectedOccupancies,
 } from "./catalogRules.js";
@@ -882,6 +883,7 @@ export function validateExtraction(
   );
   extraction = stripDisallowedAdultOccupancies(extraction, warnings);
   extraction = stripDisallowedChildOccupancies(extraction, warnings);
+  extraction = normalizeDriverRoomOccupancies(extraction, warnings);
 
   // Catálogo Utopía: categoría (Suite→SUI), tipo unidad S para paquetes, etc.
   extraction = normalizeCatalogFields(extraction, brief, warnings);

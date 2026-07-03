@@ -269,6 +269,19 @@ export function resolveExpectedOccupancyCodesForProduct(
   } else {
     codes = inferOccupancyCodesFromProductName(productName, brief, policy);
   }
+
+  if (!productAllowsAdditionalPerson(productName)) {
+    if (isDriverRoomProduct(productName)) {
+      const n = (productName ?? "").toLowerCase();
+      if (/sencilla|single|\bsgl\b/.test(n)) codes = ["SGL"];
+      else if (/doble|double|\bdbl\b/.test(n)) codes = ["DBL"];
+      else codes = ["SGL", "DBL"];
+    } else {
+      // Belmar/Forest/etc. cotizan por habitación en ocupación doble base.
+      codes = ["DBL"];
+    }
+  }
+
   const effectivePolicy = policy ?? detectOccupancyPolicy(brief, undefined);
   let filtered = filterOccupancyCodesByPolicy(codes, effectivePolicy);
   if (!productAllowsAdditionalPerson(productName)) {
@@ -377,6 +390,7 @@ export function validateExpectedOccupancies(
   const policy = detectOccupancyPolicy(brief, extraction);
 
   const groups = new Map<string, Set<string>>();
+  const byProduct = new Map<string, Set<string>>();
   for (const row of extraction.rows) {
     const product = (row.product_name ?? "").trim();
     const season = (row.season_name ?? "").trim();
@@ -386,6 +400,8 @@ export function validateExpectedOccupancies(
     const key = `${product} · ${season}`;
     if (!groups.has(key)) groups.set(key, new Set());
     groups.get(key)!.add(occ);
+    if (!byProduct.has(product)) byProduct.set(product, new Set());
+    byProduct.get(product)!.add(occ);
   }
 
   for (const [label, occs] of groups) {
@@ -398,18 +414,20 @@ export function validateExpectedOccupancies(
     );
     if (expected.length === 0) continue;
 
+    const productOccs = byProduct.get(product) ?? new Set<string>();
     const adultExpected = expected.filter((c) => c !== "CHL");
     const needsChild = expected.includes("CHL");
 
     for (const code of adultExpected) {
-      if (!occs.has(code)) {
-        warnings.push(
-          `Falta ocupación ${code} en ${label}. Para este producto aplican ` +
-            `[${expected.join(", ")}] — revisá precios en el Paso 3.`,
-        );
-      }
+      if (occs.has(code)) continue;
+      // Solo exigir paridad entre temporadas si el código ya aparece en otra.
+      if (!productOccs.has(code)) continue;
+      warnings.push(
+        `Falta ocupación ${code} en ${label}. Para este producto aplican ` +
+          `[${expected.join(", ")}] — revisá precios en el Paso 3.`,
+      );
     }
-    if (needsChild && !occs.has("CHL")) {
+    if (needsChild && !occs.has("CHL") && productOccs.has("CHL")) {
       warnings.push(`Falta ocupación CHL (niño) en ${label}.`);
     }
   }
@@ -568,6 +586,52 @@ export function stripDisallowedChildOccupancies(
     warnings.push(
       `Se eliminaron ${removed} fila(s) CHL en categorías que no admiten ` +
         "persona adicional (Belmar, Forest, Península Superior, Sunrise, chofer).",
+    );
+  }
+
+  return {
+    ...extraction,
+    rows,
+    paginas_origen_rows: pages.length > 0 ? pages : extraction.paginas_origen_rows,
+  };
+}
+
+/** Habitación chofer/guía: solo SGL o DBL según el nombre del producto. */
+export function normalizeDriverRoomOccupancies(
+  extraction: ExtractedContract,
+  warnings: string[],
+): ExtractedContract {
+  let removed = 0;
+  const rows: ContractRow[] = [];
+  const pages: Record<string, SourcePage>[] = [];
+
+  extraction.rows.forEach((row, i) => {
+    if (!isDriverRoomProduct(row.product_name)) {
+      rows.push(row);
+      pages.push(extraction.paginas_origen_rows[i] ?? {});
+      return;
+    }
+
+    const n = (row.product_name ?? "").toLowerCase();
+    const occ = normalizeOccupancyCode(row.ocupacion ?? "");
+    const allowed = /sencilla|single|\bsgl\b/.test(n)
+      ? new Set(["SGL"])
+      : /doble|double|\bdbl\b/.test(n)
+        ? new Set(["DBL"])
+        : new Set(["SGL", "DBL"]);
+
+    if (!allowed.has(occ)) {
+      removed += 1;
+      return;
+    }
+    rows.push(row);
+    pages.push(extraction.paginas_origen_rows[i] ?? {});
+  });
+
+  if (removed > 0) {
+    warnings.push(
+      `Se eliminaron ${removed} fila(s) con ocupación inválida en habitación ` +
+        "de chofer/guía (solo SGL o DBL según el producto).",
     );
   }
 
