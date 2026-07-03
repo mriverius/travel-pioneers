@@ -276,6 +276,9 @@ export function resolveExpectedOccupancyCodesForProduct(
       (c) => c !== "TPL" && c !== "QDP" && c !== "QTN",
     );
   }
+  if (!productAllowsChildOccupancy(productName)) {
+    filtered = filtered.filter((c) => c !== "CHL");
+  }
   return filtered;
 }
 
@@ -542,6 +545,105 @@ export function removeForbiddenOccupancyRows(
   };
 }
 
+/** Elimina filas CHL en categorías que no admiten persona adicional. */
+export function stripDisallowedChildOccupancies(
+  extraction: ExtractedContract,
+  warnings: string[],
+): ExtractedContract {
+  let removed = 0;
+  const rows: ContractRow[] = [];
+  const pages: Record<string, SourcePage>[] = [];
+
+  extraction.rows.forEach((row, i) => {
+    const occ = normalizeOccupancyCode(row.ocupacion ?? "");
+    if (occ === "CHL" && !productAllowsChildOccupancy(row.product_name)) {
+      removed += 1;
+      return;
+    }
+    rows.push(row);
+    pages.push(extraction.paginas_origen_rows[i] ?? {});
+  });
+
+  if (removed > 0) {
+    warnings.push(
+      `Se eliminaron ${removed} fila(s) CHL en categorías que no admiten ` +
+        "persona adicional (Belmar, Forest, Península Superior, Sunrise, chofer).",
+    );
+  }
+
+  return {
+    ...extraction,
+    rows,
+    paginas_origen_rows: pages.length > 0 ? pages : extraction.paginas_origen_rows,
+  };
+}
+
+function parseCommissionPct(raw: string | null | undefined): number | null {
+  if (raw == null || raw === "") return null;
+  const n = parseFloat(String(raw).replace(/[^\d.-]/g, ""));
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function fmtMoneyAmount(n: number): string {
+  return String(Math.round(n * 100) / 100);
+}
+
+function deriveNetFromRackIfNeeded(
+  neto: string | null,
+  rack: string | null,
+  commissionPct: number | null,
+): string | null {
+  if (commissionPct === null || commissionPct <= 0) return neto;
+  const rackNum = parseMoneyValue(rack);
+  if (rackNum === null) return neto;
+  const netNum = parseMoneyValue(neto);
+  if (netNum !== null && Math.abs(netNum - rackNum) >= 0.02) return neto;
+  return fmtMoneyAmount(rackNum * (1 - commissionPct / 100));
+}
+
+/** Deriva neto desde rack × (1 − comisión) cuando vienen iguales. */
+export function deriveNetRackFromCommission(
+  extraction: ExtractedContract,
+  warnings: string[],
+): ExtractedContract {
+  let adjusted = 0;
+  const rows = extraction.rows.map((row) => {
+    const comm = parseCommissionPct(row.porcentaje_comision);
+    const commFds = parseCommissionPct(row.porcentaje_comision_fds) ?? comm;
+    if (comm === null && commFds === null) return row;
+
+    const neto = deriveNetFromRackIfNeeded(
+      row.precios_neto_iva,
+      row.precio_rack_iva,
+      comm,
+    );
+    const netoFds = deriveNetFromRackIfNeeded(
+      row.precios_neto_iva_fds,
+      row.precio_rack_iva_fds,
+      commFds,
+    );
+
+    if (neto === row.precios_neto_iva && netoFds === row.precios_neto_iva_fds) {
+      return row;
+    }
+    adjusted += 1;
+    return {
+      ...row,
+      precios_neto_iva: neto,
+      precios_neto_iva_fds: netoFds,
+    };
+  });
+
+  if (adjusted > 0) {
+    warnings.push(
+      `Se derivó el precio NETO desde RACK × (1 − comisión) en ${adjusted} ` +
+        "fila(s) donde neto y rack venían iguales.",
+    );
+  }
+
+  return { ...extraction, rows };
+}
+
 /** Alinea season_starts/season_ends de cada fila con seasons_detail del brief. */
 export function syncSeasonDatesFromBrief(
   extraction: ExtractedContract,
@@ -598,16 +700,27 @@ export function productAllowsAdditionalPerson(
 ): boolean {
   const n = productBaseName(productName ?? "").toLowerCase();
   if (!n) return true;
+  if (isDriverRoomProduct(productName)) return false;
   if (/\bpen[ií]nsula superior\b/.test(n)) return false;
-  if (n === "belmar" || n === "forest") return false;
+  if (n === "belmar") return false;
+  if (n === "forest") return false;
   if (/\bsunrise\b/.test(n)) return false;
   return true;
 }
 
+function isDriverRoomProduct(productName: string | null | undefined): boolean {
+  const n = (productName ?? "").toLowerCase();
+  return (
+    /\bchofer\b/.test(n) ||
+    /\bgu[ií]a y chofer\b/.test(n) ||
+    /\bdriver'?s?\s*room\b/.test(n)
+  );
+}
+
 export function productAllowsChildOccupancy(
-  _productName: string | null | undefined,
+  productName: string | null | undefined,
 ): boolean {
-  return true;
+  return productAllowsAdditionalPerson(productName);
 }
 
 function parseMoneyValue(v: string | null | undefined): number | null {

@@ -12,7 +12,7 @@ import type {
   SharedFields,
   TipoUnidad,
 } from "./types.js";
-import { normalizeDate } from "./validators.js";
+import { normalizeDate, normalizeSeasonDateField } from "./validators.js";
 
 /**
  * POST /api/supplier-intelligence/generate-xlsx
@@ -51,6 +51,10 @@ const stringOrNull = (v: unknown): string | null => {
  */
 const dateOrNull = (v: unknown): string | null => {
   return normalizeDate(stringOrNull(v)).value;
+};
+
+const seasonDateOrNull = (v: unknown): string | null => {
+  return normalizeSeasonDateField(stringOrNull(v)).value;
 };
 
 /**
@@ -129,8 +133,8 @@ function coerceRow(input: unknown, index: number): ContractRow {
     ocupacion: stringOrNull(r.ocupacion),
     tarifa_persona_adicional: stringOrNull(r.tarifa_persona_adicional),
     season_name: stringOrNull(r.season_name),
-    season_starts: dateOrNull(r.season_starts),
-    season_ends: dateOrNull(r.season_ends),
+    season_starts: seasonDateOrNull(r.season_starts),
+    season_ends: seasonDateOrNull(r.season_ends),
     meals_included: stringOrNull(r.meals_included),
     precios_neto_iva: stringOrNull(r.precios_neto_iva),
     precio_rack_iva: stringOrNull(r.precio_rack_iva),

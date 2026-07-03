@@ -310,21 +310,41 @@ function orderNetRack(
   return [neto, rack];
 }
 
-/** Corrige precios neto/rack invertidos y limpia el "%" de las comisiones. */
+/** Corrige precios neto/rack invertidos, deriva neto desde comisión, limpia "%". */
 function normalizeRowFinancials(row: ContractRow): ContractRow {
-  const [neto, rack] = orderNetRack(row.precios_neto_iva, row.precio_rack_iva);
-  const [netoFds, rackFds] = orderNetRack(
+  let [neto, rack] = orderNetRack(row.precios_neto_iva, row.precio_rack_iva);
+  let [netoFds, rackFds] = orderNetRack(
     row.precios_neto_iva_fds,
     row.precio_rack_iva_fds,
   );
+  const comm = stripPercent(row.porcentaje_comision);
+  const commFds = stripPercent(row.porcentaje_comision_fds) ?? comm;
+
+  const commNum = comm ? parseAmount(comm) : null;
+  if (commNum !== null && commNum > 0 && rack) {
+    const r = parseAmount(rack);
+    const n = parseAmount(neto);
+    if (r !== null && (n === null || Math.abs(n - r) < 0.02)) {
+      neto = String(Math.round(r * (1 - commNum / 100) * 100) / 100);
+    }
+  }
+  const commFdsNum = commFds ? parseAmount(commFds) : commNum;
+  if (commFdsNum !== null && commFdsNum > 0 && rackFds) {
+    const r = parseAmount(rackFds);
+    const n = parseAmount(netoFds);
+    if (r !== null && (n === null || Math.abs(n - r) < 0.02)) {
+      netoFds = String(Math.round(r * (1 - commFdsNum / 100) * 100) / 100);
+    }
+  }
+
   return {
     ...row,
     precios_neto_iva: neto,
     precio_rack_iva: rack,
     precios_neto_iva_fds: netoFds,
     precio_rack_iva_fds: rackFds,
-    porcentaje_comision: stripPercent(row.porcentaje_comision),
-    porcentaje_comision_fds: stripPercent(row.porcentaje_comision_fds),
+    porcentaje_comision: comm,
+    porcentaje_comision_fds: commFds,
   };
 }
 
