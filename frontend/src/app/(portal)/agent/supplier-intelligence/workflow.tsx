@@ -652,7 +652,10 @@ export function SupplierWorkflow() {
       setCatalogMatchInfo(matchInfo);
 
       await new Promise((r) => setTimeout(r, 300));
-      const newBriefs = responses.map((r) => r.brief);
+      // Fusiona bancos/políticas de docs secundarios (T&C) en el brief primario
+      // para que el Paso 2 no quede vacío (caso Lapa Rios rates + TC).
+      const rawBriefs = responses.map((r) => r.brief);
+      const newBriefs = mergeSecondaryBriefIntoPrimary(rawBriefs);
       setBriefs(newBriefs);
       setEditedBriefs(newBriefs.map((b) => b));
       setMetas(responses.map((r) => r.meta));
@@ -1179,7 +1182,9 @@ export function SupplierWorkflow() {
             <ReviewStep
               result={result}
               catalogPrefill={catalogPrefill}
+              briefMetas={metas}
               onApprove={approve}
+              onBack={backToConfig}
               onGridReady={preparingGrid ? handleGridReady : undefined}
             />
           </div>
@@ -1197,7 +1202,7 @@ export function SupplierWorkflow() {
     </section>
 
     <div className="text-center mt-4 space-y-1">
-      <p className="text-[11px] text-muted-foreground/60">Version 1.7.9 - Julio 2</p>
+      <p className="text-[11px] text-muted-foreground/60">Version 1.8.0 - Julio 14</p>
       <a
         href="https://forms.gle/GANUbdcuAS3P7szS8"
         target="_blank"
@@ -2139,19 +2144,93 @@ function buildInitialSharedValues(
   return out as Record<SharedKey, string | null>;
 }
 
+/**
+ * Copia bancos y notas de briefs secundarios (T&C) al brief primario cuando
+ * el PDF de tarifas las dejó vacías.
+ */
+function mergeSecondaryBriefIntoPrimary(
+  briefs: ContractConfigVariables[],
+): ContractConfigVariables[] {
+  if (briefs.length <= 1) return briefs;
+  const primary = briefs[0]!;
+  const rest = briefs.slice(1);
+
+  const bankSeen = new Set(
+    primary.bank_accounts.map(
+      (a) =>
+        `${(a.account_number ?? "").replace(/\s+/g, "").toLowerCase()}|${(a.bank ?? "").toLowerCase()}`,
+    ),
+  );
+  const bank_accounts = [...primary.bank_accounts];
+  for (const b of rest) {
+    for (const acct of b.bank_accounts ?? []) {
+      const key = `${(acct.account_number ?? "").replace(/\s+/g, "").toLowerCase()}|${(acct.bank ?? "").toLowerCase()}`;
+      if (!key.replace("|", "") || bankSeen.has(key)) continue;
+      bankSeen.add(key);
+      bank_accounts.push(acct);
+    }
+  }
+
+  const pick = (
+    a: string | null | undefined,
+    ...others: Array<string | null | undefined>
+  ): string | null => {
+    if (typeof a === "string" && a.trim()) return a;
+    for (const o of others) {
+      if (typeof o === "string" && o.trim()) return o;
+    }
+    return a ?? null;
+  };
+
+  const merged: ContractConfigVariables = {
+    ...primary,
+    bank_accounts,
+    special_periods_note: pick(
+      primary.special_periods_note,
+      ...rest.map((b) => b.special_periods_note),
+    ),
+    notes: pick(primary.notes, ...rest.map((b) => b.notes)),
+    commission_summary: pick(
+      primary.commission_summary,
+      ...rest.map((b) => b.commission_summary),
+    ),
+    meal_plan_note: pick(
+      primary.meal_plan_note,
+      ...rest.map((b) => b.meal_plan_note),
+    ),
+    logic_summary: pick(
+      primary.logic_summary,
+      ...rest.map((b) => b.logic_summary),
+    ),
+    additional_person:
+      primary.additional_person.length > 0
+        ? primary.additional_person
+        : (rest.find((b) => b.additional_person.length > 0)?.additional_person ??
+          primary.additional_person),
+  };
+
+  return [merged, ...rest];
+}
+
 function ReviewStep({
   result,
   catalogPrefill,
+  briefMetas,
   onApprove,
+  onBack,
   onGridReady,
 }: {
   result: ExtractContractResponse;
   catalogPrefill: CatalogPrefill | null;
+  briefMetas: AnalyzeBriefMeta[];
   onApprove: (payload: ApprovedPayload) => void;
+  onBack: () => void;
   onGridReady?: () => void;
 }) {
   const { data, validation, meta } = result;
   const conf = CONFIANZA_STYLES[data.confianza];
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!onGridReady) return;
@@ -2233,26 +2312,20 @@ function ReviewStep({
     });
   };
 
-  const handleApprove = () => {
-    // AI shared fields (incluye telefono que extraemos pero no editamos)
+  const buildPayload = (): ApprovedPayload => {
     const sharedFields: ExtractedSharedFields = {
       fecha: sharedValues.fecha,
       proveedor: sharedValues.proveedor,
       nombre_comercial: sharedValues.nombre_comercial,
       cedula: sharedValues.cedula,
       direccion: sharedValues.direccion,
-      telefono: data.shared_fields.telefono, // not in table, passed through
+      telefono: data.shared_fields.telefono,
       pais: sharedValues.pais,
       state_province: sharedValues.state_province,
       type_of_business: sharedValues.type_of_business,
       contract_starts: sharedValues.contract_starts,
       contract_ends: sharedValues.contract_ends,
       reservations_email: sharedValues.reservations_email,
-      // tipo_unidad y tipo_servicio ya no son editables como shared (cada
-      // fila tiene el suyo en row scope). Preservamos el valor original
-      // del backend en `shared_fields` por compat de tipos — el writer del
-      // xlsx (`resolveRowClassification`) usa el row value como fuente
-      // primaria y este shared como fallback.
       tipo_unidad: data.shared_fields.tipo_unidad,
       tipo_servicio: data.shared_fields.tipo_servicio,
       tipo_moneda: sharedValues.tipo_moneda,
@@ -2262,15 +2335,10 @@ function ReviewStep({
       notes: sharedValues.notes,
     };
 
-    // Catalog prefill — null si todos los 4 son null/empty
     const hasAnyCatalog = CATALOG_KEYS.some((k) => {
       const v = sharedValues[k];
       return typeof v === "string" && v.trim() !== "";
     });
-    // codigo_servicio ya no es editable como shared (es per-row); igual lo
-    // mandamos al backend como hint del catálogo para que el writer lo use
-    // como FALLBACK cuando alguna fila venga sin código (ver
-    // `resolveRowClassification` en xlsxGenerator).
     const finalCatalogPrefill: GenerateXlsxCatalogPrefill | null =
       hasAnyCatalog || catalogPrefill?.codigo_servicio
         ? {
@@ -2281,7 +2349,6 @@ function ReviewStep({
           }
         : null;
 
-    // Manual fields — null si todos los 14 son null/empty
     const hasAnyManual = MANUAL_KEYS.some((k) => {
       const v = sharedValues[k];
       return typeof v === "string" && v.trim() !== "";
@@ -2304,12 +2371,68 @@ function ReviewStep({
         }
       : null;
 
-    onApprove({
+    return {
       sharedFields,
       rows,
       catalogPrefill: finalCatalogPrefill,
       manualFields: finalManualFields,
-    });
+    };
+  };
+
+  /** Descarga el xlsx desde el Paso 3 sin ir al Paso 4. */
+  const handleDownloadHere = async () => {
+    if (downloading) return;
+    setDownloading(true);
+    setDownloadError(null);
+    const payload = buildPayload();
+    try {
+      const { blob, filename } = await api.supplierIntelligence.generateXlsx({
+        shared_fields: payload.sharedFields,
+        rows: payload.rows,
+        catalog_prefill: payload.catalogPrefill,
+        manual_fields: payload.manualFields,
+      });
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+
+      const fileKind = inferKind("", meta.filename);
+      if (fileKind) {
+        const pipelineUsage = combinePipelineUsage(meta, briefMetas);
+        void api.supplierIntelligence
+          .saveRun({
+            filename: meta.filename,
+            file_kind: fileKind,
+            file_size: meta.size_bytes,
+            ai_model: meta.model,
+            shared_fields: payload.sharedFields,
+            rows: payload.rows,
+            catalog_prefill: payload.catalogPrefill,
+            manual_fields: payload.manualFields,
+            input_tokens: pipelineUsage.input_tokens,
+            output_tokens: pipelineUsage.output_tokens,
+            cost_usd: pipelineUsage.cost_usd,
+          })
+          .catch((err) => console.warn("saveRun failed (non-blocking):", err));
+      }
+    } catch (err) {
+      setDownloadError(
+        err instanceof ApiError
+          ? err.message
+          : "No pudimos generar el xlsx. Revisá tu conexión e intentá de nuevo.",
+      );
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const handleApprove = () => {
+    onApprove(buildPayload());
   };
 
   const filledRowCells = useMemo(() => {
@@ -2405,15 +2528,42 @@ function ReviewStep({
         onRemoveRow={removeRow}
       />
 
-      <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-2 pt-2">
+      {downloadError && (
+        <div className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2.5 text-[12.5px] text-red-200">
+          <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+          <p>{downloadError}</p>
+        </div>
+      )}
+
+      <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-between gap-2 pt-2">
         <button
           type="button"
-          onClick={handleApprove}
-          className="btn-premium inline-flex items-center justify-center gap-2 h-11 px-5 rounded-lg text-[13.5px]"
+          onClick={onBack}
+          disabled={downloading}
+          className="inline-flex items-center justify-center gap-2 h-11 px-4 rounded-lg text-[13.5px] border border-border bg-secondary/40 text-foreground hover:bg-secondary/70 disabled:opacity-50"
         >
-          <Download className="w-4 h-4" />
-          Generar y descargar xlsx
+          <ArrowLeft className="w-4 h-4" />
+          Volver a configuración
         </button>
+        <div className="flex flex-col-reverse sm:flex-row gap-2">
+          <button
+            type="button"
+            onClick={handleApprove}
+            disabled={downloading}
+            className="inline-flex items-center justify-center gap-2 h-11 px-4 rounded-lg text-[13.5px] border border-border text-muted-foreground hover:bg-secondary/50 disabled:opacity-50"
+          >
+            Continuar al resumen
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleDownloadHere()}
+            disabled={downloading}
+            className="btn-premium inline-flex items-center justify-center gap-2 h-11 px-5 rounded-lg text-[13.5px] disabled:opacity-60"
+          >
+            <Download className="w-4 h-4" />
+            {downloading ? "Generando…" : "Descargar Excel"}
+          </button>
+        </div>
       </div>
     </div>
   );

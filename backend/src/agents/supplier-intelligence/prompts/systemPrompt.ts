@@ -147,6 +147,21 @@ REGLA DE ORO PARA \`rows\`:
   campo \`tarifa_persona_adicional\` en cada fila base y el servidor
   expande la grilla a TPL y QDP automáticamente. Ver la regla 16b.
 
+DOCUMENTOS COMPAÑEROS — TÉRMINOS Y CONDICIONES / POLÍTICAS / BANCOS:
+
+  Cuando el bundle incluye un documento secundario tipo "Términos y
+  Condiciones", "T&C", "Terms and Conditions", "Políticas", "TC-…",
+  carta comercial o similar (además del PDF de tarifas), ESE documento
+  es OBLIGATORIO para:
+    - cancellation_policy / range_payment_policy / others_payment_cancel
+      (y periodos especiales: Navidad, Peak, Semana Santa)
+    - bank_accounts / numero_cuenta / banco / tipo_moneda
+    - notas de comisión o Conservation Fee
+  NO digas "no se detectaron políticas" ni "consultá el documento de
+  apoyo" si ese documento YA está en el bundle — leelo y extraé los
+  campos. Las tarifas pueden estar en el PDF primario y las políticas
+  en el secundario: consolidá TODO en una sola extracción.
+
 DOCUMENTOS COMPAÑEROS — TOURS / EXPERIENCES / ACTIVIDADES (Bug #1):
 
   Cuando el bundle de archivos incluye un documento secundario tipo
@@ -433,13 +448,18 @@ REGLAS POR CAMPO (rows[])
     en null. Esta regla GANA sobre la de persona adicional.
 
     PRIORIDAD 2 — TARIFA POR PERSONA ADICIONAL (solo si NO hay precios explícitos):
-    Cuando el documento define una "tarifa por persona adicional" (ej.
-    "Tarifa persona adicional $46 + imp") y NO hay columnas Triple/Quadruple
-    con precios propios, NO generes vos las filas TPL/QDP. En su lugar, en
-    CADA fila base de hospedaje a la que aplica, llená el campo
-    \`tarifa_persona_adicional\` con ese monto. El SERVIDOR materializa
-    automáticamente las filas de ocupación triple (TPL = base + 1×adicional)
-    y cuádruple (QDP = base + 2×adicional) para cada habitación × temporada.
+    Cuando el documento define una "tarifa por persona adicional" / "persona
+    extra" (ej. Deluxe US $35) y NO hay columnas Triple/Quadruple con precios
+    propios, NO generes vos las filas TPL/QDP. En su lugar, en CADA fila base
+    de hospedaje a la que APLICA, llená \`tarifa_persona_adicional\` con ese
+    monto. El SERVIDOR materializa TPL (= base + 1×adicional) y, cuando la
+    categoría admite 4 personas, también QDP (= base + 2×adicional).
+
+    REGLAS POR CATEGORÍA (Casa Turire y similares):
+      - Deluxe / Standard Deluxe con persona extra → SGL + DBL + TPL + QDP
+        (misma tarifa publicada para SGL y DBL; TPL/QDP = DBL + N×adicional).
+      - Suite / Máster Suite cuando dice "persona extra: No aplica" → SOLO
+        SGL + DBL (NO pongas tarifa_persona_adicional; NO TPL/QDP).
 
     CÓMO LLENAR \`tarifa_persona_adicional\`:
       - Expresalo como precio RACK/público CON IVA incluido (misma
@@ -448,7 +468,7 @@ REGLAS POR CAMPO (rows[])
         impuesto) y las tarifas base están "con IVA incluido", sumale el IVA
         aplicable (13% CR) ANTES — ej. "$46 + imp" → "51.98". Si ya viene con
         impuesto incluido, usá el número tal cual.
-      - Poné el MISMO valor en todas las filas base de hospedaje afectadas.
+      - Solo en las filas de categorías que SÍ admiten persona adicional.
       - Dejá la \`ocupacion\` de la fila base como está (DBL/SGL/FAM). El
         servidor crea las filas TPL/QDP aparte.
 

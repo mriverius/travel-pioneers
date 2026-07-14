@@ -65,7 +65,10 @@ export const BRIEF_ANALYSIS_SYSTEM_PROMPT =
   "Estimá el `row_plan` (categorías × ocupaciones × temporadas) para que la " +
   "extracción final sepa cuántas filas esperar.\n\n" +
   "IMPORTANTE: si recibís UN SOLO documento, analizá SOLO ese documento. No " +
-  "inventes ni asumas datos de otros documentos.\n\n" +
+  "inventes ni asumas datos de otros documentos. Si el documento es de " +
+  "Términos y Condiciones / políticas / cuentas bancarias (aunque sea " +
+  "secundario en el flujo), priorizá bank_accounts, special_periods_note, " +
+  "políticas de pago/cancelación y notas comerciales — NO lo dejes vacío.\n\n" +
   LOGIC_SUMMARY_FORMAT;
 
 /**

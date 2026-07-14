@@ -12,8 +12,12 @@ import {
 import {
   consolidateSeasonPeriodRows,
   deriveNetRackFromCommission,
+  syncCommissionFromNetRack,
   detectOccupancyPolicy,
   expandChildOccupancyRows,
+  productAllowsAdditionalPerson,
+  productAllowsQuadruple,
+  productBaseName,
   normalizeCatalogFields,
   removeForbiddenOccupancyRows,
   sortExtractedContractRows,
@@ -607,12 +611,16 @@ function expandOccupancy(
   // doble + 1 persona, cuádruple = doble + 2); si no hay DBL en el grupo,
   // usamos la primera fila base expandible como respaldo.
   const anchorByGroup = new Map<string, number>();
+  const occsByGroup = new Map<string, Set<string>>();
   extraction.rows.forEach((row, i) => {
-    const addl = parseAmount(row.tarifa_persona_adicional);
+    const key = occupancyGroupKey(row);
     const occ = (row.ocupacion ?? "").trim().toUpperCase();
+    if (!occsByGroup.has(key)) occsByGroup.set(key, new Set());
+    if (occ) occsByGroup.get(key)!.add(occ);
+
+    const addl = parseAmount(row.tarifa_persona_adicional);
     if (addl === null || addl <= 0 || !BASE_OCCUPANCIES.has(occ)) return;
 
-    const key = occupancyGroupKey(row);
     const current = anchorByGroup.get(key);
     if (current === undefined) {
       anchorByGroup.set(key, i);
@@ -630,6 +638,7 @@ function expandOccupancy(
 
   // PASO 2 — reconstruir filas: cada base limpia su campo auxiliar; solo la
   // fila ancla de cada grupo materializa TPL + QDP justo después de sí misma.
+  // Si TPL/QDP ya existen en el grupo, no se duplican.
   const newRows: ContractRow[] = [];
   const newPages: Record<string, SourcePage>[] = [];
   let expanded = 0;
@@ -645,27 +654,43 @@ function expandOccupancy(
     );
     newPages.push(pages);
 
-    const isAnchor = anchorByGroup.get(occupancyGroupKey(row)) === i;
+    const groupKey = occupancyGroupKey(row);
+    const isAnchor = anchorByGroup.get(groupKey) === i;
     if (!isAnchor) return;
     const addl = parseAmount(row.tarifa_persona_adicional);
     if (addl === null || addl <= 0) return;
 
-    for (const target of (allowQuadruple
+    // Deluxe (+ persona extra) → siempre QDP. Suites → nunca. Resto → política global.
+    const wantsQdp =
+      productAllowsQuadruple(row.product_name) ||
+      (allowQuadruple &&
+        productAllowsAdditionalPerson(row.product_name) &&
+        !/\bm[aá]ster\s*suite\b|\bmaster\s*suite\b|\bsuite\b/i.test(
+          productBaseName(row.product_name ?? ""),
+        ));
+
+    const existing = occsByGroup.get(groupKey) ?? new Set();
+    for (const target of wantsQdp
       ? (["TPL", "QDP"] as const)
-      : (["TPL"] as const))) {
+      : (["TPL"] as const)) {
+      if (existing.has(target)) continue;
       newRows.push(buildOccupancyRow(row, target, addl));
       newPages.push({ ...pages, ocupacion: "calculado" });
+      existing.add(target);
       expanded += 1;
     }
   });
 
   if (expanded === 0) return extraction;
 
-  const occLabel = allowQuadruple ? "triple (TPL) y cuádruple (QDP)" : "triple (TPL)";
+  const anyQdp = newRows.some(
+    (r) => (r.ocupacion ?? "").toUpperCase() === "QDP",
+  );
+  const occLabel = anyQdp ? "triple (TPL) y cuádruple (QDP)" : "triple (TPL)";
   warnings.push(
     `Se generaron ${expanded} fila(s) de ocupación ${occLabel} calculadas ` +
       `a partir de la tarifa por persona adicional (base doble + 1× para TPL` +
-      (allowQuadruple ? ", + 2× para QDP" : "") +
+      (anyQdp ? ", + 2× para QDP" : "") +
       `), una sola vez por producto × temporada. Revisá los montos en Step 2.`,
   );
 
@@ -896,6 +921,7 @@ export function validateExtraction(
   }
 
   extraction = deriveNetRackFromCommission(extraction, warnings);
+  extraction = syncCommissionFromNetRack(extraction, warnings);
   extraction = sortExtractedContractRows(extraction);
 
   // Guardrail amenidades de comida/bebida → AL. La IA tiende a clasificar

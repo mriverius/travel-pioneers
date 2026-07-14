@@ -90,6 +90,8 @@ export function inferProductOccupancyTier(
   if (!n) return "unknown";
   if (/\bjaguar\b/.test(n) && /\bvilla\b/.test(n)) return "villa_quint";
   if (/\bvilla\b/.test(n)) return "villa_quad";
+  // Deluxe con persona extra → QDP (Casa Turire). No confundir con suite.
+  if (/\bdeluxe\b/.test(n) && !/\bsuite\b/.test(n)) return "villa_quad";
   if (/\bsuite\b/.test(n)) return "suite";
   return "unknown";
 }
@@ -284,10 +286,18 @@ export function resolveExpectedOccupancyCodesForProduct(
 
   const effectivePolicy = policy ?? detectOccupancyPolicy(brief, undefined);
   let filtered = filterOccupancyCodesByPolicy(codes, effectivePolicy);
+  // Deluxe con persona extra mantiene QDP aunque la política global lo quite.
+  if (productAllowsQuadruple(productName) && !filtered.includes("QDP")) {
+    if (!filtered.includes("TPL")) filtered.push("TPL");
+    filtered.push("QDP");
+  }
   if (!productAllowsAdditionalPerson(productName)) {
     filtered = filtered.filter(
       (c) => c !== "TPL" && c !== "QDP" && c !== "QTN",
     );
+  }
+  if (!productAllowsQuadruple(productName)) {
+    filtered = filtered.filter((c) => c !== "QDP");
   }
   if (!productAllowsChildOccupancy(productName)) {
     filtered = filtered.filter((c) => c !== "CHL");
@@ -524,7 +534,7 @@ export function derivePlazoDaysFromPaymentPolicy(
   return match?.[1] ?? null;
 }
 
-/** Elimina filas QDP/QTN cuando el contrato no las permite. */
+/** Elimina filas QDP/QTN cuando el contrato no las permite (salvo Deluxe-etc.). */
 export function removeForbiddenOccupancyRows(
   extraction: ExtractedContract,
   policy: OccupancyPolicy,
@@ -532,16 +542,21 @@ export function removeForbiddenOccupancyRows(
 ): ExtractedContract {
   if (policy.quadrupleAllowed && policy.quintupleAllowed) return extraction;
 
-  const forbidden = new Set<string>();
-  if (!policy.quadrupleAllowed) forbidden.add("QDP");
-  if (!policy.quintupleAllowed) forbidden.add("QTN");
-
   let removed = 0;
   const rows: ContractRow[] = [];
   const pages: Record<string, import("./types.js").SourcePage>[] = [];
   extraction.rows.forEach((row, i) => {
     const occ = normalizeOccupancyCode(row.ocupacion ?? "");
-    if (forbidden.has(occ)) {
+    // Deluxe con persona extra puede tener QDP aunque la política global diga no.
+    if (
+      occ === "QDP" &&
+      !policy.quadrupleAllowed &&
+      !productAllowsQuadruple(row.product_name)
+    ) {
+      removed += 1;
+      return;
+    }
+    if (occ === "QTN" && !policy.quintupleAllowed) {
       removed += 1;
       return;
     }
@@ -551,8 +566,8 @@ export function removeForbiddenOccupancyRows(
 
   if (removed > 0) {
     warnings.push(
-      `Se eliminaron ${removed} fila(s) ${[...forbidden].join("/")} — el contrato ` +
-        "no admite cuádruple/quíntuple en ninguna categoría.",
+      `Se eliminaron ${removed} fila(s) QDP/QTN — el contrato no las admite ` +
+        "en esas categorías.",
     );
   }
 
@@ -663,6 +678,74 @@ function deriveNetFromRackIfNeeded(
   const netNum = parseMoneyValue(neto);
   if (netNum !== null && Math.abs(netNum - rackNum) >= 0.02) return neto;
   return fmtMoneyAmount(rackNum * (1 - commissionPct / 100));
+}
+
+/**
+ * Recalcula % comisión = (rack − neto) / rack cuando ambos precios existen.
+ * Alimentación (AL) fuerza 0%. Experiencias/tours/otros con rack≠neto quedan consistentes.
+ */
+export function syncCommissionFromNetRack(
+  extraction: ExtractedContract,
+  warnings: string[],
+): ExtractedContract {
+  let adjusted = 0;
+  const rows = extraction.rows.map((row) => {
+    const tipo = (row.tipo_servicio ?? "").trim().toUpperCase();
+    if (tipo === "AL") {
+      const next = {
+        ...row,
+        porcentaje_comision: "0",
+        porcentaje_comision_fds: "0",
+      };
+      if (
+        row.porcentaje_comision !== "0" ||
+        row.porcentaje_comision_fds !== "0"
+      ) {
+        adjusted += 1;
+      }
+      return next;
+    }
+
+    const rack = parseMoneyValue(row.precio_rack_iva);
+    const neto = parseMoneyValue(row.precios_neto_iva);
+    let pct: string | null = row.porcentaje_comision;
+    if (rack !== null && neto !== null && rack > 0 && Math.abs(rack - neto) >= 0.01) {
+      pct = String(Math.round(((rack - neto) / rack) * 10000) / 100);
+    }
+
+    const rackFds = parseMoneyValue(row.precio_rack_iva_fds);
+    const netoFds = parseMoneyValue(row.precios_neto_iva_fds);
+    let pctFds: string | null = row.porcentaje_comision_fds;
+    if (
+      rackFds !== null &&
+      netoFds !== null &&
+      rackFds > 0 &&
+      Math.abs(rackFds - netoFds) >= 0.01
+    ) {
+      pctFds = String(Math.round(((rackFds - netoFds) / rackFds) * 10000) / 100);
+    } else if (pct != null && (pctFds == null || pctFds === "")) {
+      pctFds = pct;
+    }
+
+    if (pct === row.porcentaje_comision && pctFds === row.porcentaje_comision_fds) {
+      return row;
+    }
+    adjusted += 1;
+    return {
+      ...row,
+      porcentaje_comision: pct,
+      porcentaje_comision_fds: pctFds,
+    };
+  });
+
+  if (adjusted > 0) {
+    warnings.push(
+      `Se sincronizó el % de comisión = (rack − neto) / rack en ${adjusted} ` +
+        "fila(s); alimentación quedó en 0%.",
+    );
+  }
+
+  return { ...extraction, rows };
 }
 
 /** Deriva neto desde rack × (1 − comisión) cuando vienen iguales. */
@@ -785,6 +868,25 @@ export function productAllowsChildOccupancy(
   productName: string | null | undefined,
 ): boolean {
   return productAllowsAdditionalPerson(productName);
+}
+
+/**
+ * Cuádruple (QDP) permitido para este producto concreto.
+ * - Deluxe (+ persona extra): sí (Casa Turire).
+ * - Suite / Máster Suite: no.
+ * - Belmar/Forest/etc. sin persona adicional: no.
+ */
+export function productAllowsQuadruple(
+  productName: string | null | undefined,
+): boolean {
+  const n = productBaseName(productName ?? "").toLowerCase();
+  if (!n) return false;
+  if (!productAllowsAdditionalPerson(productName)) return false;
+  if (/\bm[aá]ster\s*suite\b|\bmaster\s*suite\b/.test(n)) return false;
+  if (/\bsuite\b/.test(n) && !/\bdeluxe\b/.test(n)) return false;
+  if (/\bdeluxe\b/.test(n)) return true;
+  const tier = inferProductOccupancyTier(productName ?? null);
+  return tier === "villa_quad" || tier === "villa_quint";
 }
 
 function parseMoneyValue(v: string | null | undefined): number | null {

@@ -1460,7 +1460,18 @@ export async function refineContractBrief(
   };
 }
 
-/** Une occupancy_codes / tipo_unidad / occupancies_by_product de todos los briefs. */
+/** Primer string no vacío de la lista (útil al fusionar briefs). */
+function firstNonEmpty(...vals: Array<string | null | undefined>): string | null {
+  for (const v of vals) {
+    if (typeof v === "string" && v.trim() !== "") return v;
+  }
+  return null;
+}
+
+/**
+ * Une occupancy_codes / tipo_unidad / occupancies_by_product / bancos /
+ * políticas especiales de TODOS los briefs (p.ej. rates + T&C Lapa Rios).
+ */
 function mergeBriefsForValidation(
   primary: ContractBrief,
   all: ContractBrief[] | null,
@@ -1487,6 +1498,25 @@ function mergeBriefsForValidation(
       }
     }
   }
+
+  // Bancos: unión preservando orden (primario primero, luego secundarios).
+  const bankSeen = new Set<string>();
+  const bank_accounts: ContractBrief["bank_accounts"] = [];
+  for (const b of all) {
+    for (const acct of b.bank_accounts ?? []) {
+      const key = `${(acct.account_number ?? "").replace(/\s+/g, "").toLowerCase()}|${(acct.bank ?? "").toLowerCase()}`;
+      if (!key.replace("|", "") || bankSeen.has(key)) continue;
+      bankSeen.add(key);
+      bank_accounts.push(acct);
+    }
+  }
+
+  const secondary = all.slice(1);
+  const quadrupleFromAny = all.some((b) => b.quadruple_allowed === true);
+  const quadrupleForbiddenEverywhere = all.every(
+    (b) => b.quadruple_allowed === false,
+  );
+
   return enrichBriefOccupancies({
     ...primary,
     occupancy_codes:
@@ -1496,6 +1526,32 @@ function mergeBriefsForValidation(
       product,
       occupancy_codes: [...codes],
     })),
+    bank_accounts:
+      bank_accounts.length > 0 ? bank_accounts : primary.bank_accounts,
+    special_periods_note: firstNonEmpty(
+      primary.special_periods_note,
+      ...secondary.map((b) => b.special_periods_note),
+    ),
+    notes: firstNonEmpty(primary.notes, ...secondary.map((b) => b.notes)),
+    commission_summary: firstNonEmpty(
+      primary.commission_summary,
+      ...secondary.map((b) => b.commission_summary),
+    ),
+    meal_plan_note: firstNonEmpty(
+      primary.meal_plan_note,
+      ...secondary.map((b) => b.meal_plan_note),
+    ),
+    additional_person:
+      primary.additional_person.length > 0
+        ? primary.additional_person
+        : (secondary.find((b) => b.additional_person.length > 0)
+            ?.additional_person ?? primary.additional_person),
+    // Si algún brief tiene QDP explícito, no dejar que "false" del rate sheet lo anule.
+    quadruple_allowed: quadrupleForbiddenEverywhere
+      ? false
+      : quadrupleFromAny
+        ? true
+        : primary.quadruple_allowed,
   });
 }
 
@@ -1683,20 +1739,19 @@ export async function extractContract(
     );
   }
 
-  const { extraction, validation } = validateExtraction(
-    raw,
-    brief
-      ? enrichBriefOccupancies(
-          mergeBriefsForValidation(brief, confirmedBriefs),
-        )
-      : null,
-  );
+  const mergedBrief = brief
+    ? enrichBriefOccupancies(mergeBriefsForValidation(brief, confirmedBriefs))
+    : null;
 
-  // Reconciliación de cuentas bancarias + términos de pago: la extracción
-  // principal trae todas las cuentas y los payment_terms. Rellenamos la cuenta
-  // 1 (con MONEDA normalizada) y armamos el prefill de los campos manuales
-  // (cuentas 2/3 + cond_credito + plazo) para pre-llenar Step 2.
-  const { sharedPatch, bankPrefill } = reconcileBankAccounts(extraction, brief);
+  const { extraction, validation } = validateExtraction(raw, mergedBrief);
+
+  // Reconciliación de cuentas bancarias + términos de pago: usamos el brief
+  // FUSIONADO (rates + T&C) para que bancos/políticas del documento secundario
+  // no se pierdan (caso Lapa Rios).
+  const { sharedPatch, bankPrefill } = reconcileBankAccounts(
+    extraction,
+    mergedBrief,
+  );
   let data =
     Object.keys(sharedPatch).length > 0
       ? { ...extraction, shared_fields: { ...extraction.shared_fields, ...sharedPatch } }
