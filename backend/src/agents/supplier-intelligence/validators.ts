@@ -10,7 +10,7 @@ import {
   CATEGORIAS_BY_TIPO_SERVICIO,
 } from "./generated/serviceTypesData.js";
 import {
-  consolidateSeasonPeriodRows,
+  expandSeasonPeriodRows,
   deriveNetRackFromCommission,
   syncCommissionFromNetRack,
   detectOccupancyPolicy,
@@ -915,7 +915,11 @@ export function validateExtraction(
 
   if (brief) {
     extraction = syncSeasonDatesFromBrief(extraction, brief, warnings);
-    extraction = consolidateSeasonPeriodRows(extraction, brief, warnings);
+  }
+  // Un season start por fila: expande los tramos de temporada "; "-agrupados
+  // (aplica también sin brief — el modelo agrupa tramos en una sola fila).
+  extraction = expandSeasonPeriodRows(extraction, brief ?? null, warnings);
+  if (brief) {
     extraction = expandChildOccupancyRows(extraction, brief, warnings);
     extraction = stripDisallowedChildOccupancies(extraction, warnings);
   }

@@ -43,44 +43,40 @@ import type {
 } from "./types.js";
 
 /**
- * Opus 4.7 es el modelo de extracción. Es más caro y más lento que Sonnet,
- * pero la tarea ahora requiere generar potencialmente decenas de filas con
+ * Opus 5 es el modelo de extracción. Es más caro y más lento que Sonnet,
+ * pero la tarea requiere generar potencialmente decenas de filas con
  * razonamiento sobre múltiples temporadas/categorías — Opus paga el precio
  * en calidad de extracción.
  *
- * Notas de migración 4.6 → 4.7 (Anthropic, abr 2026):
- *   - Drop-in: mismo SDK, mismo tool-use, mismo schema, mismo pricing.
- *   - Context window: 500k → 1M tokens — perfecto para PDFs de 60+ páginas
- *     que antes nos tenían ajustados en input.
- *   - Tokenizer nuevo: el mismo input puede mapear a ~1.0-1.35x más tokens
- *     que con 4.6 (cost-aware, pero mucho menos que el riesgo de cortar
- *     contratos densos por context overflow).
- *   - SWE-bench Verified 84.1 → 87.6, 2x throughput agentic.
+ * Notas de migración 4.7 → 5 (ago 2026):
+ *   - Drop-in: mismo SDK, mismo tool-use, mismo schema, mismo pricing
+ *     ($5 / $25 por millón, igual que 4.7/4.8).
+ *   - Context window: 1M tokens (igual que 4.7). Max output: 128k (igual).
  */
-export const SUPPLIER_INTELLIGENCE_MODEL = "claude-opus-4-7";
+export const SUPPLIER_INTELLIGENCE_MODEL = "claude-opus-5";
 
 /**
  * Modelo de la pasada de BRIEF / Variables de Configuración (Fase 1).
- * Sonnet 4.5: rápido y barato para estructurar reglas globales; Opus se
- * reserva para la extracción de filas (pasada principal).
+ * Sonnet 5: rápido y barato para estructurar reglas globales; Opus se
+ * reserva para la extracción de filas (pasada principal). Context window de
+ * 1M tokens por defecto (los contratos densos >200k tokens reventaban el
+ * límite de 200k de Sonnet 4.5 con "prompt is too long") y MÁS BARATO que
+ * Sonnet 4.5/4.6: $2 / $10 por millón vs $3 / $15.
  */
-export const SUPPLIER_INTELLIGENCE_BRIEF_MODEL = "claude-sonnet-4-5";
+export const SUPPLIER_INTELLIGENCE_BRIEF_MODEL = "claude-sonnet-5";
 
 /**
- * Pricing oficial de Claude Opus 4.7 (USD por millón de tokens).
- *
- * Fuente: https://www.anthropic.com/news/claude-opus-4-7 (abr 2026).
- * Sin cambio respecto a 4.6 — same $5 / $25 por millón. Si Anthropic
- * cambia precios este es el único lugar donde editar — el cómputo de
- * `cost_usd` por extracción se hace abajo en `extractContract`.
- *
  * Pricing por modelo (USD por millón de tokens). El flujo usa DOS modelos
- * (Sonnet 4.6 para el brief, Opus 4.7 para la extracción), así que el costo se
+ * (Sonnet 5 para el brief, Opus 5 para la extracción), así que el costo se
  * calcula por-pasada con la tarifa del modelo correspondiente. Incluye los
  * buckets de cache por si Anthropic los reporta, aunque hoy no activamos
- * caching (ver `SUPPLIER_INTELLIGENCE_BRIEF_MODEL`).
+ * caching (ver `SUPPLIER_INTELLIGENCE_BRIEF_MODEL`). Se conservan las
+ * tarifas de modelos anteriores para poder recomputar costos de runs
+ * históricos. Si Anthropic cambia precios este es el único lugar donde
+ * editar — el cómputo de `cost_usd` por extracción se hace abajo en
+ * `extractContract`.
  *
- * Fuente: platform.claude.com/docs/about-claude/pricing (jun 2026).
+ * Fuente: platform.claude.com/docs/en/about-claude/pricing (ago 2026).
  */
 interface ModelPrices {
   input: number;
@@ -90,6 +86,8 @@ interface ModelPrices {
 }
 
 const MODEL_PRICES: Record<string, ModelPrices> = {
+  "claude-opus-5": { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5 },
+  "claude-sonnet-5": { input: 2, output: 10, cacheWrite: 2.5, cacheRead: 0.2 },
   "claude-opus-4-7": { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5 },
   "claude-opus-4-8": { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5 },
   "claude-sonnet-4-5": { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.3 },
@@ -98,7 +96,7 @@ const MODEL_PRICES: Record<string, ModelPrices> = {
 
 // Fallback a Opus (el más caro) si llegara un modelo desconocido — preferimos
 // sobre-estimar el costo que sub-reportarlo.
-const FALLBACK_PRICES: ModelPrices = MODEL_PRICES["claude-opus-4-7"]!;
+const FALLBACK_PRICES: ModelPrices = MODEL_PRICES["claude-opus-5"]!;
 
 /**
  * Telemetría de tokens normalizada a partir de un `Message` de Anthropic.
@@ -164,13 +162,13 @@ function sumUsage(parts: TokenUsage[]): TokenUsage {
  *   - 32k:  intento de cubrir BTPV (~130 filas), insuficiente.
  *   - 64k:  cubre BTPV (~40k output) con margen, pero PDFs muy densos
  *           empezaron a apretar.
- *   - 128k: máximo soportado por Opus 4.7. Damos todo el headroom posible
+ *   - 128k: máximo soportado por Opus 5 (igual que 4.7). Damos todo el headroom posible
  *           porque NO cobramos por el cap — solo por los tokens que
  *           efectivamente se emiten — así que el único costo es latencia
  *           si el modelo se acerca al cap. En la práctica un contrato
  *           normal se queda muy por debajo.
  *
- * El context window de Opus 4.7 es 1M, así que el cuello de botella
+ * El context window de Opus 5 es 1M, así que el cuello de botella
  * realista ahora es el output, no el input.
  *
  * NOTA: a partir de ~16k Anthropic recomienda streaming para evitar HTTP

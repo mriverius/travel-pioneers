@@ -1127,16 +1127,6 @@ function splitSeasonDateParts(raw: string): string[] {
     .filter(Boolean);
 }
 
-function formatCombinedSeasonDates(
-  periods: Array<{ starts: string; ends: string }>,
-): { starts: string; ends: string } {
-  const sorted = [...periods].sort((a, b) => a.starts.localeCompare(b.starts));
-  return {
-    starts: sorted.map((p) => p.starts).join("; "),
-    ends: sorted.map((p) => p.ends).join("; "),
-  };
-}
-
 function collectPeriodsFromRow(
   row: ContractRow,
 ): Array<{ starts: string; ends: string }> {
@@ -1178,10 +1168,17 @@ function rowDedupeKey(row: ContractRow): string {
 }
 
 /**
- * Una fila por producto×temporada×ocupación: rangos múltiples van en
- * season_starts/season_ends separados por "; " (no filas duplicadas).
+ * Un SEASON START por fila. Si una temporada tiene varios tramos calendario
+ * (múltiples season_starts — vengan "; "-agrupados en una fila del modelo,
+ * en filas repetidas, o confirmados en el brief), la información de la fila
+ * se DUPLICA en una fila por tramo: cada fila sale con un único par
+ * season_starts/season_ends.
+ *
+ * También deduplica filas idénticas (mismo producto×temporada×ocupación×
+ * precios) que el modelo haya emitido repetidas, y completa tramos que el
+ * brief confirmado conozca y las filas no traigan.
  */
-export function consolidateSeasonPeriodRows(
+export function expandSeasonPeriodRows(
   extraction: ExtractedContract,
   brief: ContractBrief | null | undefined,
   warnings: string[],
@@ -1201,7 +1198,7 @@ export function consolidateSeasonPeriodRows(
     g.pageIndices.push(i);
   });
 
-  let collapsed = 0;
+  let expandedGroups = 0;
   const newRows: ContractRow[] = [];
   const newPages: Record<string, SourcePage>[] = [];
 
@@ -1227,27 +1224,27 @@ export function consolidateSeasonPeriodRows(
       a.starts.localeCompare(b.starts),
     );
 
-    let season_starts = first.season_starts;
-    let season_ends = first.season_ends;
-    if (periods.length === 1) {
-      season_starts = periods[0]!.starts;
-      season_ends = periods[0]!.ends;
-    } else if (periods.length > 1) {
-      const combined = formatCombinedSeasonDates(periods);
-      season_starts = combined.starts;
-      season_ends = combined.ends;
+    const sourcePage =
+      extraction.paginas_origen_rows[group.pageIndices[0]!] ?? {};
+
+    if (periods.length === 0) {
+      // Sin fechas de temporada conocidas: la fila pasa tal cual.
+      newRows.push(first);
+      newPages.push(sourcePage);
+      continue;
     }
 
-    if (group.rows.length > 1) collapsed += group.rows.length - 1;
-
-    newRows.push({ ...first, season_starts, season_ends });
-    newPages.push(extraction.paginas_origen_rows[group.pageIndices[0]!] ?? {});
+    if (periods.length > 1) expandedGroups += 1;
+    for (const p of periods) {
+      newRows.push({ ...first, season_starts: p.starts, season_ends: p.ends });
+      newPages.push(sourcePage);
+    }
   }
 
-  if (collapsed > 0) {
+  if (expandedGroups > 0 || newRows.length !== extraction.rows.length) {
     warnings.push(
-      `Se consolidaron ${collapsed} fila(s) duplicadas por tramos de temporada — ` +
-        "las fechas quedaron en una sola línea (separadas por '; ').",
+      `Tramos de temporada expandidos: ${extraction.rows.length} fila(s) → ` +
+        `${newRows.length} fila(s) — cada fila sale con un único season start.`,
     );
   }
 
@@ -1258,13 +1255,26 @@ export function consolidateSeasonPeriodRows(
   };
 }
 
-/** @deprecated Usar consolidateSeasonPeriodRows. */
-export function expandSeasonPeriods(
-  extraction: ExtractedContract,
-  brief: ContractBrief | null | undefined,
-  warnings: string[],
-): ExtractedContract {
-  return consolidateSeasonPeriodRows(extraction, brief, warnings);
+/**
+ * Versión plana (sin brief ni dedupe) de la expansión de tramos: divide
+ * cualquier fila cuyo season_starts liste varios inicios "; "-separados en
+ * una fila por tramo. Guardrail del generate-xlsx: filas guardadas antes de
+ * este cambio (o editadas a mano en Step 2 con fechas agrupadas) salen
+ * igual expandidas al xlsx, con un único season start por fila.
+ */
+export function expandRowsBySeasonPeriods(rows: ContractRow[]): ContractRow[] {
+  const out: ContractRow[] = [];
+  for (const row of rows) {
+    const periods = collectPeriodsFromRow(row);
+    if (periods.length <= 1) {
+      out.push(row);
+      continue;
+    }
+    for (const p of periods) {
+      out.push({ ...row, season_starts: p.starts, season_ends: p.ends });
+    }
+  }
+  return out;
 }
 
 /** Completa occupancies_by_product desde categorías si el brief no lo trae. */

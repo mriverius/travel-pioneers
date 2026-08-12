@@ -13,6 +13,7 @@ import type {
   TipoUnidad,
 } from "./types.js";
 import { normalizeDate, normalizeSeasonDateField } from "./validators.js";
+import { expandRowsBySeasonPeriods } from "./catalogRules.js";
 
 /**
  * POST /api/supplier-intelligence/generate-xlsx
@@ -210,7 +211,10 @@ function parseGenerateInput(body: unknown): GenerateXlsxInput {
       `Demasiadas filas (${b.rows.length}). El máximo permitido es 500.`,
     );
   }
-  const rows = b.rows.map(coerceRow);
+  // Un season start por fila: filas con varios tramos "; "-agrupados
+  // (datos guardados viejos o edición manual en Step 2) se expanden en una
+  // fila por tramo antes de escribir el xlsx.
+  const rows = expandRowsBySeasonPeriods(b.rows.map(coerceRow));
 
   const catalog_prefill = coerceCatalogPrefill(b.catalog_prefill);
   const manual_fields = coerceManualFields(b.manual_fields);
