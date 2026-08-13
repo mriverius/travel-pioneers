@@ -45,12 +45,14 @@ export function getAnthropicClient(): Anthropic {
   // `timeout` explícito por request (cada pasada: brief y extracción
   // principal). El default del SDK es 10 min; una extracción densa (52k+
   // tokens de salida) puede acercarse a ese límite, y no queremos que el SDK
-  // aborte el stream justo antes de terminar. 14 min por llamada da headroom
-  // sin dejar que una llamada colgada corra para siempre. El ceiling del
-  // frontend (15 min, ver `api.ts`) cubre las dos pasadas en conjunto.
+  // aborte el stream justo antes de terminar. Contratos muy grandes (60+
+  // páginas, ~100k tokens de salida) pueden streamear 15-20 min — 25 min por
+  // llamada da headroom sin dejar que una llamada colgada corra para siempre.
+  // El ceiling del frontend (30 min de polling, ver `api.ts`) tiene que ser
+  // MAYOR que este techo para no rendirse antes que el backend.
   cached = new Anthropic({
     apiKey,
-    timeout: 14 * 60 * 1000,
+    timeout: 25 * 60 * 1000,
     // El dispatcher con timeouts de socket desactivados evita que undici
     // termine el stream largo de la pasada principal antes de tiempo.
     fetchOptions: { dispatcher: anthropicDispatcher },

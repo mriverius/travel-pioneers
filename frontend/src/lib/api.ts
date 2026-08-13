@@ -482,8 +482,13 @@ async function startAndPollExtraction(
   }
 
   // 2) Encuesta el estado cada POLL_INTERVAL_MS hasta done/error o deadline.
+  // MAX_WAIT_MS tiene que ser MAYOR que el techo del backend (25 min por
+  // pasada del SDK de Anthropic — ver `anthropicClient.ts`): si el cliente
+  // se rinde antes que el backend, el job puede terminar bien en el servidor
+  // y el usuario ver un timeout falso. Contratos muy grandes (60+ páginas,
+  // decenas de filas) pueden tardar 15-25 min de streaming Opus.
   const POLL_INTERVAL_MS = 3000;
-  const MAX_WAIT_MS = 15 * 60 * 1000;
+  const MAX_WAIT_MS = 30 * 60 * 1000;
   const MAX_CONSECUTIVE_FAILURES = 6;
   const deadline = Date.now() + MAX_WAIT_MS;
   let consecutiveFailures = 0;

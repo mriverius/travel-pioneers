@@ -45,10 +45,21 @@ const jobs = new Map<string, ExtractionJob>();
 /** TTL tras la última actualización; barremos jobs viejos para no fugar memoria. */
 const JOB_TTL_MS = 30 * 60 * 1000;
 
+/**
+ * Techo duro para jobs que siguen en `processing`. Un job en curso NO se
+ * puede barrer con el TTL normal: `updatedAt` solo cambia al crear/terminar,
+ * y una extracción legítima de un contrato muy grande puede correr 25+ min
+ * (ver `anthropicClient.ts`) — barrerla a los 30 min haría que el polling
+ * del frontend reciba un 404 con la extracción todavía corriendo. Este techo
+ * solo limpia jobs colgados de verdad (proceso que nunca completó ni falló).
+ */
+const STUCK_JOB_TTL_MS = 2 * 60 * 60 * 1000;
+
 function sweep(): void {
   const now = Date.now();
   for (const [id, job] of jobs) {
-    if (now - job.updatedAt > JOB_TTL_MS) {
+    const ttl = job.state === "processing" ? STUCK_JOB_TTL_MS : JOB_TTL_MS;
+    if (now - job.updatedAt > ttl) {
       jobs.delete(id);
     }
   }
