@@ -14,6 +14,8 @@ import {
   ROW_CLASSIFICATION_COL,
   ROW_COL,
   SHARED_COL,
+  TEMPLATE_AUX_SHEET_NAMES,
+  TEMPLATE_DATA_SHEET_ALIASES,
   TEMPLATE_DATA_SHEET_NAME,
   TEMPLATE_DATA_START_ROW,
   TIPO_TARIFA_FDS_COLS,
@@ -510,6 +512,38 @@ function expandSheetRef(sheet: WorkSheet, lastRow1Based: number): void {
 }
 
 /**
+ * Resolver el nombre de la hoja de datos dentro de la plantilla.
+ *
+ * La plantilla se actualiza cada tanto y con ella cambia el nombre de la
+ * hoja de datos (antes `MONTEVERDE_LODGE_CONTRACT_2026_`, hoy `TARIFAS`).
+ * Cuando el nombre hardcodeado no coincide con el de la plantilla real, la
+ * generación entera revienta con un 500. Para que eso no vuelva a pasar,
+ * la resolución es en cascada:
+ *
+ *   1. `TEMPLATE_DATA_SHEET_NAME` (nombre de la plantilla actual)
+ *   2. alias históricos (`TEMPLATE_DATA_SHEET_ALIASES`)
+ *   3. primera hoja que no sea uno de los catálogos auxiliares
+ *
+ * El paso 3 es el que salva el día: la hoja de datos es siempre la primera
+ * del libro, y las auxiliares tienen nombres estables.
+ */
+function resolveDataSheetName(workbook: WorkBook): string {
+  const candidates: string[] = [
+    TEMPLATE_DATA_SHEET_NAME,
+    ...TEMPLATE_DATA_SHEET_ALIASES,
+  ];
+  for (const name of candidates) {
+    if (workbook.Sheets[name]) return name;
+  }
+
+  const aux = new Set<string>(TEMPLATE_AUX_SHEET_NAMES);
+  const fallback = workbook.SheetNames.find(
+    (name) => !aux.has(name) && workbook.Sheets[name],
+  );
+  return fallback ?? TEMPLATE_DATA_SHEET_NAME;
+}
+
+/**
  * Generar el xlsx final.
  *
  * Pasos:
@@ -538,10 +572,11 @@ export function generateContractXlsx(
     cellStyles: true,
   });
 
-  const dataSheet = workbook.Sheets[TEMPLATE_DATA_SHEET_NAME];
+  const dataSheetName = resolveDataSheetName(workbook);
+  const dataSheet = workbook.Sheets[dataSheetName];
   if (!dataSheet) {
     throw new Error(
-      `La plantilla no contiene la hoja "${TEMPLATE_DATA_SHEET_NAME}". Hojas: ${workbook.SheetNames.join(", ")}`,
+      `La plantilla no contiene una hoja de datos usable. Hojas: ${workbook.SheetNames.join(", ")}`,
     );
   }
 
@@ -672,14 +707,14 @@ export function generateContractXlsx(
 
   // Renombrar la hoja de datos a ${PROVEEDOR}_${YEAR}
   const newSheetName = buildSheetName(input.shared_fields);
-  const sheetIdx = workbook.SheetNames.indexOf(TEMPLATE_DATA_SHEET_NAME);
-  if (sheetIdx !== -1 && newSheetName !== TEMPLATE_DATA_SHEET_NAME) {
+  const sheetIdx = workbook.SheetNames.indexOf(dataSheetName);
+  if (sheetIdx !== -1 && newSheetName !== dataSheetName) {
     // xlsx no tiene un rename helper; lo hacemos a mano preservando el orden.
     // dataSheet ya está validado arriba (early return si no existe), así que
     // aquí simplemente lo movemos al nuevo nombre.
     workbook.SheetNames[sheetIdx] = newSheetName;
     workbook.Sheets[newSheetName] = dataSheet;
-    delete workbook.Sheets[TEMPLATE_DATA_SHEET_NAME];
+    delete workbook.Sheets[dataSheetName];
   }
 
   const buffer: Buffer = XLSX.write(workbook, {

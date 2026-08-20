@@ -18,8 +18,29 @@ import type { ManualFieldKey, RowFieldKey, SharedFieldKey } from "./types.js";
 /** Fila 1-indexed donde empiezan los datos en la plantilla. */
 export const TEMPLATE_DATA_START_ROW = 7;
 
-/** Nombre original de la hoja de datos en la plantilla. */
-export const TEMPLATE_DATA_SHEET_NAME = "MONTEVERDE_LODGE_CONTRACT_2026_";
+/**
+ * Nombre de la hoja de datos en la plantilla ACTUAL
+ * (`data/plantilla-agente-utopia.xlsx`).
+ */
+export const TEMPLATE_DATA_SHEET_NAME = "TARIFAS";
+
+/**
+ * Nombres que la hoja de datos tuvo en plantillas anteriores. Se consultan
+ * como fallback para que un rollback de plantilla no rompa la generación.
+ */
+export const TEMPLATE_DATA_SHEET_ALIASES = [
+  "MONTEVERDE_LODGE_CONTRACT_2026_",
+] as const;
+
+/**
+ * Hojas auxiliares que la plantilla arrastra intactas (catálogos embebidos).
+ * Nunca son la hoja de datos — se usan para descartarlas cuando hay que
+ * detectar la hoja de datos por eliminación.
+ */
+export const TEMPLATE_AUX_SHEET_NAMES = [
+  "Tipos de Servicio",
+  "Categorias",
+] as const;
 
 /** Columnas para campos que provienen del catálogo lista-proveedores (no AI). */
 export const CATALOG_PREFILL_COL = {
