@@ -19,6 +19,9 @@ import {
   UserCheck,
   UserPlus,
   Download,
+  Send,
+  Undo2,
+  Wand2,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -51,6 +54,7 @@ import {
   type GenerateXlsxCatalogPrefill,
   type GenerateXlsxManualFields,
   type ManualBankPrefill,
+  type TableChatMessage,
 } from "@/lib/api";
 import { ConfigVariablesStep } from "./configStep";
 import {
@@ -1183,6 +1187,7 @@ export function SupplierWorkflow() {
               result={result}
               catalogPrefill={catalogPrefill}
               briefMetas={metas}
+              comments={comments}
               onApprove={approve}
               onBack={backToConfig}
               onGridReady={preparingGrid ? handleGridReady : undefined}
@@ -1202,7 +1207,7 @@ export function SupplierWorkflow() {
     </section>
 
     <div className="text-center mt-4 space-y-1">
-      <p className="text-[11px] text-muted-foreground/60">Version 2.0.1 - Agosto 20</p>
+      <p className="text-[11px] text-muted-foreground/60">Version 2.0.2 - Agosto 25</p>
       <a
         href="https://forms.gle/GANUbdcuAS3P7szS8"
         target="_blank"
@@ -2010,6 +2015,12 @@ export const ALL_COLUMNS: ColumnDef[] = [
   { excelCol: "AM", key: "other_included",            label: "Other Included",            scope: { kind: "row" },                      minWidth: 200, multiline: true },
   { excelCol: "AN", key: "feeds_adicionales",         label: "Fees Adicionales",          scope: { kind: "row" },                      minWidth: 180, multiline: true },
   { excelCol: "AO", key: "reservations_email",        label: "Reservations Email",        scope: { kind: "shared", source: "ai" },     minWidth: 200, inputType: "email" },
+  // Teléfono NO tiene columna en la plantilla (la IA lo extrae para
+  // validación E.164), pero sí viaja en el payload y queda en el historial
+  // del run. Se muestra igual para que el operador pueda corregirlo desde la
+  // misma grilla en lugar de tener un campo invisible e ineditable. El badge
+  // "—" indica que no se escribe en ninguna celda del xlsx.
+  { excelCol: "—",  key: "telefono",                   label: "Teléfono",                  scope: { kind: "shared", source: "ai" },     minWidth: 150, placeholder: "+506 2777 0000" },
   { excelCol: "AP", key: "cond_credito",              label: "Condiciones Crédito",       scope: { kind: "shared", source: "manual" }, minWidth: 150, options: () => COND_CREDITO_OPTIONS, placeholder: "1=Contado, 2=Crédito, 3=Prepago" },
   { excelCol: "AQ", key: "plazo",                     label: "Plazo",                     scope: { kind: "shared", source: "manual" }, minWidth: 120, placeholder: "30 días" },
   { excelCol: "AR", key: "numero_cuenta",             label: "Cuenta Bancaria 1",         scope: { kind: "shared", source: "ai" },     minWidth: 200, placeholder: "IBAN preferido" },
@@ -2027,8 +2038,9 @@ export const ALL_COLUMNS: ColumnDef[] = [
   { excelCol: "BA", key: "notes",                     label: "Notas",                     scope: { kind: "shared", source: "ai" },     minWidth: 320, multiline: true, placeholder: "Cláusulas/notas que no encajaron en otras columnas" },
 ];
 
-/** Keys del backend ExtractedSharedFields que tienen columna en el xlsx
- *  (telefono se extrae para validación pero NO tiene columna). */
+/** Keys del backend ExtractedSharedFields editables desde la grilla. Todas
+ *  tienen columna en el xlsx salvo `telefono`, que se muestra igual para que
+ *  el operador pueda corregirlo (ver ALL_COLUMNS). */
 // tipo_unidad / tipo_servicio NO viven en AI_SHARED_KEYS porque la UI los
 // trata como row-scoped (ver comentario en ALL_COLUMNS arriba). El valor
 // shared original del backend se preserva en `data.shared_fields` y se
@@ -2037,6 +2049,9 @@ export const ALL_COLUMNS: ColumnDef[] = [
 // `rows[i].tipo_unidad` / `tipo_servicio`.
 const AI_SHARED_KEYS: ExtractedSharedFieldKey[] = [
   "fecha", "proveedor", "nombre_comercial", "cedula", "direccion",
+  // telefono no tiene columna en el xlsx pero sí es editable en la grilla
+  // (ver ALL_COLUMNS) y viaja en el payload → tiene que estar en el estado.
+  "telefono",
   "pais", "state_province", "type_of_business",
   "contract_starts", "contract_ends", "reservations_email",
   "tipo_moneda", "numero_cuenta", "banco",
@@ -2212,10 +2227,217 @@ function mergeSecondaryBriefIntoPrimary(
   return [merged, ...rest];
 }
 
+/* ============================================================================
+   Mini chat de correcciones (Paso 3)
+   ========================================================================== */
+
+/**
+ * Un turno del hilo. `changes` solo viene en los turnos del asistente: es el
+ * resumen DETERMINISTA de lo que el backend aplicó (no lo que el modelo dice
+ * que hizo). Mostrar las dos cosas es a propósito — si el modelo dice "ajusté
+ * los 42 precios" pero el backend solo tocó 12, la discrepancia queda a la
+ * vista en lugar de esconderse.
+ */
+type ChatTurn = {
+  role: "user" | "assistant";
+  content: string;
+  changes?: string[];
+};
+
+/** Estado restaurable por el botón "Deshacer". */
+type TableSnapshot = {
+  sharedValues: Record<SharedKey, string | null>;
+  rows: ExtractedContractRow[];
+  rowSources: Record<string, ExtractionSourcePage>[];
+};
+
+const CHAT_EXAMPLES = [
+  "Revisá los precios, no agregaste el IVA del 13%",
+  "La comisión de temporada alta es 20%, no 25%",
+  "Poné la misma política de cancelación en todas las filas",
+];
+
+/**
+ * Chat de correcciones "en caliente" debajo de la tabla del Paso 3.
+ *
+ * La grilla ya permite editar celda por celda, pero hay correcciones que son
+ * inviables a mano: "sumá el IVA a los precios" en un contrato de 80 filas son
+ * 160 multiplicaciones. Acá el operador lo pide en una frase, el backend manda
+ * el JSON de la tabla a Claude, y las operaciones que devuelve se aplican
+ * server-side (la aritmética la hace el servidor, no el modelo).
+ */
+function TableChat({
+  messages,
+  busy,
+  error,
+  canUndo,
+  disabled,
+  onSend,
+  onUndo,
+}: {
+  messages: ChatTurn[];
+  busy: boolean;
+  error: string | null;
+  canUndo: boolean;
+  disabled: boolean;
+  onSend: (message: string) => void | Promise<void>;
+  onUndo: () => void;
+}) {
+  const [input, setInput] = useState("");
+  const blocked = busy || disabled;
+
+  const send = () => {
+    const msg = input.trim();
+    if (!msg || blocked) return;
+    setInput("");
+    void onSend(msg);
+  };
+
+  return (
+    <section className="rounded-xl border border-primary/25 bg-gradient-to-br from-primary/6 via-card/70 to-card/60">
+      <header className="flex items-center justify-between gap-3 px-4 py-3 border-b border-primary/15">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className="w-9 h-9 rounded-lg bg-primary/15 border border-primary/30 flex items-center justify-center shrink-0">
+            <Wand2 className="w-4 h-4 text-primary" />
+          </div>
+          <div className="min-w-0">
+            <p className="text-[14px] font-semibold text-foreground">
+              Corregir con IA antes de descargar
+            </p>
+            <p className="text-[11.5px] text-muted-foreground">
+              Pedile cambios sobre la tabla en lenguaje natural. Trabaja con los
+              datos de arriba, no vuelve a leer el contrato.
+            </p>
+          </div>
+        </div>
+        {canUndo && (
+          <button
+            type="button"
+            onClick={onUndo}
+            disabled={blocked}
+            className="inline-flex items-center gap-1.5 h-9 px-3 rounded-md border border-border bg-secondary/40 text-[12.5px] text-foreground hover:bg-secondary/70 transition-colors disabled:opacity-50 shrink-0"
+          >
+            <Undo2 className="w-3.5 h-3.5" />
+            Deshacer
+          </button>
+        )}
+      </header>
+
+      <div className="px-4 py-3 space-y-3">
+        {messages.length > 0 && (
+          <div className="max-h-[340px] overflow-y-auto space-y-3 pr-1">
+            {messages.map((m, i) =>
+              m.role === "user" ? (
+                <div key={i} className="flex justify-end">
+                  <div className="max-w-[85%] rounded-lg border border-primary/20 bg-primary/15 px-3 py-2 text-[13px] leading-relaxed text-foreground whitespace-pre-wrap">
+                    {m.content}
+                  </div>
+                </div>
+              ) : (
+                <div
+                  key={i}
+                  className="rounded-lg border border-border bg-card/70 px-3 py-2.5 space-y-2"
+                >
+                  <p className="text-[13px] leading-relaxed text-foreground whitespace-pre-wrap">
+                    {m.content}
+                  </p>
+                  {m.changes && m.changes.length > 0 && (
+                    <ul className="space-y-1 border-t border-border/60 pt-2">
+                      {m.changes.map((c, j) => (
+                        <li
+                          key={j}
+                          className="flex items-start gap-1.5 text-[11.5px] text-muted-foreground"
+                        >
+                          <Check className="w-3 h-3 mt-0.5 shrink-0 text-emerald-400" />
+                          <span>{c}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {m.changes && m.changes.length === 0 && (
+                    <p className="text-[11.5px] text-muted-foreground border-t border-border/60 pt-2">
+                      No se modificó ninguna celda.
+                    </p>
+                  )}
+                </div>
+              ),
+            )}
+            {busy && (
+              <div className="flex items-center gap-2 text-[12.5px] text-muted-foreground">
+                <Loader2 className="w-4 h-4 animate-spin text-primary" />
+                Aplicando la corrección sobre la tabla…
+              </div>
+            )}
+          </div>
+        )}
+
+        {messages.length === 0 && (
+          <div className="flex flex-wrap gap-1.5">
+            {CHAT_EXAMPLES.map((ex) => (
+              <button
+                key={ex}
+                type="button"
+                onClick={() => setInput(ex)}
+                disabled={blocked}
+                className="rounded-full border border-border bg-secondary/30 px-2.5 py-1 text-[11.5px] text-muted-foreground hover:bg-secondary/60 hover:text-foreground transition-colors disabled:opacity-50"
+              >
+                {ex}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {error && (
+          <div className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2.5 text-[12.5px] text-red-200">
+            <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+            <p>{error}</p>
+          </div>
+        )}
+
+        <div className="flex flex-col sm:flex-row gap-2">
+          <textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                send();
+              }
+            }}
+            disabled={blocked}
+            rows={2}
+            placeholder="Ej: Revisá los precios, no agregaste el IVA…"
+            className="flex-1 rounded-lg border border-border bg-secondary/30 px-3 py-2.5 text-[13px] text-foreground placeholder:text-muted-foreground/60 outline-none transition-colors focus:border-primary/60 focus:bg-secondary/50 resize-y min-h-[64px] disabled:opacity-50"
+          />
+          <button
+            type="button"
+            onClick={send}
+            disabled={blocked || input.trim() === ""}
+            className="inline-flex items-center justify-center gap-2 h-11 sm:h-auto sm:self-stretch px-4 rounded-lg border border-primary/40 bg-primary/10 text-primary text-[13px] font-semibold hover:bg-primary/15 transition-colors disabled:cursor-not-allowed disabled:opacity-50 shrink-0"
+          >
+            {busy ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                Corrigiendo…
+              </>
+            ) : (
+              <>
+                <Send className="w-4 h-4" />
+                Corregir
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function ReviewStep({
   result,
   catalogPrefill,
   briefMetas,
+  comments,
   onApprove,
   onBack,
   onGridReady,
@@ -2223,6 +2445,8 @@ function ReviewStep({
   result: ExtractContractResponse;
   catalogPrefill: CatalogPrefill | null;
   briefMetas: AnalyzeBriefMeta[];
+  /** Contexto libre que el operador escribió en el Paso 1. Alimenta el chat. */
+  comments: string;
   onApprove: (payload: ApprovedPayload) => void;
   onBack: () => void;
   onGridReady?: () => void;
@@ -2231,6 +2455,17 @@ function ReviewStep({
   const conf = CONFIANZA_STYLES[data.confianza];
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  /* --- Chat de correcciones en caliente (ver TableChat abajo) ------------ */
+  const [chatMessages, setChatMessages] = useState<ChatTurn[]>([]);
+  const [chatBusy, setChatBusy] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
+  /**
+   * Snapshot de la tabla ANTES de la última corrección del asistente, para el
+   * botón "Deshacer". Una sola posición: deshacer es una red de seguridad
+   * inmediata ("no era eso lo que quería"), no un historial completo.
+   */
+  const [undoSnapshot, setUndoSnapshot] = useState<TableSnapshot | null>(null);
 
   useEffect(() => {
     if (!onGridReady) return;
@@ -2275,6 +2510,17 @@ function ReviewStep({
     );
   };
 
+  /**
+   * Páginas de origen por fila, PARALELAS a `rows`. Antes se leían directo de
+   * `data.paginas_origen_rows`, que se desalineaba en cuanto el usuario
+   * agregaba o borraba una fila (y ahora también cuando el chat lo hace): la
+   * fila 8 mostraba el tooltip de la 7. Viven en estado y se mueven junto con
+   * las filas.
+   */
+  const [rowSources, setRowSources] = useState<
+    Record<string, ExtractionSourcePage>[]
+  >(() => data.rows.map((_, i) => data.paginas_origen_rows[i] ?? {}));
+
   const addRow = () => {
     setRows((prev) => {
       const last = prev[prev.length - 1];
@@ -2303,6 +2549,8 @@ function ReviewStep({
       };
       return [...prev, blank];
     });
+    // Fila nueva = sin página de origen conocida.
+    setRowSources((prev) => [...prev, {}]);
   };
 
   const removeRow = (rowIdx: number) => {
@@ -2310,6 +2558,9 @@ function ReviewStep({
       if (prev.length <= 1) return prev;
       return prev.filter((_, i) => i !== rowIdx);
     });
+    setRowSources((prev) =>
+      prev.length <= 1 ? prev : prev.filter((_, i) => i !== rowIdx),
+    );
   };
 
   const buildPayload = (): ApprovedPayload => {
@@ -2319,7 +2570,7 @@ function ReviewStep({
       nombre_comercial: sharedValues.nombre_comercial,
       cedula: sharedValues.cedula,
       direccion: sharedValues.direccion,
-      telefono: data.shared_fields.telefono,
+      telefono: sharedValues.telefono,
       pais: sharedValues.pais,
       state_province: sharedValues.state_province,
       type_of_business: sharedValues.type_of_business,
@@ -2431,6 +2682,101 @@ function ReviewStep({
     }
   };
 
+  /**
+   * Manda la tabla actual + el pedido del operador al asistente y reemplaza el
+   * estado con la versión corregida que devuelve el backend.
+   *
+   * Se manda el JSON de la grilla, NO los documentos: el asistente corrige lo
+   * que está en pantalla (recalcular precios con IVA, uniformar una política,
+   * borrar filas sobrantes). Para algo que requiera volver a leer el contrato,
+   * el camino sigue siendo "Volver a configuración" y re-extraer.
+   */
+  const handleChatSend = async (message: string) => {
+    const msg = message.trim();
+    if (!msg || chatBusy || downloading) return;
+
+    const payload = buildPayload();
+    setChatBusy(true);
+    setChatError(null);
+    setChatMessages((prev) => [...prev, { role: "user", content: msg }]);
+
+    try {
+      const res = await api.supplierIntelligence.refineTable({
+        shared_fields: payload.sharedFields,
+        rows: payload.rows,
+        catalog_prefill: payload.catalogPrefill,
+        manual_fields: payload.manualFields,
+        message: msg,
+        chat_history: chatMessages.map(
+          (m): TableChatMessage => ({ role: m.role, content: m.content }),
+        ),
+        comments: comments.trim() || null,
+      });
+
+      // Guardamos el estado previo ANTES de pisarlo, para que "Deshacer" sea
+      // una sola tecla si el asistente entendió mal.
+      setUndoSnapshot({
+        sharedValues,
+        rows,
+        rowSources,
+      });
+
+      const next = res.table;
+      setSharedValues((prev) => {
+        const merged: Record<string, string | null> = { ...prev };
+        for (const k of AI_SHARED_KEYS) {
+          merged[k] = next.shared_fields[k] ?? null;
+        }
+        for (const k of CATALOG_KEYS) {
+          merged[k] = next.catalog_prefill?.[k] ?? null;
+        }
+        for (const k of MANUAL_KEYS) {
+          merged[k] = next.manual_fields?.[k] ?? null;
+        }
+        return merged as Record<SharedKey, string | null>;
+      });
+      setRows(next.rows);
+      // Re-alineamos las páginas de origen con el mapa que devuelve el
+      // backend: sin esto, borrar una fila corre todos los tooltips de abajo.
+      setRowSources((prev) =>
+        res.row_index_map.map((origin) =>
+          origin === null ? {} : (prev[origin] ?? {}),
+        ),
+      );
+
+      setChatMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: res.reply, changes: res.changes },
+      ]);
+    } catch (err) {
+      setChatError(
+        describeRequestFailure(
+          err,
+          "No pudimos aplicar la corrección. Revisá tu conexión e intentá de nuevo.",
+        ),
+      );
+      // El turno del usuario queda en el hilo (para que vea qué pidió) pero
+      // sin respuesta: el error se muestra aparte.
+    } finally {
+      setChatBusy(false);
+    }
+  };
+
+  const handleUndo = () => {
+    if (!undoSnapshot || chatBusy) return;
+    setSharedValues(undoSnapshot.sharedValues);
+    setRows(undoSnapshot.rows);
+    setRowSources(undoSnapshot.rowSources);
+    setUndoSnapshot(null);
+    setChatMessages((prev) => [
+      ...prev,
+      {
+        role: "assistant",
+        content: "Deshice la última corrección — la tabla volvió a como estaba.",
+      },
+    ]);
+  };
+
   const handleApprove = () => {
     onApprove(buildPayload());
   };
@@ -2519,13 +2865,23 @@ function ReviewStep({
         rows={rows}
         sharedValues={sharedValues}
         paginasOrigenShared={data.paginas_origen_shared}
-        paginasOrigenRows={data.paginas_origen_rows}
+        paginasOrigenRows={rowSources}
         camposFaltantes={data.campos_faltantes}
         filename={meta.filename}
         onSharedChange={setSharedField}
         onRowChange={setRowField}
         onAddRow={addRow}
         onRemoveRow={removeRow}
+      />
+
+      <TableChat
+        messages={chatMessages}
+        busy={chatBusy}
+        error={chatError}
+        canUndo={undoSnapshot !== null}
+        disabled={downloading}
+        onSend={handleChatSend}
+        onUndo={handleUndo}
       />
 
       {downloadError && (
@@ -2610,12 +2966,14 @@ function FullTable({
           <div className="min-w-0">
             <p className="text-[14px] font-semibold text-foreground">
               Datos del xlsx · {rows.length} {rows.length === 1 ? "fila" : "filas"}{" "}
-              · 52 columnas
+              · {ALL_COLUMNS.length} columnas
             </p>
             <p className="text-[11.5px] text-muted-foreground">
-              Clic en una celda para editarla. Las columnas con fondo sutil son{" "}
-              <em className="italic">compartidas</em>: editar una propaga a todas
-              las filas.
+              Todas las celdas son editables: clic para escribir, o elegí del
+              desplegable cuando la columna tiene catálogo (con la opción
+              «Escribir a mano» para valores fuera de lista). Las columnas con
+              fondo sutil son <em className="italic">compartidas</em>: editar una
+              propaga a todas las filas.
             </p>
           </div>
         </div>
@@ -2815,8 +3173,23 @@ function FullTable({
 }
 
 /**
+ * Valor centinela de la opción "escribir a mano" en las celdas con catálogo.
+ * Elegirlo NO guarda nada: cambia la celda a un input de texto libre para que
+ * ninguna columna quede bloqueada cuando el valor correcto no está en la lista
+ * (catálogo desactualizado, código nuevo del proveedor, etc.).
+ */
+const FREE_TEXT_SENTINEL = "__tp_free_text__";
+
+/**
  * Editor de celda. Click → modo edit (input/textarea/select). Enter / blur
  * commit. Escape cancel. Source-page se muestra como tooltip al hover.
+ *
+ * TODA celda es editable, incluidas las que tienen catálogo:
+ *   - Si el catálogo tiene opciones, se muestra el `<select>` + la opción
+ *     "✏️ Escribir a mano" para meter un valor fuera de lista.
+ *   - Si el catálogo llega vacío (ej. `categoria` cuando la fila todavía no
+ *     tiene `tipo_servicio`), caemos directo a texto libre en lugar de
+ *     renderizar un desplegable sin opciones que no deja corregir nada.
  */
 function CellEditor({
   col,
@@ -2842,10 +3215,19 @@ function CellEditor({
   tipoMoneda: string | null;
   onSave: (v: string | null) => void;
 }) {
-  const isSelect = !!options;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
+  /**
+   * True mientras el usuario escribe a mano en una celda que normalmente
+   * muestra un desplegable. Se apaga al confirmar o cancelar, así la celda
+   * vuelve a su forma de catálogo (con el valor nuevo marcado como "fuera de
+   * catálogo" si corresponde).
+   */
+  const [freeText, setFreeText] = useState(false);
   const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
+
+  const hasOptions = !!options && options.length > 0;
+  const isSelect = hasOptions && !freeText;
 
   useEffect(() => {
     if (editing) inputRef.current?.focus();
@@ -2859,10 +3241,12 @@ function CellEditor({
     const trimmed = draft.trim();
     onSave(trimmed === "" ? null : trimmed);
     setEditing(false);
+    setFreeText(false);
     setDraft("");
   };
   const cancel = () => {
     setEditing(false);
+    setFreeText(false);
     setDraft("");
   };
   const handleKeyDown = (
@@ -2896,7 +3280,19 @@ function CellEditor({
     return (
       <select
         value={value ?? ""}
-        onChange={(e) => onSave(e.target.value === "" ? null : e.target.value)}
+        onChange={(e) => {
+          const next = e.target.value;
+          if (next === FREE_TEXT_SENTINEL) {
+            // No es un valor: es "quiero escribirlo yo". Abrimos el input con
+            // el valor actual como borrador para que se pueda ajustar en vez
+            // de tener que retipearlo entero.
+            setDraft(value ?? "");
+            setFreeText(true);
+            setEditing(true);
+            return;
+          }
+          onSave(next === "" ? null : next);
+        }}
         title={tooltip}
         aria-label={col.label}
         className="w-full h-7 rounded border border-transparent bg-transparent px-1 text-[12px] text-foreground outline-none hover:border-border focus:border-primary/60 focus:bg-secondary/40 cursor-pointer"
@@ -2912,6 +3308,7 @@ function CellEditor({
             {value} (fuera de catálogo)
           </option>
         )}
+        <option value={FREE_TEXT_SENTINEL}>✏️ Escribir a mano…</option>
       </select>
     );
   }

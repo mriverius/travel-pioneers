@@ -92,7 +92,7 @@ function coerceTipoUnidad(v: unknown): TipoUnidad | null {
   return null;
 }
 
-function coerceSharedFields(input: unknown): SharedFields {
+export function coerceSharedFields(input: unknown): SharedFields {
   if (!input || typeof input !== "object") {
     throw ApiError.badRequest("`shared_fields` debe ser un objeto.");
   }
@@ -120,7 +120,7 @@ function coerceSharedFields(input: unknown): SharedFields {
   };
 }
 
-function coerceRow(input: unknown, index: number): ContractRow {
+export function coerceRow(input: unknown, index: number): ContractRow {
   if (!input || typeof input !== "object") {
     throw ApiError.badRequest(`rows[${index}] debe ser un objeto.`);
   }
@@ -151,7 +151,7 @@ function coerceRow(input: unknown, index: number): ContractRow {
   };
 }
 
-function coerceManualFields(input: unknown): ManualFields | null {
+export function coerceManualFields(input: unknown): ManualFields | null {
   if (input === null || input === undefined) return null;
   if (typeof input !== "object") {
     throw ApiError.badRequest("`manual_fields` debe ser un objeto o null.");
@@ -174,7 +174,7 @@ function coerceManualFields(input: unknown): ManualFields | null {
   };
 }
 
-function coerceCatalogPrefill(input: unknown): CatalogPrefillInput | null {
+export function coerceCatalogPrefill(input: unknown): CatalogPrefillInput | null {
   if (input === null || input === undefined) return null;
   if (typeof input !== "object") {
     throw ApiError.badRequest("`catalog_prefill` debe ser un objeto o null.");

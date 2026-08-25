@@ -976,6 +976,60 @@ export interface GenerateXlsxInput {
   manual_fields?: GenerateXlsxManualFields | null;
 }
 
+/* --- refine-table (chat de correcciones del Paso 3) --- */
+
+/** Mensaje del mini chat de correcciones de la tabla (Paso 3). */
+export interface TableChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+/**
+ * Envolvente de la tabla que viaja al chat de correcciones y vuelve
+ * corregida. Es exactamente la misma forma que `GenerateXlsxInput` — el
+ * asistente trabaja sobre lo que se va a escribir en el xlsx, ni más ni menos.
+ */
+export interface RefineTableInput {
+  shared_fields: ExtractedSharedFields;
+  rows: ExtractedContractRow[];
+  catalog_prefill: GenerateXlsxCatalogPrefill | null;
+  manual_fields: GenerateXlsxManualFields | null;
+  /** Pedido del operador en lenguaje natural. */
+  message: string;
+  /** Historial del chat para que el asistente no repita lo ya resuelto. */
+  chat_history?: TableChatMessage[];
+  /** Comentarios que el operador dio al subir el contrato (Paso 1). */
+  comments?: string | null;
+}
+
+export interface RefineTableResponse {
+  success: true;
+  table: {
+    shared_fields: ExtractedSharedFields;
+    rows: ExtractedContractRow[];
+    catalog_prefill: GenerateXlsxCatalogPrefill | null;
+    manual_fields: GenerateXlsxManualFields | null;
+  };
+  /**
+   * Para cada fila devuelta, el índice 0-based que tenía en la tabla enviada
+   * (o `null` si el asistente la creó). Permite re-alinear los metadatos
+   * paralelos de la grilla (páginas de origen) cuando se agregan o borran
+   * filas.
+   */
+  row_index_map: (number | null)[];
+  /** Respuesta en lenguaje natural para el hilo del chat. */
+  reply: string;
+  /** Resumen determinista de lo que el backend efectivamente aplicó. */
+  changes: string[];
+  meta: {
+    model: string;
+    processed_at: string;
+    input_tokens?: number;
+    output_tokens?: number;
+    cost_usd?: number;
+  };
+}
+
 /* --- match-supplier (fallback IA del lookup contra el catálogo) --- */
 
 export type MatchSupplierConfidence = "alta" | "media" | "baja";
@@ -1333,6 +1387,27 @@ export const api = {
         "/api/supplier-intelligence/generate-xlsx",
         { method: "POST", body: input },
         "contrato.xlsx",
+      );
+    },
+    /**
+     * Chat de correcciones "en caliente" del Paso 3. Manda la tabla que el
+     * operador está revisando + su pedido en lenguaje natural, y devuelve la
+     * tabla ya corregida.
+     *
+     * No re-sube los documentos: el contexto es el JSON de la grilla. Eso lo
+     * hace barato y rápido comparado con `refineBrief` (que sí manda los
+     * archivos) — el chat tiene que sentirse como un chat. La contrapartida es
+     * que el asistente solo puede razonar sobre lo que está en la tabla; si le
+     * piden un dato que no está, responde pidiéndolo en lugar de inventarlo.
+     *
+     * Timeout de 3 minutos: es un solo pase de Opus sobre un payload chico,
+     * pero una tabla de 300+ filas con muchas celdas a reescribir puede
+     * acercarse al minuto.
+     */
+    refineTable(input: RefineTableInput) {
+      return request<RefineTableResponse>(
+        "/api/supplier-intelligence/refine-table",
+        { method: "POST", body: input, timeoutMs: 3 * 60 * 1000 },
       );
     },
     /**

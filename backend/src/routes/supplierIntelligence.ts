@@ -13,6 +13,7 @@ import {
   matchServiceHandler,
 } from "../agents/supplier-intelligence/matchController.js";
 import { generateXlsxHandler } from "../agents/supplier-intelligence/generateController.js";
+import { refineTableHandler } from "../agents/supplier-intelligence/tableChatController.js";
 import {
   contractRunStatsHandler,
   listContractRunsHandler,
@@ -106,6 +107,31 @@ const generateJsonParser = json({ limit: "4mb" });
  * así que reutilizamos el mismo límite de 4 MB.
  */
 const contractsJsonParser = json({ limit: "4mb" });
+
+/**
+ * Chat de correcciones del Paso 3: el body es la misma tabla que manda
+ * `/generate-xlsx` (hasta 500 filas) más el mensaje del operador — mismo
+ * cap de 4 MB.
+ */
+const refineTableJsonParser = json({ limit: "4mb" });
+
+/**
+ * Rate limit del chat de la tabla. Cada mensaje es una llamada a Opus, así
+ * que es más estrecho que el de generate-xlsx (que no toca Anthropic) pero
+ * suficiente para una conversación fluida: ~1 mensaje cada 2 segundos.
+ */
+const refineTableLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: {
+      message:
+        "Demasiadas correcciones seguidas. Esperá un minuto e intentá de nuevo.",
+    },
+  },
+});
 
 /**
  * Rate limit para escritura de runs: cada step 3 exitoso del usuario emite
@@ -230,6 +256,22 @@ router.post(
   generateLimiter,
   generateJsonParser,
   asyncHandler(generateXlsxHandler),
+);
+
+/**
+ * POST /api/supplier-intelligence/refine-table
+ *
+ * Chat de correcciones "en caliente" del Paso 3. Recibe la tabla que el
+ * operador está revisando + su pedido en lenguaje natural, y devuelve la
+ * tabla corregida. JSON puro — a diferencia de `/refine-brief` NO re-sube los
+ * documentos: el contexto es el JSON de la grilla, que es justo lo que el
+ * operador quiere corregir.
+ */
+router.post(
+  "/refine-table",
+  refineTableLimiter,
+  refineTableJsonParser,
+  asyncHandler(refineTableHandler),
 );
 
 /**

@@ -234,12 +234,38 @@ src/agents/supplier-intelligence/
 │   └── index.ts            # detect kind + dispatch
 ├── anthropicClient.ts      # lazy singleton Anthropic client
 ├── service.ts              # calls Claude with forced tool_use
+├── tableChatService.ts     # POST /refine-table — correcciones del Paso 3
+├── tableChatController.ts  # POST handler de /refine-table
 ├── validators.ts           # IBAN mod-97, cédula, phone E.164 checks
 ├── uploadMiddleware.ts     # multer memoryStorage, 20 MB, mime filter
 ├── errorHandler.ts         # scoped {success:false, error:{code,message}}
 ├── controller.ts           # POST handler
 └── types.ts
 ```
+
+### `POST /api/supplier-intelligence/refine-table`
+
+Chat de correcciones "en caliente" del Paso 3 (Revisar información). JSON puro
+— a diferencia de `/refine-brief`, **no** re-sube los documentos: el contexto es
+la tabla que el operador está viendo.
+
+Body: la misma envolvente que `/generate-xlsx` (`shared_fields`, `rows`,
+`catalog_prefill`, `manual_fields`) más `message` (el pedido en lenguaje
+natural), `chat_history` y `comments` opcionales.
+
+Claude no devuelve la tabla completa sino una lista de **operaciones**
+(`set_shared`, `set_rows`, `set_cells`, `scale_rows`, `delete_rows`,
+`add_rows`) que el servidor aplica. Tres razones: cuesta ~50x menos que
+regenerar 100 filas por mensaje, el modelo no puede perder filas que no tocó, y
+la aritmética (`scale_rows`, ej. ×1.13 para agregar IVA) la hace el servidor con
+precisión exacta en lugar del LLM a mano.
+
+Respuesta: `{ success, table, row_index_map, reply, changes, meta }`.
+`row_index_map` mapea cada fila del resultado a su índice original (o `null` si
+es nueva) para que el frontend re-alinee las páginas de origen; `changes` es el
+resumen **determinista** de lo que el servidor aplicó realmente — se muestra
+junto a `reply` para que una discrepancia entre lo que el modelo dice y lo que
+pasó quede a la vista.
 
 ## Roles
 
