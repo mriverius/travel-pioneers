@@ -240,19 +240,22 @@ TARIFAS DE ALIMENTACIÓN / COMIDAS CON PRECIO (filas extra):
   El desayuno, por estar incluido, NO genera fila — va en meals_included
   de las filas de hospedaje.
 
-POLÍTICAS POR FILA:
+POLÍTICAS: row_defaults + OVERRIDES POR FILA (economía de salida):
 
   Las políticas (cancellation_policy, range_payment_policy, kids_policy,
-  other_included, feeds_adicionales) viven dentro de cada \`row\` porque
-  PUEDEN variar por temporada. En Parador, por ejemplo, el plazo de pago
-  varía: PEAK = 60 días antes, ALTA = 30 días, BAJA = 15 días.
+  other_included, feeds_adicionales) van UNA SOLA VEZ en \`row_defaults\`
+  — NUNCA las repitas fila por fila. El servidor copia los defaults a cada
+  fila automáticamente.
 
-  - Si la política varía por temporada → pon LA POLÍTICA DE ESA TEMPORADA
-    en cada fila correspondiente.
-  - Si no varía → copia el mismo valor en TODAS las filas. La UI las
-    colapsará automáticamente.
+  - Si una política NO varía entre filas → escribila SOLO en row_defaults
+    y OMITÍ el campo en las filas (o dejalo null).
+  - Si varía por temporada (Parador: plazo de pago PEAK = 60 días antes,
+    ALTA = 30 días, BAJA = 15 días) → poné en row_defaults la variante más
+    común y escribí el campo SOLO en las filas cuya política DIFIERE.
 
-  Aplica el mismo criterio a los precios y meals_included.
+  Esto importa: repetir párrafos idénticos en cientos de filas agota el
+  límite de tokens de salida y trunca la extracción. Los PRECIOS y
+  meals_included sí van siempre por fila (son datos de la fila).
 
 ═══════════════════════════════════════════════════════════════════════════
 PRINCIPIOS GENERALES
@@ -535,7 +538,10 @@ REGLAS POR CAMPO (rows[])
       porcentaje_comision = "0" y neto = rack (mismo valor).
     - Si NO hay comisión ni neto explícito y solo hay un precio → copiar el
       mismo valor a neto y rack.
-    - Si no distingue weekday/weekend → copiar valor estándar a _fds.
+    - Si no distingue weekday/weekend → OMITÍ los campos _fds (o dejalos
+      null): el servidor copia el valor estándar automáticamente. Solo
+      emití _fds cuando el contrato tiene tarifas de fin de semana
+      DISTINTAS.
 
     - ⚠️ SEGURIDAD — los precios son el dato MÁS sensible del contrato:
       si NO estás 100% seguro de un valor de precio (ambiguo, ilegible, no
@@ -545,9 +551,11 @@ REGLAS POR CAMPO (rows[])
       Es preferible un campo vacío para revisión humana que un número
       incorrecto.
 
-21. Políticas: resumir a 1-2 oraciones cada una. Si varían por temporada,
-    poner la política de ESA temporada (la fila a la que pertenece). Si no
-    varían, copiar el mismo valor en todas las filas (la UI lo colapsa).
+21. Políticas: resumir a 1-2 oraciones cada una y escribirlas UNA sola vez
+    en \`row_defaults\`. Si varían por temporada, poner en row_defaults la
+    variante más común y sobreescribir el campo SOLO en las filas que
+    difieren; en el resto de las filas OMITIR el campo (el servidor hereda
+    el default).
     - range_payment_policy describe las CONDICIONES de pago (plazos,
       depósitos, anticipos, penalidades), NO los medios de pago
       (transferencia, tarjeta, etc.). Incluí el número de días explícito

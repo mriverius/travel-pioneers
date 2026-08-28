@@ -83,3 +83,28 @@ But until now the brief was *auto-injected* — if the brief got IVA wrong, that
 - **"Doesn't miss details":** completeness is enforced from three directions now — the brief's `expected_row_estimate`, the season-coverage check, and the existing occupancy expansion (TPL/QDP) and section inventory in the prompt. The config gate lets the user bump the estimate or add a missing season so the warning fires if extraction comes up short.
 - **If you later get true scans:** add a pre-step that routes no-text-layer PDFs/images through layout-aware OCR (Textract/Document AI) and feed the result to the same pipeline — don't replace Claude with it.
 - **Schema is the contract:** because extraction is `tool_choice`-forced, the JSON schema is your strongest guardrail. Keep widening *descriptions* (cheap, high-yield) before adding more passes.
+
+## Optimización de salida y fragmentación por temporadas (ago 2026)
+
+El cuello de botella real en contratos densos resultó ser el **output** (cap de 128k tokens de Opus), no el input (ventana de 1M). El caso Four Seasons (25 categorías × 5+ tramos de temporada × ocupaciones por adultos + líneas de niño/transfers) proyectaba 350-500 filas y el formato anterior repetía las 5 políticas de texto largo (~100-200 tokens c/u) **en cada fila**, así que la respuesta reventaba el cap y se perdía todo. Tres cambios lo resuelven:
+
+### 1. Salida compacta: `row_defaults` + omisión de `*_fds` (~60-70% menos output)
+
+- El tool schema ahora tiene un bloque `row_defaults` a nivel contrato con `cancellation_policy`, `range_payment_policy`, `kids_policy`, `other_included` y `feeds_adicionales`. El modelo las escribe **una sola vez**; una fila solo lleva el campo cuando su valor difiere (override).
+- Los campos `precios_neto_iva_fds` / `precio_rack_iva_fds` / `porcentaje_comision_fds` se **omiten** cuando el contrato no distingue weekday/weekend.
+- `required` por fila bajó de 21 a 13 campos (identidad + precios estándar).
+- El **fan-out es determinístico y server-side** (`applyRowDefaults` en `coerceExtraction`): el resto del pipeline — validators, expansión TPL/QDP, xlsx, UI, chat de tabla — sigue viendo filas completas. El cambio de formato es invisible fuera de `service.ts`.
+
+### 2. Truncamiento con rescate en lugar de fail duro
+
+La SDK acumula el JSON del tool_use con un parser de JSON **parcial**, así que aunque la respuesta se corte por `max_tokens`, llegan todas las filas completas + una a medias. Antes se tiraba un 502 y se perdía toda la pasada (ya pagada); ahora `runExtractionPass` descarta solo la última fila y sigue, prependeando una advertencia `⚠️ EXTRACCIÓN INCOMPLETA` a las validation warnings (el check determinístico de completitud contra el brief marca además qué temporadas quedaron cortas). El 502 queda solo para cuando no hay ni una fila rescatable.
+
+### 3. Fragmentación por temporadas (flujo gated)
+
+Cuando el brief **confirmado por el usuario** estima más de `SHARD_ROW_THRESHOLD` (160) filas y hay 2+ temporadas, `planSeasonShards` parte la extracción en pasadas de ~100 filas por temporada. La pasada 1 corre sola (escribe el prompt cache del documento y captura las filas sin temporada: transfers, tours, comidas); las demás corren **en paralelo** leyendo el documento desde cache al 10% del costo de input. `mergeExtractions` consolida: filas deduplicadas, bancos/campos_faltantes unidos, la peor `confianza`, `paginas_origen_rows` en paralelo. Solo aplica con UN brief confirmado (multi-brief sigue en una pasada para no romper la consolidación entre documentos).
+
+### 4. Prompt caching
+
+`buildUserMessage` marca el último bloque de documento con `cache_control: ephemeral`. Beneficia: cada turno del chat de refine del Paso 2 (mismo prefijo system+tools+docs que el brief, en Sonnet), las pasadas 2..N de la fragmentación, y los reintentos de transporte. El cómputo de costo ya separaba los buckets cacheWrite/cacheRead, así que el badge de costo por corrida sigue siendo exacto.
+
+**Regla de tuning:** si un contrato vuelve a acercarse al cap con el formato compacto, bajá `SHARD_ROW_THRESHOLD` antes que subir nada más — el costo marginal de una pasada extra con cache es bajo.

@@ -430,6 +430,70 @@ interface BuildUserMessageOpts {
   briefConfirmed?: boolean;
   /** Contexto de refinamiento — solo en mode "refine". */
   refine?: BriefRefineContext;
+  /**
+   * Pasada PARCIAL de extracción (contratos densos fragmentados por
+   * temporada). `seasonNames` son las temporadas de ESTA pasada; la pasada
+   * 0 además captura las filas sin temporada (transfers, tours, comidas).
+   */
+  shard?: ExtractionShard;
+}
+
+/** Una pasada parcial del plan de fragmentación por temporadas. */
+export interface ExtractionShard {
+  index: number;
+  total: number;
+  seasonNames: string[];
+}
+
+/**
+ * Instrucción de ECONOMÍA DE SALIDA para la pasada de extracción. El cuello
+ * de botella real en contratos densos es el output (128k máx.), no el input
+ * (ventana de 1M) — así que le exigimos al modelo el formato compacto que el
+ * schema ya permite: defaults una vez, overrides solo cuando difieren.
+ */
+const OUTPUT_ECONOMY_INSTRUCTION =
+  "ECONOMÍA DE SALIDA (OBLIGATORIO): el límite duro de esta tarea es el " +
+  "tamaño de la RESPUESTA, no tu capacidad de lectura. Para que un contrato " +
+  "denso quepa completo:\n" +
+  "  • Escribí las políticas (cancellation_policy, range_payment_policy, " +
+  "kids_policy, other_included, feeds_adicionales) UNA SOLA VEZ en " +
+  "`row_defaults`. En las filas OMITÍ esos campos salvo que esa fila " +
+  "difiera del default.\n" +
+  "  • OMITÍ los campos *_fds cuando el contrato no distingue " +
+  "weekday/weekend — el servidor copia la tarifa estándar.\n" +
+  "  • En paginas_origen_rows anotá solo los campos de precio; usá {} si " +
+  "no hay nada que anotar.\n" +
+  "  • NO omitas filas: la economía es por campo repetido, JAMÁS por " +
+  "combinación product × season × ocupación.";
+
+/** Instrucción de pasada parcial (fragmentación por temporadas). */
+function renderShardInstruction(shard: ExtractionShard): string {
+  const seasonList = shard.seasonNames.map((s) => `"${s}"`).join(", ");
+  const seasonless =
+    shard.index === 0
+      ? "Incluí TAMBIÉN en esta pasada las filas que NO dependen de " +
+        "temporada (transfers, tours, alimentación/desayunos opcionales, " +
+        "servicios de tarifa única)."
+      : "NO incluyas filas sin temporada (transfers, tours, comidas de " +
+        "tarifa única) — esas se extraen en la pasada 1.";
+  return (
+    "═══════════════════════════════════════════════════════════════════\n" +
+    `PASADA PARCIAL ${shard.index + 1} de ${shard.total} — EXTRACCIÓN POR TEMPORADAS\n` +
+    "═══════════════════════════════════════════════════════════════════\n\n" +
+    "Este contrato es demasiado denso para extraerlo en una sola respuesta, " +
+    "así que se fragmentó por temporadas. En ESTA pasada generá ÚNICAMENTE " +
+    `las filas cuyo season_name corresponda a: ${seasonList}. ` +
+    "Las demás temporadas se extraen en otras pasadas — NO las incluyas.\n" +
+    seasonless +
+    "\nDentro de tus temporadas asignadas seguí generando TODAS las " +
+    "combinaciones product × ocupación — la fragmentación es por temporada, " +
+    "no un permiso para resumir. El estimado global de filas del brief " +
+    "(row_plan.expected_rows) aplica al TOTAL de todas las pasadas juntas, " +
+    "no a esta pasada.\n" +
+    "shared_fields, row_defaults, bank_accounts, payment_terms y " +
+    "paginas_origen_shared van COMPLETOS en cada pasada (el servidor " +
+    "consolida)."
+  );
 }
 
 /** Contexto acumulado para POST /refine-brief. */
@@ -443,7 +507,8 @@ function buildUserMessage(
   docs: PreparedDocumentInput[],
   opts: BuildUserMessageOpts,
 ): MessageParam {
-  const { context: ctx, mode, brief, briefs, refine, briefConfirmed } = opts;
+  const { context: ctx, mode, brief, briefs, refine, briefConfirmed, shard } =
+    opts;
   const content: ContentBlockParam[] = [];
 
   const contextBlock = buildContextBlock(ctx);
@@ -507,6 +572,23 @@ function buildUserMessage(
       });
     }
   });
+
+  // PROMPT CACHING: breakpoint tras el último bloque de documento. El prefijo
+  // cacheado (system + tools + contexto + documentos) es idéntico entre:
+  //   - brief → refine(s): cada turno del chat del Paso 2 re-manda los
+  //     documentos; con el cache los relee al 10% del precio de input.
+  //   - las pasadas parciales de extracción (fragmentación por temporadas):
+  //     la pasada 1 escribe el cache y las demás lo leen.
+  //   - los reintentos de transporte de `runStreamWithRetry`.
+  // Si el prefijo no llega al mínimo cacheable del modelo, la API lo ignora
+  // silenciosamente — no hay caso de error nuevo. El cómputo de costo ya
+  // distingue los buckets cacheWrite/cacheRead (ver `usageFromMessage`).
+  if (content.length > 0) {
+    const lastDocBlock = content[content.length - 1] as ContentBlockParam & {
+      cache_control?: { type: "ephemeral" };
+    };
+    lastDocBlock.cache_control = { type: "ephemeral" };
+  }
 
   if (mode === "brief") {
     content.push({ type: "text", text: CONTRACT_BRIEF_INSTRUCTION });
@@ -593,6 +675,10 @@ function buildUserMessage(
         "fila. Respeta las reglas del system prompt y el CONTRACT BRIEF de " +
         "arriba (impuestos, persona adicional, bancos, inventario).";
   content.push({ type: "text", text: closingBase });
+  content.push({ type: "text", text: OUTPUT_ECONOMY_INSTRUCTION });
+  if (shard && shard.total > 1) {
+    content.push({ type: "text", text: renderShardInstruction(shard) });
+  }
 
   return { role: "user", content };
 }
@@ -675,6 +761,68 @@ function coerceRow(input: unknown): ContractRow {
   };
 }
 
+/**
+ * Defaults a nivel contrato para los campos de texto largo de las filas
+ * (ver `rowDefaultsSchema` en prompts/toolSchema.ts). El modelo los emite
+ * UNA sola vez y acá hacemos el fan-out determinístico a cada fila, de modo
+ * que TODO el pipeline downstream (validators, xlsx, UI, chat de tabla)
+ * sigue viendo filas completas — el cambio de formato es invisible fuera
+ * de este archivo.
+ *
+ * Motivación: con el formato anterior el modelo re-escribía las mismas
+ * políticas (100-200 tokens cada una) en CADA fila. En contratos densos
+ * (Four Seasons: ~400 filas) eso solo ya superaba el cap de 128k tokens de
+ * salida y truncaba la extracción.
+ */
+interface RowTextDefaults {
+  cancellation_policy: string | null;
+  range_payment_policy: string | null;
+  kids_policy: string | null;
+  other_included: string | null;
+  feeds_adicionales: string | null;
+}
+
+const EMPTY_ROW_DEFAULTS: RowTextDefaults = {
+  cancellation_policy: null,
+  range_payment_policy: null,
+  kids_policy: null,
+  other_included: null,
+  feeds_adicionales: null,
+};
+
+function coerceRowDefaults(v: unknown): RowTextDefaults {
+  if (!v || typeof v !== "object") return EMPTY_ROW_DEFAULTS;
+  const r = v as Record<string, unknown>;
+  return {
+    cancellation_policy: stringOrNull(r.cancellation_policy),
+    range_payment_policy: stringOrNull(r.range_payment_policy),
+    kids_policy: stringOrNull(r.kids_policy),
+    other_included: stringOrNull(r.other_included),
+    feeds_adicionales: stringOrNull(r.feeds_adicionales),
+  };
+}
+
+/**
+ * Materializa en una fila (a) los defaults de políticas cuando la fila no
+ * los sobreescribió, y (b) la convención `_fds` = tarifa estándar cuando el
+ * contrato no distingue weekday/weekend (el modelo ahora OMITE esos campos
+ * en vez de copiarlos — misma semántica del maestro Utopía, cero tokens).
+ */
+function applyRowDefaults(row: ContractRow, d: RowTextDefaults): ContractRow {
+  return {
+    ...row,
+    precios_neto_iva_fds: row.precios_neto_iva_fds ?? row.precios_neto_iva,
+    precio_rack_iva_fds: row.precio_rack_iva_fds ?? row.precio_rack_iva,
+    porcentaje_comision_fds:
+      row.porcentaje_comision_fds ?? row.porcentaje_comision,
+    cancellation_policy: row.cancellation_policy ?? d.cancellation_policy,
+    range_payment_policy: row.range_payment_policy ?? d.range_payment_policy,
+    kids_policy: row.kids_policy ?? d.kids_policy,
+    other_included: row.other_included ?? d.other_included,
+    feeds_adicionales: row.feeds_adicionales ?? d.feeds_adicionales,
+  };
+}
+
 function coercePaginasOrigen(
   input: unknown,
 ): Record<string, SourcePage> {
@@ -694,7 +842,17 @@ function coercePaginasOrigen(
  * validators. Claude is constrained by the schema, but a cosmic-ray bad
  * response (missing key, wrong type) shouldn't crash the server.
  */
-function coerceExtraction(input: unknown): ExtractedContract {
+function coerceExtraction(
+  input: unknown,
+  opts?: {
+    /**
+     * Pasadas parciales (extracción por temporadas): una pasada puede
+     * legítimamente no aportar filas nuevas (p. ej. si el modelo puso las
+     * filas sin temporada en otra pasada). El merge valida el total.
+     */
+    allowEmptyRows?: boolean;
+  },
+): ExtractedContract {
   if (!input || typeof input !== "object") {
     throw new Error("tool_use.input no es un objeto");
   }
@@ -703,10 +861,13 @@ function coerceExtraction(input: unknown): ExtractedContract {
   const shared_fields = coerceSharedFields(r.shared_fields);
 
   const rawRows = Array.isArray(r.rows) ? r.rows : [];
-  if (rawRows.length === 0) {
+  if (rawRows.length === 0 && !opts?.allowEmptyRows) {
     throw new Error("rows está vacío — el contrato debe tener al menos una combinación");
   }
-  const rows = rawRows.map(coerceRow);
+  const rowDefaults = coerceRowDefaults(r.row_defaults);
+  const rows = rawRows
+    .map(coerceRow)
+    .map((row) => applyRowDefaults(row, rowDefaults));
 
   const confianza = ((): Confianza => {
     const c = r.confianza;
@@ -1553,6 +1714,344 @@ function mergeBriefsForValidation(
   });
 }
 
+/* -------------------------------------------------------------------------- */
+/*        Fase 2 — pasadas de extracción, fragmentación y truncamiento        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Umbral de filas estimadas a partir del cual la extracción se FRAGMENTA en
+ * varias pasadas por temporada, y meta de filas por pasada. Con el formato
+ * compacto (row_defaults + omisión de *_fds) una fila cuesta ~150-250 tokens
+ * de salida, así que ~160 filas por pasada deja margen holgado contra el cap
+ * de 128k. Solo se fragmenta en el flujo gated (brief confirmado por el
+ * usuario): ahí las temporadas y el estimado de filas son confiables.
+ */
+const SHARD_ROW_THRESHOLD = 160;
+const SHARD_TARGET_ROWS = 100;
+
+/** Nombres únicos de temporada del brief (detail primero, luego lista plana). */
+function uniqueSeasonNames(brief: ContractBrief): string[] {
+  const seen = new Set<string>();
+  const names: string[] = [];
+  const push = (n: string | null) => {
+    const t = (n ?? "").trim();
+    const k = t.toLowerCase();
+    if (t === "" || seen.has(k)) return;
+    seen.add(k);
+    names.push(t);
+  };
+  brief.seasons_detail.forEach((s) => push(s.name));
+  brief.seasons.forEach(push);
+  return names;
+}
+
+/**
+ * Plan de fragmentación por temporadas para contratos densos. Devuelve []
+ * cuando NO hace falta fragmentar (el caso normal): una sola pasada sigue
+ * siendo lo más barato y lo más coherente. Se fragmenta solo cuando el
+ * estimado de filas confirmado por el usuario proyecta una salida que se
+ * acerca al cap del modelo.
+ */
+function planSeasonShards(brief: ContractBrief | null): ExtractionShard[] {
+  if (!brief) return [];
+  const names = uniqueSeasonNames(brief);
+  if (names.length < 2) return [];
+  const expected =
+    brief.row_plan?.expected_rows ?? brief.expected_row_estimate ?? null;
+  if (expected == null || expected <= SHARD_ROW_THRESHOLD) return [];
+  const perSeason = expected / names.length;
+  const seasonsPerShard = Math.max(
+    1,
+    Math.floor(SHARD_TARGET_ROWS / Math.max(perSeason, 1)),
+  );
+  const groups: string[][] = [];
+  for (let i = 0; i < names.length; i += seasonsPerShard) {
+    groups.push(names.slice(i, i + seasonsPerShard));
+  }
+  if (groups.length < 2) return [];
+  return groups.map((seasonNames, index) => ({
+    index,
+    total: groups.length,
+    seasonNames,
+  }));
+}
+
+/**
+ * Rescate de una respuesta truncada por max_tokens. La SDK acumula el JSON
+ * del tool_use con un parser de JSON PARCIAL (`partialParse`), así que aunque
+ * la respuesta se corte a mitad de una fila, `toolUse.input` llega como
+ * objeto con todas las filas completas + posiblemente una última a medias.
+ * Descartamos esa última fila (no sabemos qué campos le faltan) y seguimos
+ * con el resto en lugar de tirar TODA la extracción (que ya se pagó).
+ */
+function salvageTruncatedInput(input: unknown): unknown | null {
+  if (!input || typeof input !== "object") return null;
+  const r = input as Record<string, unknown>;
+  const rows = Array.isArray(r.rows) ? r.rows : [];
+  if (rows.length <= 1) return null;
+  return { ...r, rows: rows.slice(0, -1) };
+}
+
+const TRUNCATION_USER_ERROR = new ApiError(
+  502,
+  "El contrato es excepcionalmente denso y la extracción llegó al " +
+    "límite máximo del modelo (128k tokens de salida) sin filas " +
+    "recuperables. Ajustá el estimado de filas en Variables de " +
+    "Configuración (activa la extracción por temporadas) o dividí el " +
+    "documento.",
+);
+
+interface ExtractionPassResult {
+  raw: ExtractedContract;
+  usage: TokenUsage;
+  /** Advertencias de esta pasada (hoy: truncamiento rescatado). */
+  warnings: string[];
+}
+
+/**
+ * Una pasada de extracción (Fase 2) contra Opus: llamada streaming con
+ * tool_choice forzado, manejo de errores de API, truncamiento con rescate y
+ * coerción del tool_use. Se usa tanto para la pasada única (caso normal)
+ * como para cada pasada parcial del plan de fragmentación por temporadas.
+ */
+async function runExtractionPass(args: {
+  client: ReturnType<typeof getAnthropicClient>;
+  docs: PreparedDocumentInput[];
+  requestId: string | undefined;
+  context: ExtractionContext | undefined;
+  brief: ContractBrief | null;
+  confirmedBriefs: ContractBrief[] | null;
+  briefConfirmed: boolean;
+  shard?: ExtractionShard;
+}): Promise<ExtractionPassResult> {
+  const { client, docs, requestId, context, brief, confirmedBriefs, shard } =
+    args;
+  const label = shard
+    ? `extract-${shard.index + 1}/${shard.total}`
+    : "extract";
+
+  let response: Message;
+  try {
+    response = await runStreamWithRetry(
+      () =>
+        client.messages
+          .stream({
+            model: SUPPLIER_INTELLIGENCE_MODEL,
+            max_tokens: MAX_TOKENS,
+            // No mandar `thinking`: la API rechaza con 400 cuando tool_choice
+            // fuerza un tool, y como además forzamos el tool el modelo no hace
+            // thinking del lado del servidor — todo el max_tokens va al output.
+            system: SUPPLIER_INTELLIGENCE_SYSTEM_PROMPT,
+            tools: [EXTRAER_DATOS_CONTRATO_TOOL],
+            tool_choice: {
+              type: "tool",
+              name: EXTRAER_DATOS_CONTRATO_TOOL_NAME,
+            },
+            messages: [
+              buildUserMessage(docs, {
+                context,
+                mode: "extract",
+                brief,
+                briefs: confirmedBriefs,
+                briefConfirmed: args.briefConfirmed,
+                shard,
+              }),
+            ],
+          })
+          .finalMessage(),
+      { requestId, label },
+    );
+  } catch (err) {
+    // Map all Anthropic-side failures (timeouts, 429, 5xx, auth) to 502.
+    // We never surface the upstream status code directly because the client
+    // only cares that "the extractor is down".
+    if (err instanceof APIError) {
+      logger.error("Anthropic API error during extraction", {
+        requestId,
+        label,
+        status: err.status,
+        message: err.message,
+      });
+      throw mapAnthropicApiError(err);
+    }
+    logger.error("Unexpected error calling Anthropic", {
+      requestId,
+      label,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw new ApiError(502, "Error al invocar al agente de extracción.");
+  }
+
+  // Visibilidad: stop_reason + uso de tokens en TODA extracción. output_tokens
+  // nos da una señal directa de cuán cerca del cap está cada contrato —
+  // útil para detectar la tendencia antes de pegar en MAX_TOKENS.
+  logger.info("Anthropic extraction completed", {
+    requestId,
+    label,
+    stopReason: response.stop_reason,
+    outputTokens: response.usage?.output_tokens,
+    inputTokens: response.usage?.input_tokens,
+    cacheReadTokens: response.usage?.cache_read_input_tokens,
+    cacheWriteTokens: response.usage?.cache_creation_input_tokens,
+  });
+
+  const usage = usageFromMessage(response, SUPPLIER_INTELLIGENCE_MODEL);
+  const truncated = response.stop_reason === "max_tokens";
+  const warnings: string[] = [];
+
+  // Find the tool_use block. Even with `tool_choice` forced the API spec
+  // leaves room for stop_reason === "max_tokens" or other edge cases.
+  const toolUse = response.content.find(
+    (block): block is ToolUseBlock =>
+      block.type === "tool_use" &&
+      block.name === EXTRAER_DATOS_CONTRATO_TOOL_NAME,
+  );
+
+  if (!toolUse) {
+    logger.error("Anthropic response missing tool_use block", {
+      requestId,
+      label,
+      stopReason: response.stop_reason,
+      contentTypes: response.content.map((b) => b.type),
+    });
+    if (truncated) throw TRUNCATION_USER_ERROR;
+    throw new ApiError(
+      502,
+      "El agente no devolvió datos estructurados. Intenta de nuevo.",
+    );
+  }
+
+  // Truncamiento por max_tokens: en lugar de descartar TODA la respuesta
+  // (que ya se pagó y suele traer cientos de filas completas), rescatamos
+  // las filas íntegras y lo reportamos como advertencia bien visible. El
+  // check determinístico de completitud (validateAgainstBrief) marcará
+  // además las temporadas/estimado que quedaron cortos.
+  let inputToCoerce: unknown = toolUse.input;
+  if (truncated) {
+    logger.warn("Extraction hit max_tokens — salvaging truncated output", {
+      requestId,
+      label,
+      maxTokens: MAX_TOKENS,
+      outputTokens: response.usage?.output_tokens,
+    });
+    inputToCoerce = salvageTruncatedInput(toolUse.input);
+    if (inputToCoerce == null) throw TRUNCATION_USER_ERROR;
+  }
+
+  let raw: ExtractedContract;
+  try {
+    raw = coerceExtraction(inputToCoerce, { allowEmptyRows: !!shard });
+  } catch (err) {
+    logger.error("Failed to coerce Claude tool_use input", {
+      requestId,
+      label,
+      error: err instanceof Error ? err.message : String(err),
+      stopReason: response.stop_reason,
+      outputTokens: response.usage?.output_tokens,
+      input: toolUse.input,
+    });
+    if (truncated) throw TRUNCATION_USER_ERROR;
+    throw new ApiError(
+      502,
+      "El agente devolvió una respuesta con formato inesperado.",
+    );
+  }
+
+  if (truncated) {
+    warnings.push(
+      `⚠️ EXTRACCIÓN INCOMPLETA${shard ? ` (pasada ${shard.index + 1}/${shard.total})` : ""}: ` +
+        "la respuesta alcanzó el límite de 128k tokens de salida y fue " +
+        `truncada. Se recuperaron ${raw.rows.length} filas completas — ` +
+        "verificá la cobertura de temporadas/categorías contra el plan de " +
+        "filas y completá lo faltante a mano o reintentá la extracción.",
+    );
+  }
+
+  return { raw, usage, warnings };
+}
+
+/** Orden de severidad para consolidar `confianza` entre pasadas parciales. */
+const CONFIANZA_RANK: Record<Confianza, number> = {
+  baja: 0,
+  media: 1,
+  alta: 2,
+};
+
+/**
+ * Consolida las pasadas parciales de una extracción fragmentada en un único
+ * `ExtractedContract`. shared_fields/paginas_origen_shared salen de la
+ * primera pasada (todas leen el mismo documento); filas y páginas de origen
+ * se concatenan deduplicando idénticas (una pasada puede repetir filas sin
+ * temporada pese a la instrucción); bancos y campos_faltantes se unen;
+ * confianza queda en la peor de las pasadas.
+ */
+function mergeExtractions(parts: ExtractedContract[]): ExtractedContract {
+  const first = parts[0]!;
+  if (parts.length === 1) return first;
+
+  const norm = (s: string | null): string => (s ?? "").trim().toLowerCase();
+  const rowKey = (r: ContractRow): string =>
+    [
+      r.product_name,
+      r.tipo_servicio,
+      r.ocupacion,
+      r.season_name,
+      r.season_starts,
+      r.meals_included,
+      r.precios_neto_iva,
+      r.precio_rack_iva,
+    ]
+      .map(norm)
+      .join("|");
+
+  const rows: ContractRow[] = [];
+  const paginas_origen_rows: Record<string, SourcePage>[] = [];
+  const rowSeen = new Set<string>();
+  for (const part of parts) {
+    part.rows.forEach((row, i) => {
+      const key = rowKey(row);
+      if (rowSeen.has(key)) return;
+      rowSeen.add(key);
+      rows.push(row);
+      paginas_origen_rows.push(part.paginas_origen_rows[i] ?? {});
+    });
+  }
+
+  const bankSeen = new Set<string>();
+  const bank_accounts: ExtractedContract["bank_accounts"] = [];
+  for (const part of parts) {
+    for (const acct of part.bank_accounts ?? []) {
+      const key = `${normalizeAccountNumber(acct.account_number)}|${norm(acct.bank)}`;
+      if (key === "|" || bankSeen.has(key)) continue;
+      bankSeen.add(key);
+      bank_accounts.push(acct);
+    }
+  }
+
+  const campos_faltantes = [
+    ...new Set(parts.flatMap((p) => p.campos_faltantes)),
+  ];
+  const confianza = parts.reduce<Confianza>(
+    (worst, p) =>
+      CONFIANZA_RANK[p.confianza] < CONFIANZA_RANK[worst]
+        ? p.confianza
+        : worst,
+    first.confianza,
+  );
+  const payment_terms =
+    parts.map((p) => p.payment_terms).find((pt) => pt !== null) ?? null;
+
+  return {
+    ...first,
+    rows,
+    paginas_origen_rows,
+    bank_accounts,
+    campos_faltantes,
+    confianza,
+    payment_terms,
+  };
+}
+
 export async function extractContract(
   docs: PreparedDocumentInput[],
   requestId?: string,
@@ -1612,129 +2111,69 @@ export async function extractContract(
   }
 
   // ── Fase 2: EXTRACCIÓN PRINCIPAL ─────────────────────────────────────────
-  // Streaming endpoint en lugar de `messages.create` no-stream: con
-  // MAX_TOKENS alto (128k) y contratos densos, la generación puede tardar
-  // 3-5 min y Anthropic recomienda streaming para evitar HTTP timeouts
-  // upstream. La SDK helper `messages.stream().finalMessage()` colecta los
-  // chunks y nos devuelve un `Message` con la misma forma que el endpoint
-  // no-stream, así que el resto del flujo (búsqueda de tool_use, coerce,
-  // validación) no cambia.
-  let response: Message;
-  try {
-    response = await runStreamWithRetry(
-      () =>
-        client.messages
-          .stream({
-            model: SUPPLIER_INTELLIGENCE_MODEL,
-            max_tokens: MAX_TOKENS,
-            // No mandar `thinking`: la API rechaza con 400 cuando tool_choice
-            // fuerza un tool, y como además forzamos el tool el modelo no hace
-            // thinking del lado del servidor — todo el max_tokens va al output.
-            system: SUPPLIER_INTELLIGENCE_SYSTEM_PROMPT,
-            tools: [EXTRAER_DATOS_CONTRATO_TOOL],
-            tool_choice: {
-              type: "tool",
-              name: EXTRAER_DATOS_CONTRATO_TOOL_NAME,
-            },
-            messages: [
-              buildUserMessage(docs, {
-                context,
-                mode: "extract",
-                brief,
-                briefs: confirmedBriefs,
-                briefConfirmed: !!briefOverride,
-              }),
-            ],
-          })
-          .finalMessage(),
-      { requestId, label: "extract" },
-    );
-  } catch (err) {
-    // Map all Anthropic-side failures (timeouts, 429, 5xx, auth) to 502.
-    // We never surface the upstream status code directly because the client
-    // only cares that "the extractor is down".
-    if (err instanceof APIError) {
-      logger.error("Anthropic API error during extraction", {
-        requestId,
-        status: err.status,
-        message: err.message,
-      });
-      throw mapAnthropicApiError(err);
-    }
-    logger.error("Unexpected error calling Anthropic", {
-      requestId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    throw new ApiError(502, "Error al invocar al agente de extracción.");
-  }
-
-  // Visibilidad: stop_reason + uso de tokens en TODA extracción. output_tokens
-  // nos da una señal directa de cuánto cerca del cap está cada contrato —
-  // útil para detectar la tendencia antes de pegar en MAX_TOKENS.
-  logger.info("Anthropic extraction completed", {
+  // Streaming (ver runExtractionPass) porque con MAX_TOKENS alto la
+  // generación puede tardar minutos. Para contratos densos con brief
+  // confirmado, la extracción se FRAGMENTA por temporadas en varias pasadas
+  // (planSeasonShards): la primera escribe el prompt cache del documento y
+  // las demás corren en PARALELO leyéndolo al 10% del costo de input; el
+  // merge es determinístico (mergeExtractions). El caso normal sigue siendo
+  // UNA pasada.
+  const passArgsBase = {
+    client,
+    docs,
     requestId,
-    stopReason: response.stop_reason,
-    outputTokens: response.usage?.output_tokens,
-    inputTokens: response.usage?.input_tokens,
-  });
-
-  // Truncamiento por max_tokens: el JSON del tool_use queda partido a la
-  // mitad y solo llega `shared_fields` (o ni eso). En lugar de fallar con
-  // "formato inesperado" — que no le dice nada al usuario — devolvemos un
-  // error específico. Con MAX_TOKENS=128k (máximo soportado por Opus 4.7)
-  // esto solo debería ocurrir en contratos extraordinariamente densos
-  // (cientos de filas). Si se vuelve recurrente, el siguiente paso es
-  // un flujo de chunking por temporada — no hay más cap arriba.
-  if (response.stop_reason === "max_tokens") {
-    logger.warn("Extraction hit max_tokens — output truncated", {
-      requestId,
-      maxTokens: MAX_TOKENS,
-      outputTokens: response.usage?.output_tokens,
-    });
-    throw new ApiError(
-      502,
-      "El contrato es excepcionalmente denso y la extracción llegó al " +
-        "límite máximo del modelo (128k tokens de salida). Si necesitás " +
-        "procesarlo de igual forma, avisanos para evaluar un flujo de " +
-        "extracción por secciones.",
-    );
-  }
-
-  // Find the tool_use block. Even with `tool_choice` forced the API spec
-  // leaves room for stop_reason === "max_tokens" or other edge cases.
-  const toolUse = response.content.find(
-    (block): block is ToolUseBlock =>
-      block.type === "tool_use" &&
-      block.name === EXTRAER_DATOS_CONTRATO_TOOL_NAME,
-  );
-
-  if (!toolUse) {
-    logger.error("Anthropic response missing tool_use block", {
-      requestId,
-      stopReason: response.stop_reason,
-      contentTypes: response.content.map((b) => b.type),
-    });
-    throw new ApiError(
-      502,
-      "El agente no devolvió datos estructurados. Intenta de nuevo.",
-    );
-  }
+    context,
+    brief,
+    confirmedBriefs,
+    briefConfirmed: !!briefOverride,
+  };
+  // Solo fragmentamos en el flujo gated con UN brief confirmado: con varios
+  // briefs (multi-documento) el modelo además consolida entre documentos y
+  // partir esa tarea por temporada agregaría ambigüedad.
+  const shards =
+    briefOverride && (confirmedBriefs?.length ?? 0) === 1
+      ? planSeasonShards(brief)
+      : [];
 
   let raw: ExtractedContract;
-  try {
-    raw = coerceExtraction(toolUse.input);
-  } catch (err) {
-    logger.error("Failed to coerce Claude tool_use input", {
+  const passUsages: TokenUsage[] = [];
+  const extractionWarnings: string[] = [];
+
+  if (shards.length > 1) {
+    logger.info("Dense contract — sharding extraction by season", {
       requestId,
-      error: err instanceof Error ? err.message : String(err),
-      stopReason: response.stop_reason,
-      outputTokens: response.usage?.output_tokens,
-      input: toolUse.input,
+      shardCount: shards.length,
+      expectedRows:
+        brief?.row_plan?.expected_rows ?? brief?.expected_row_estimate ?? null,
+      shardSeasons: shards.map((s) => s.seasonNames),
     });
-    throw new ApiError(
-      502,
-      "El agente devolvió una respuesta con formato inesperado.",
+    // Pasada 1 sola (escribe el cache del documento), resto en paralelo.
+    const firstPass = await runExtractionPass({
+      ...passArgsBase,
+      shard: shards[0],
+    });
+    const restPasses = await Promise.all(
+      shards.slice(1).map((shard) =>
+        runExtractionPass({ ...passArgsBase, shard }),
+      ),
     );
+    const allPasses = [firstPass, ...restPasses];
+    for (const pass of allPasses) {
+      passUsages.push(pass.usage);
+      extractionWarnings.push(...pass.warnings);
+    }
+    raw = mergeExtractions(allPasses.map((p) => p.raw));
+    if (raw.rows.length === 0) {
+      throw new ApiError(
+        502,
+        "La extracción fragmentada no devolvió filas. Intenta de nuevo.",
+      );
+    }
+  } else {
+    const single = await runExtractionPass(passArgsBase);
+    passUsages.push(single.usage);
+    extractionWarnings.push(...single.warnings);
+    raw = single.raw;
   }
 
   const mergedBrief = brief
@@ -1742,6 +2181,12 @@ export async function extractContract(
     : null;
 
   const { extraction, validation } = validateExtraction(raw, mergedBrief);
+
+  // Advertencias de las pasadas (truncamiento rescatado) — van PRIMERO para
+  // que el revisor las vea antes que los checks de detalle.
+  if (extractionWarnings.length > 0) {
+    validation.warnings.unshift(...extractionWarnings);
+  }
 
   // Reconciliación de cuentas bancarias + términos de pago: usamos el brief
   // FUSIONADO (rates + T&C) para que bancos/políticas del documento secundario
@@ -1811,11 +2256,11 @@ export async function extractContract(
     ? manualPrefillCandidate
     : null;
 
-  // Usage = brief (Fase 1, Sonnet) + extracción principal (Fase 2, Opus). Cada
-  // pasada se cobra con la tarifa de su modelo; `sumUsage` agrega los totales.
-  const mainUsage = usageFromMessage(response, SUPPLIER_INTELLIGENCE_MODEL);
+  // Usage = brief (Fase 1, Sonnet) + pasada(s) de extracción (Fase 2, Opus).
+  // Cada pasada se cobra con la tarifa de su modelo (incluyendo los buckets
+  // de cache write/read de la fragmentación); `sumUsage` agrega los totales.
   const usage = sumUsage(
-    briefResult ? [briefResult.usage, mainUsage] : [mainUsage],
+    briefResult ? [briefResult.usage, ...passUsages] : passUsages,
   );
 
   return {

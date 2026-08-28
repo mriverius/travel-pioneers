@@ -385,62 +385,70 @@ const rowSchema = {
     precios_neto_iva_fds: {
       type: ["string", "null"],
       description:
-        "Precio neto con IVA — fin de semana. Si el contrato NO distingue " +
-        "tarifas weekday/weekend, copiar el mismo valor que precios_neto_iva " +
-        "(convención del maestro Utopía).",
+        "Precio neto con IVA — fin de semana. SOLO si el contrato distingue " +
+        "tarifas weekday/weekend. Si NO distingue, OMITÍ este campo (o dejá " +
+        "null) — el servidor copia automáticamente precios_neto_iva.",
     },
     precio_rack_iva_fds: {
       type: ["string", "null"],
       description:
-        "Precio rack con IVA — fin de semana. Si no hay distinción, " +
-        "copiar precio_rack_iva.",
+        "Precio rack con IVA — fin de semana. SOLO si hay distinción " +
+        "weekday/weekend; si no, OMITÍ el campo (el servidor copia " +
+        "precio_rack_iva).",
     },
     porcentaje_comision_fds: {
       type: ["string", "null"],
       description:
         "Porcentaje de comisión — fin de semana, SOLO el número sin '%'. " +
-        "Copiar porcentaje_comision si no hay distinción.",
+        "SOLO si hay distinción weekday/weekend; si no, OMITÍ el campo.",
     },
     cancellation_policy: {
       type: ["string", "null"],
       description:
-        "Política de cancelación aplicable a esta combinación, resumida a " +
-        "1-2 oraciones. Si la política varía por temporada (como en " +
-        "Parador, donde PEAK/ALTA/BAJA tienen reglas distintas), poner LA " +
-        "POLÍTICA DE ESTA TEMPORADA. Si no varía, copiar la misma en " +
-        "todas las filas.",
+        "OVERRIDE por fila de row_defaults.cancellation_policy. OMITÍ este " +
+        "campo (o dejá null) cuando la política de esta fila es la misma " +
+        "que el default — el servidor la hereda. SOLO escribí un valor " +
+        "cuando ESTA temporada/fila tiene una política DISTINTA (como en " +
+        "Parador, donde PEAK/ALTA/BAJA tienen reglas distintas). 1-2 " +
+        "oraciones.",
     },
     range_payment_policy: {
       type: ["string", "null"],
       description:
-        "POLÍTICA/condiciones de pago para esta combinación: plazos, " +
-        "depósitos, anticipos, fechas límite y penalidades. NO listar los " +
-        "MEDIOS de pago disponibles (transferencia, tarjeta, etc.) — eso " +
-        "no es la política. Ej: '50% de depósito al confirmar, saldo 30 " +
-        "días antes del check-in'. Si varía por temporada (Parador: Peak " +
-        "60d, Alta 30d, Baja 15d), poner la de ESTA temporada.",
+        "OVERRIDE por fila de row_defaults.range_payment_policy. OMITÍ el " +
+        "campo si es igual al default. SOLO escribí un valor cuando ESTA " +
+        "temporada tiene condiciones de pago distintas (Parador: Peak 60d, " +
+        "Alta 30d, Baja 15d). Son CONDICIONES de pago (plazos, depósitos, " +
+        "penalidades), NO medios de pago.",
     },
     kids_policy: {
       type: ["string", "null"],
       description:
-        "Política de niños. Típicamente igual entre filas — copiar el " +
-        "mismo valor en todas si el contrato no la distingue por temporada.",
+        "OVERRIDE por fila de row_defaults.kids_policy. Casi siempre es " +
+        "igual entre filas → casi siempre se OMITE. Solo escribí un valor " +
+        "si esta fila difiere del default.",
     },
     other_included: {
       type: ["string", "null"],
       description:
-        "Otros servicios/amenidades incluidos en la tarifa que no sean " +
-        "comidas (eso va en meals_included). Ejemplo: 'Acceso a fitness, " +
-        "Wi-Fi, toallas para piscina/playa, transporte a Manuel Antonio'.",
+        "OVERRIDE por fila de row_defaults.other_included. OMITÍ el campo " +
+        "si es igual al default. Servicios/amenidades incluidos que no sean " +
+        "comidas (eso va en meals_included).",
     },
     feeds_adicionales: {
       type: ["string", "null"],
       description:
-        "Cargos adicionales no incluidos en la tarifa base (resort fee, " +
-        "conservation fee, IVA externo, etc.). Ejemplo: '$15 resort fee " +
-        "por habitación por noche'.",
+        "OVERRIDE por fila de row_defaults.feeds_adicionales. OMITÍ el " +
+        "campo si es igual al default. Cargos adicionales no incluidos en " +
+        "la tarifa base (resort fee, conservation fee, etc.).",
     },
   },
+  // ECONOMÍA DE SALIDA: solo los campos de identidad + precio estándar son
+  // obligatorios por fila. Las políticas viven en `row_defaults` (una sola
+  // vez) y los *_fds se omiten cuando no hay distinción weekday/weekend —
+  // el servidor materializa ambos en cada fila (fan-out determinístico).
+  // Esto reduce ~60-70% los tokens de salida en contratos densos, que era
+  // lo que hacía reventar el cap de 128k (caso Four Seasons ~400 filas).
   required: [
     "product_name",
     "categoria",
@@ -455,15 +463,63 @@ const rowSchema = {
     "precios_neto_iva",
     "precio_rack_iva",
     "porcentaje_comision",
-    "precios_neto_iva_fds",
-    "precio_rack_iva_fds",
-    "porcentaje_comision_fds",
+  ],
+} as const;
+
+/**
+ * Defaults a nivel contrato para los campos de texto largo que casi siempre
+ * son idénticos en todas las filas. El modelo los emite UNA vez acá; cada
+ * fila puede sobreescribirlos individualmente. El servidor hace el fan-out
+ * a todas las filas antes de validar/generar el xlsx, así que el resto del
+ * pipeline (validators, UI, xlsx) sigue viendo filas completas.
+ */
+const rowDefaultsSchema = {
+  type: "object",
+  description:
+    "Valores por DEFECTO de las políticas/textos largos que aplican a " +
+    "TODAS las filas. Escribilos UNA SOLA VEZ acá (no los repitas fila por " +
+    "fila). Una fila individual solo lleva el campo cuando su valor DIFIERE " +
+    "de este default. Si un campo no existe en el contrato, null.",
+  properties: {
+    cancellation_policy: {
+      type: ["string", "null"],
+      description:
+        "Política de cancelación general del contrato, resumida a 1-2 " +
+        "oraciones. Si varía por temporada, poné acá la más común y " +
+        "sobreescribí en las filas que difieren.",
+    },
+    range_payment_policy: {
+      type: ["string", "null"],
+      description:
+        "CONDICIONES de pago generales: plazos, depósitos, anticipos, " +
+        "fechas límite y penalidades. NO los medios de pago. Incluí el " +
+        "número de días explícito (ej. 'Pago 45 días antes de la llegada').",
+    },
+    kids_policy: {
+      type: ["string", "null"],
+      description: "Política de niños general del contrato.",
+    },
+    other_included: {
+      type: ["string", "null"],
+      description:
+        "Servicios/amenidades incluidos en la tarifa (no comidas) comunes " +
+        "a todas las filas. Ej: 'Wi-Fi, acceso a fitness, toallas de playa'.",
+    },
+    feeds_adicionales: {
+      type: ["string", "null"],
+      description:
+        "Cargos adicionales no incluidos en la tarifa base comunes a todas " +
+        "las filas (resort fee, conservation fee, IVA externo, etc.).",
+    },
+  },
+  required: [
     "cancellation_policy",
     "range_payment_policy",
     "kids_policy",
     "other_included",
     "feeds_adicionales",
   ],
+  additionalProperties: false,
 } as const;
 
 export const EXTRAER_DATOS_CONTRATO_TOOL: Tool = {
@@ -480,12 +536,15 @@ export const EXTRAER_DATOS_CONTRATO_TOOL: Tool = {
     type: "object",
     properties: {
       shared_fields: sharedFieldsSchema,
+      row_defaults: rowDefaultsSchema,
       rows: {
         type: "array",
         minItems: 1,
         description:
           "Array de combinaciones product × season. Mínimo 1, sin máximo. " +
-          "Generar TODAS las combinaciones explícitas — no resumir.",
+          "Generar TODAS las combinaciones explícitas — no resumir. Las " +
+          "políticas comunes van UNA vez en row_defaults; en cada fila " +
+          "emití SOLO los campos requeridos + los overrides que difieren.",
         items: rowSchema,
       },
       bank_accounts: {
@@ -584,9 +643,10 @@ export const EXTRAER_DATOS_CONTRATO_TOOL: Tool = {
         description:
           "Mapa por fila (mismo orden que `rows`). Cada elemento es un " +
           "objeto nombre_campo_de_fila -> página/'inferido'/'multiple'. La " +
-          "longitud DEBE ser igual a la de `rows`. Útil principalmente para " +
-          "campos de precio que pueden venir de tablas en páginas " +
-          "específicas del contrato.",
+          "longitud DEBE ser igual a la de `rows`. Anotá SOLO los campos de " +
+          "precio (precios_neto_iva / precio_rack_iva) — para el resto usá " +
+          "un objeto vacío {} y no repitas anotaciones idénticas campo por " +
+          "campo.",
         items: {
           type: "object",
         },
@@ -594,6 +654,7 @@ export const EXTRAER_DATOS_CONTRATO_TOOL: Tool = {
     },
     required: [
       "shared_fields",
+      "row_defaults",
       "rows",
       "bank_accounts",
       "payment_terms",
