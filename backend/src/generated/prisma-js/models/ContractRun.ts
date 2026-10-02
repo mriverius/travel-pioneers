@@ -18,7 +18,8 @@ import type * as Prisma from "../internal/prismaNamespace.js"
  *  * Persisted record of a Supplier Intelligence agent run that successfully
  *  * generated an xlsx in step 3. One row per generated contract — global
  *  * scope (every authenticated user can read every run; `processedById`
- *  * is kept for audit only, not for filtering).
+ *  * is kept for audit only, not for filtering, and may be null once the
+ *  * user that ran it has been deleted).
  *  *
  *  * The 52 product fields are stored as JSONB rather than as columns to keep
  *  * the schema agile while the agent is still calibrating: shared/manual/
@@ -55,6 +56,7 @@ export type ContractRunMinAggregateOutputType = {
   id: string | null
   processedById: string | null
   processedAt: Date | null
+  extractionId: string | null
   filename: string | null
   fileKind: string | null
   fileSize: number | null
@@ -68,6 +70,7 @@ export type ContractRunMaxAggregateOutputType = {
   id: string | null
   processedById: string | null
   processedAt: Date | null
+  extractionId: string | null
   filename: string | null
   fileKind: string | null
   fileSize: number | null
@@ -81,6 +84,7 @@ export type ContractRunCountAggregateOutputType = {
   id: number
   processedById: number
   processedAt: number
+  extractionId: number
   filename: number
   fileKind: number
   fileSize: number
@@ -114,6 +118,7 @@ export type ContractRunMinAggregateInputType = {
   id?: true
   processedById?: true
   processedAt?: true
+  extractionId?: true
   filename?: true
   fileKind?: true
   fileSize?: true
@@ -127,6 +132,7 @@ export type ContractRunMaxAggregateInputType = {
   id?: true
   processedById?: true
   processedAt?: true
+  extractionId?: true
   filename?: true
   fileKind?: true
   fileSize?: true
@@ -140,6 +146,7 @@ export type ContractRunCountAggregateInputType = {
   id?: true
   processedById?: true
   processedAt?: true
+  extractionId?: true
   filename?: true
   fileKind?: true
   fileSize?: true
@@ -242,8 +249,9 @@ export type ContractRunGroupByArgs<ExtArgs extends runtime.Types.Extensions.Inte
 
 export type ContractRunGroupByOutputType = {
   id: string
-  processedById: string
+  processedById: string | null
   processedAt: Date
+  extractionId: string | null
   filename: string
   fileKind: string
   fileSize: number
@@ -282,8 +290,9 @@ export type ContractRunWhereInput = {
   OR?: Prisma.ContractRunWhereInput[]
   NOT?: Prisma.ContractRunWhereInput | Prisma.ContractRunWhereInput[]
   id?: Prisma.UuidFilter<"ContractRun"> | string
-  processedById?: Prisma.UuidFilter<"ContractRun"> | string
+  processedById?: Prisma.UuidNullableFilter<"ContractRun"> | string | null
   processedAt?: Prisma.DateTimeFilter<"ContractRun"> | Date | string
+  extractionId?: Prisma.UuidNullableFilter<"ContractRun"> | string | null
   filename?: Prisma.StringFilter<"ContractRun"> | string
   fileKind?: Prisma.StringFilter<"ContractRun"> | string
   fileSize?: Prisma.IntFilter<"ContractRun"> | number
@@ -295,13 +304,14 @@ export type ContractRunWhereInput = {
   inputTokens?: Prisma.IntNullableFilter<"ContractRun"> | number | null
   outputTokens?: Prisma.IntNullableFilter<"ContractRun"> | number | null
   costUsd?: Prisma.FloatNullableFilter<"ContractRun"> | number | null
-  processedBy?: Prisma.XOR<Prisma.UserScalarRelationFilter, Prisma.UserWhereInput>
+  processedBy?: Prisma.XOR<Prisma.UserNullableScalarRelationFilter, Prisma.UserWhereInput> | null
 }
 
 export type ContractRunOrderByWithRelationInput = {
   id?: Prisma.SortOrder
-  processedById?: Prisma.SortOrder
+  processedById?: Prisma.SortOrderInput | Prisma.SortOrder
   processedAt?: Prisma.SortOrder
+  extractionId?: Prisma.SortOrderInput | Prisma.SortOrder
   filename?: Prisma.SortOrder
   fileKind?: Prisma.SortOrder
   fileSize?: Prisma.SortOrder
@@ -318,10 +328,11 @@ export type ContractRunOrderByWithRelationInput = {
 
 export type ContractRunWhereUniqueInput = Prisma.AtLeast<{
   id?: string
+  extractionId?: string
   AND?: Prisma.ContractRunWhereInput | Prisma.ContractRunWhereInput[]
   OR?: Prisma.ContractRunWhereInput[]
   NOT?: Prisma.ContractRunWhereInput | Prisma.ContractRunWhereInput[]
-  processedById?: Prisma.UuidFilter<"ContractRun"> | string
+  processedById?: Prisma.UuidNullableFilter<"ContractRun"> | string | null
   processedAt?: Prisma.DateTimeFilter<"ContractRun"> | Date | string
   filename?: Prisma.StringFilter<"ContractRun"> | string
   fileKind?: Prisma.StringFilter<"ContractRun"> | string
@@ -334,13 +345,14 @@ export type ContractRunWhereUniqueInput = Prisma.AtLeast<{
   inputTokens?: Prisma.IntNullableFilter<"ContractRun"> | number | null
   outputTokens?: Prisma.IntNullableFilter<"ContractRun"> | number | null
   costUsd?: Prisma.FloatNullableFilter<"ContractRun"> | number | null
-  processedBy?: Prisma.XOR<Prisma.UserScalarRelationFilter, Prisma.UserWhereInput>
-}, "id">
+  processedBy?: Prisma.XOR<Prisma.UserNullableScalarRelationFilter, Prisma.UserWhereInput> | null
+}, "id" | "extractionId">
 
 export type ContractRunOrderByWithAggregationInput = {
   id?: Prisma.SortOrder
-  processedById?: Prisma.SortOrder
+  processedById?: Prisma.SortOrderInput | Prisma.SortOrder
   processedAt?: Prisma.SortOrder
+  extractionId?: Prisma.SortOrderInput | Prisma.SortOrder
   filename?: Prisma.SortOrder
   fileKind?: Prisma.SortOrder
   fileSize?: Prisma.SortOrder
@@ -364,8 +376,9 @@ export type ContractRunScalarWhereWithAggregatesInput = {
   OR?: Prisma.ContractRunScalarWhereWithAggregatesInput[]
   NOT?: Prisma.ContractRunScalarWhereWithAggregatesInput | Prisma.ContractRunScalarWhereWithAggregatesInput[]
   id?: Prisma.UuidWithAggregatesFilter<"ContractRun"> | string
-  processedById?: Prisma.UuidWithAggregatesFilter<"ContractRun"> | string
+  processedById?: Prisma.UuidNullableWithAggregatesFilter<"ContractRun"> | string | null
   processedAt?: Prisma.DateTimeWithAggregatesFilter<"ContractRun"> | Date | string
+  extractionId?: Prisma.UuidNullableWithAggregatesFilter<"ContractRun"> | string | null
   filename?: Prisma.StringWithAggregatesFilter<"ContractRun"> | string
   fileKind?: Prisma.StringWithAggregatesFilter<"ContractRun"> | string
   fileSize?: Prisma.IntWithAggregatesFilter<"ContractRun"> | number
@@ -382,6 +395,7 @@ export type ContractRunScalarWhereWithAggregatesInput = {
 export type ContractRunCreateInput = {
   id?: string
   processedAt?: Date | string
+  extractionId?: string | null
   filename: string
   fileKind: string
   fileSize: number
@@ -393,13 +407,14 @@ export type ContractRunCreateInput = {
   inputTokens?: number | null
   outputTokens?: number | null
   costUsd?: number | null
-  processedBy: Prisma.UserCreateNestedOneWithoutContractRunsInput
+  processedBy?: Prisma.UserCreateNestedOneWithoutContractRunsInput
 }
 
 export type ContractRunUncheckedCreateInput = {
   id?: string
-  processedById: string
+  processedById?: string | null
   processedAt?: Date | string
+  extractionId?: string | null
   filename: string
   fileKind: string
   fileSize: number
@@ -416,6 +431,7 @@ export type ContractRunUncheckedCreateInput = {
 export type ContractRunUpdateInput = {
   id?: Prisma.StringFieldUpdateOperationsInput | string
   processedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
+  extractionId?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   filename?: Prisma.StringFieldUpdateOperationsInput | string
   fileKind?: Prisma.StringFieldUpdateOperationsInput | string
   fileSize?: Prisma.IntFieldUpdateOperationsInput | number
@@ -427,13 +443,14 @@ export type ContractRunUpdateInput = {
   inputTokens?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   outputTokens?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   costUsd?: Prisma.NullableFloatFieldUpdateOperationsInput | number | null
-  processedBy?: Prisma.UserUpdateOneRequiredWithoutContractRunsNestedInput
+  processedBy?: Prisma.UserUpdateOneWithoutContractRunsNestedInput
 }
 
 export type ContractRunUncheckedUpdateInput = {
   id?: Prisma.StringFieldUpdateOperationsInput | string
-  processedById?: Prisma.StringFieldUpdateOperationsInput | string
+  processedById?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   processedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
+  extractionId?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   filename?: Prisma.StringFieldUpdateOperationsInput | string
   fileKind?: Prisma.StringFieldUpdateOperationsInput | string
   fileSize?: Prisma.IntFieldUpdateOperationsInput | number
@@ -449,8 +466,9 @@ export type ContractRunUncheckedUpdateInput = {
 
 export type ContractRunCreateManyInput = {
   id?: string
-  processedById: string
+  processedById?: string | null
   processedAt?: Date | string
+  extractionId?: string | null
   filename: string
   fileKind: string
   fileSize: number
@@ -467,6 +485,7 @@ export type ContractRunCreateManyInput = {
 export type ContractRunUpdateManyMutationInput = {
   id?: Prisma.StringFieldUpdateOperationsInput | string
   processedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
+  extractionId?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   filename?: Prisma.StringFieldUpdateOperationsInput | string
   fileKind?: Prisma.StringFieldUpdateOperationsInput | string
   fileSize?: Prisma.IntFieldUpdateOperationsInput | number
@@ -482,8 +501,9 @@ export type ContractRunUpdateManyMutationInput = {
 
 export type ContractRunUncheckedUpdateManyInput = {
   id?: Prisma.StringFieldUpdateOperationsInput | string
-  processedById?: Prisma.StringFieldUpdateOperationsInput | string
+  processedById?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   processedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
+  extractionId?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   filename?: Prisma.StringFieldUpdateOperationsInput | string
   fileKind?: Prisma.StringFieldUpdateOperationsInput | string
   fileSize?: Prisma.IntFieldUpdateOperationsInput | number
@@ -511,6 +531,7 @@ export type ContractRunCountOrderByAggregateInput = {
   id?: Prisma.SortOrder
   processedById?: Prisma.SortOrder
   processedAt?: Prisma.SortOrder
+  extractionId?: Prisma.SortOrder
   filename?: Prisma.SortOrder
   fileKind?: Prisma.SortOrder
   fileSize?: Prisma.SortOrder
@@ -535,6 +556,7 @@ export type ContractRunMaxOrderByAggregateInput = {
   id?: Prisma.SortOrder
   processedById?: Prisma.SortOrder
   processedAt?: Prisma.SortOrder
+  extractionId?: Prisma.SortOrder
   filename?: Prisma.SortOrder
   fileKind?: Prisma.SortOrder
   fileSize?: Prisma.SortOrder
@@ -548,6 +570,7 @@ export type ContractRunMinOrderByAggregateInput = {
   id?: Prisma.SortOrder
   processedById?: Prisma.SortOrder
   processedAt?: Prisma.SortOrder
+  extractionId?: Prisma.SortOrder
   filename?: Prisma.SortOrder
   fileKind?: Prisma.SortOrder
   fileSize?: Prisma.SortOrder
@@ -606,6 +629,10 @@ export type ContractRunUncheckedUpdateManyWithoutProcessedByNestedInput = {
   deleteMany?: Prisma.ContractRunScalarWhereInput | Prisma.ContractRunScalarWhereInput[]
 }
 
+export type NullableStringFieldUpdateOperationsInput = {
+  set?: string | null
+}
+
 export type IntFieldUpdateOperationsInput = {
   set?: number
   increment?: number
@@ -633,6 +660,7 @@ export type NullableFloatFieldUpdateOperationsInput = {
 export type ContractRunCreateWithoutProcessedByInput = {
   id?: string
   processedAt?: Date | string
+  extractionId?: string | null
   filename: string
   fileKind: string
   fileSize: number
@@ -649,6 +677,7 @@ export type ContractRunCreateWithoutProcessedByInput = {
 export type ContractRunUncheckedCreateWithoutProcessedByInput = {
   id?: string
   processedAt?: Date | string
+  extractionId?: string | null
   filename: string
   fileKind: string
   fileSize: number
@@ -693,8 +722,9 @@ export type ContractRunScalarWhereInput = {
   OR?: Prisma.ContractRunScalarWhereInput[]
   NOT?: Prisma.ContractRunScalarWhereInput | Prisma.ContractRunScalarWhereInput[]
   id?: Prisma.UuidFilter<"ContractRun"> | string
-  processedById?: Prisma.UuidFilter<"ContractRun"> | string
+  processedById?: Prisma.UuidNullableFilter<"ContractRun"> | string | null
   processedAt?: Prisma.DateTimeFilter<"ContractRun"> | Date | string
+  extractionId?: Prisma.UuidNullableFilter<"ContractRun"> | string | null
   filename?: Prisma.StringFilter<"ContractRun"> | string
   fileKind?: Prisma.StringFilter<"ContractRun"> | string
   fileSize?: Prisma.IntFilter<"ContractRun"> | number
@@ -711,6 +741,7 @@ export type ContractRunScalarWhereInput = {
 export type ContractRunCreateManyProcessedByInput = {
   id?: string
   processedAt?: Date | string
+  extractionId?: string | null
   filename: string
   fileKind: string
   fileSize: number
@@ -727,6 +758,7 @@ export type ContractRunCreateManyProcessedByInput = {
 export type ContractRunUpdateWithoutProcessedByInput = {
   id?: Prisma.StringFieldUpdateOperationsInput | string
   processedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
+  extractionId?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   filename?: Prisma.StringFieldUpdateOperationsInput | string
   fileKind?: Prisma.StringFieldUpdateOperationsInput | string
   fileSize?: Prisma.IntFieldUpdateOperationsInput | number
@@ -743,6 +775,7 @@ export type ContractRunUpdateWithoutProcessedByInput = {
 export type ContractRunUncheckedUpdateWithoutProcessedByInput = {
   id?: Prisma.StringFieldUpdateOperationsInput | string
   processedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
+  extractionId?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   filename?: Prisma.StringFieldUpdateOperationsInput | string
   fileKind?: Prisma.StringFieldUpdateOperationsInput | string
   fileSize?: Prisma.IntFieldUpdateOperationsInput | number
@@ -759,6 +792,7 @@ export type ContractRunUncheckedUpdateWithoutProcessedByInput = {
 export type ContractRunUncheckedUpdateManyWithoutProcessedByInput = {
   id?: Prisma.StringFieldUpdateOperationsInput | string
   processedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
+  extractionId?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   filename?: Prisma.StringFieldUpdateOperationsInput | string
   fileKind?: Prisma.StringFieldUpdateOperationsInput | string
   fileSize?: Prisma.IntFieldUpdateOperationsInput | number
@@ -778,6 +812,7 @@ export type ContractRunSelect<ExtArgs extends runtime.Types.Extensions.InternalA
   id?: boolean
   processedById?: boolean
   processedAt?: boolean
+  extractionId?: boolean
   filename?: boolean
   fileKind?: boolean
   fileSize?: boolean
@@ -789,13 +824,14 @@ export type ContractRunSelect<ExtArgs extends runtime.Types.Extensions.InternalA
   inputTokens?: boolean
   outputTokens?: boolean
   costUsd?: boolean
-  processedBy?: boolean | Prisma.UserDefaultArgs<ExtArgs>
+  processedBy?: boolean | Prisma.ContractRun$processedByArgs<ExtArgs>
 }, ExtArgs["result"]["contractRun"]>
 
 export type ContractRunSelectCreateManyAndReturn<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetSelect<{
   id?: boolean
   processedById?: boolean
   processedAt?: boolean
+  extractionId?: boolean
   filename?: boolean
   fileKind?: boolean
   fileSize?: boolean
@@ -807,13 +843,14 @@ export type ContractRunSelectCreateManyAndReturn<ExtArgs extends runtime.Types.E
   inputTokens?: boolean
   outputTokens?: boolean
   costUsd?: boolean
-  processedBy?: boolean | Prisma.UserDefaultArgs<ExtArgs>
+  processedBy?: boolean | Prisma.ContractRun$processedByArgs<ExtArgs>
 }, ExtArgs["result"]["contractRun"]>
 
 export type ContractRunSelectUpdateManyAndReturn<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetSelect<{
   id?: boolean
   processedById?: boolean
   processedAt?: boolean
+  extractionId?: boolean
   filename?: boolean
   fileKind?: boolean
   fileSize?: boolean
@@ -825,13 +862,14 @@ export type ContractRunSelectUpdateManyAndReturn<ExtArgs extends runtime.Types.E
   inputTokens?: boolean
   outputTokens?: boolean
   costUsd?: boolean
-  processedBy?: boolean | Prisma.UserDefaultArgs<ExtArgs>
+  processedBy?: boolean | Prisma.ContractRun$processedByArgs<ExtArgs>
 }, ExtArgs["result"]["contractRun"]>
 
 export type ContractRunSelectScalar = {
   id?: boolean
   processedById?: boolean
   processedAt?: boolean
+  extractionId?: boolean
   filename?: boolean
   fileKind?: boolean
   fileSize?: boolean
@@ -845,29 +883,43 @@ export type ContractRunSelectScalar = {
   costUsd?: boolean
 }
 
-export type ContractRunOmit<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetOmit<"id" | "processedById" | "processedAt" | "filename" | "fileKind" | "fileSize" | "sharedFields" | "rows" | "catalogPrefill" | "manualFields" | "aiModel" | "inputTokens" | "outputTokens" | "costUsd", ExtArgs["result"]["contractRun"]>
+export type ContractRunOmit<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetOmit<"id" | "processedById" | "processedAt" | "extractionId" | "filename" | "fileKind" | "fileSize" | "sharedFields" | "rows" | "catalogPrefill" | "manualFields" | "aiModel" | "inputTokens" | "outputTokens" | "costUsd", ExtArgs["result"]["contractRun"]>
 export type ContractRunInclude<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
-  processedBy?: boolean | Prisma.UserDefaultArgs<ExtArgs>
+  processedBy?: boolean | Prisma.ContractRun$processedByArgs<ExtArgs>
 }
 export type ContractRunIncludeCreateManyAndReturn<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
-  processedBy?: boolean | Prisma.UserDefaultArgs<ExtArgs>
+  processedBy?: boolean | Prisma.ContractRun$processedByArgs<ExtArgs>
 }
 export type ContractRunIncludeUpdateManyAndReturn<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
-  processedBy?: boolean | Prisma.UserDefaultArgs<ExtArgs>
+  processedBy?: boolean | Prisma.ContractRun$processedByArgs<ExtArgs>
 }
 
 export type $ContractRunPayload<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
   name: "ContractRun"
   objects: {
-    processedBy: Prisma.$UserPayload<ExtArgs>
+    processedBy: Prisma.$UserPayload<ExtArgs> | null
   }
   scalars: runtime.Types.Extensions.GetPayloadResult<{
     id: string
     /**
-     * * User who hit "Descargar xlsx". Kept for audit; not used to filter.
+     * *
+     *    * User who hit "Descargar xlsx". Kept for audit only; not used to filter.
+     *    * Nullable + ON DELETE SET NULL so a run is never tied to a user's
+     *    * lifetime: deleting the user keeps the history row and simply drops the
+     *    * reference.
      */
-    processedById: string
+    processedById: string | null
     processedAt: Date
+    /**
+     * *
+     *    * Client-generated idempotency key, one per extraction (Paso 3 result).
+     *    * The xlsx can be downloaded several times for the same extraction
+     *    * (Paso 3 "Descargar aquí", Paso 4 auto-download, re-clicks); every save
+     *    * upserts on this key so one extraction is exactly one history row and
+     *    * is counted once in the dashboard. Nullable for rows created before the
+     *    * key existed.
+     */
+    extractionId: string | null
     /**
      * * Original uploaded filename (no path), e.g. `parador_2026.pdf`.
      */
@@ -1313,7 +1365,7 @@ readonly fields: ContractRunFieldRefs;
  */
 export interface Prisma__ContractRunClient<T, Null = never, ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs, GlobalOmitOptions = {}> extends Prisma.PrismaPromise<T> {
   readonly [Symbol.toStringTag]: "PrismaPromise"
-  processedBy<T extends Prisma.UserDefaultArgs<ExtArgs> = {}>(args?: Prisma.Subset<T, Prisma.UserDefaultArgs<ExtArgs>>): Prisma.Prisma__UserClient<runtime.Types.Result.GetResult<Prisma.$UserPayload<ExtArgs>, T, "findUniqueOrThrow", GlobalOmitOptions> | Null, Null, ExtArgs, GlobalOmitOptions>
+  processedBy<T extends Prisma.ContractRun$processedByArgs<ExtArgs> = {}>(args?: Prisma.Subset<T, Prisma.ContractRun$processedByArgs<ExtArgs>>): Prisma.Prisma__UserClient<runtime.Types.Result.GetResult<Prisma.$UserPayload<ExtArgs>, T, "findUniqueOrThrow", GlobalOmitOptions> | null, null, ExtArgs, GlobalOmitOptions>
   /**
    * Attaches callbacks for the resolution and/or rejection of the Promise.
    * @param onfulfilled The callback to execute when the Promise is resolved.
@@ -1346,6 +1398,7 @@ export interface ContractRunFieldRefs {
   readonly id: Prisma.FieldRef<"ContractRun", 'String'>
   readonly processedById: Prisma.FieldRef<"ContractRun", 'String'>
   readonly processedAt: Prisma.FieldRef<"ContractRun", 'DateTime'>
+  readonly extractionId: Prisma.FieldRef<"ContractRun", 'String'>
   readonly filename: Prisma.FieldRef<"ContractRun", 'String'>
   readonly fileKind: Prisma.FieldRef<"ContractRun", 'String'>
   readonly fileSize: Prisma.FieldRef<"ContractRun", 'Int'>
@@ -1755,6 +1808,25 @@ export type ContractRunDeleteManyArgs<ExtArgs extends runtime.Types.Extensions.I
    * Limit how many ContractRuns to delete.
    */
   limit?: number
+}
+
+/**
+ * ContractRun.processedBy
+ */
+export type ContractRun$processedByArgs<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
+  /**
+   * Select specific fields to fetch from the User
+   */
+  select?: Prisma.UserSelect<ExtArgs> | null
+  /**
+   * Omit specific fields from the User
+   */
+  omit?: Prisma.UserOmit<ExtArgs> | null
+  /**
+   * Choose, which related nodes to fetch as well
+   */
+  include?: Prisma.UserInclude<ExtArgs> | null
+  where?: Prisma.UserWhereInput
 }
 
 /**

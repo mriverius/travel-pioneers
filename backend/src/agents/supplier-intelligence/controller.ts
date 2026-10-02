@@ -84,6 +84,35 @@ function combineFilenames(files: Express.Multer.File[]): string {
  * as the brief override (Fase 1 is skipped). Bad JSON is a 400 so the client
  * notices a serialization bug instead of silently re-running the analysis.
  */
+/** Tope del JSON de hechos verificados que aceptamos del cliente (~24 KB). */
+const MAX_PRESCAN_HINTS_LENGTH = 24_000;
+
+/**
+ * `pre_scan_hints`: JSON compacto producido por el frontend a partir del
+ * pre-scan (sin IA) + proveedor confirmado. Lo validamos como objeto plano
+ * y acotamos tamaño; el contenido es informativo para el modelo, no se
+ * persiste ni se ejecuta.
+ */
+function parsePreScanHints(raw: unknown): Record<string, unknown> | undefined {
+  if (raw === undefined || raw === null || raw === "") return undefined;
+  if (typeof raw !== "string") {
+    throw ApiError.badRequest("'pre_scan_hints' debe ser JSON en texto.");
+  }
+  if (raw.length > MAX_PRESCAN_HINTS_LENGTH) {
+    throw ApiError.badRequest("'pre_scan_hints' excede el tamaño permitido.");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw ApiError.badRequest("'pre_scan_hints' no es JSON válido.");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw ApiError.badRequest("'pre_scan_hints' debe ser un objeto JSON.");
+  }
+  return parsed as Record<string, unknown>;
+}
+
 function parseBriefField(raw: unknown): ContractBrief | null {
   if (raw === undefined || raw === null) return null;
   if (typeof raw !== "string" || raw.trim() === "") return null;
@@ -194,6 +223,7 @@ async function prepareUploadedDocs(req: Request): Promise<{
     req.body?.is_existing_supplier,
   );
   const comments = parseComments(req.body?.comments);
+  const preScanHints = parsePreScanHints(req.body?.pre_scan_hints);
 
   const prepared: PreparedDocumentInput[] = [];
   let totalBytes = 0;
@@ -219,7 +249,7 @@ async function prepareUploadedDocs(req: Request): Promise<{
     prepared,
     files,
     totalBytes,
-    context: { comments, isExistingSupplier },
+    context: { comments, isExistingSupplier, preScanHints },
   };
 }
 

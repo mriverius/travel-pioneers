@@ -21,8 +21,12 @@ import {
 } from "../agents/supplier-intelligence/contractsController.js";
 import { supplierIntelligenceErrorHandler } from "../agents/supplier-intelligence/errorHandler.js";
 import { handleContractUpload } from "../agents/supplier-intelligence/uploadMiddleware.js";
+import { preScanHandler } from "../agents/supplier-intelligence/preScanController.js";
 
 const router = Router();
+
+// Todas las rutas que llaman a Anthropic (o devuelven su resultado) exigen
+// sesión: cada request cuesta dinero real. Antes sólo /contracts lo pedía.
 
 /**
  * Anthropic calls cost real money and have their own rate limits, so we put
@@ -163,6 +167,35 @@ const contractsReadLimiter = rateLimit({
 });
 
 /**
+ * Pre-scan: barato (sin IA, ~ms), pero recibe el archivo completo, así que
+ * lo limitamos por si alguien lo martilla.
+ */
+const preScanLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: { code: "RATE_LIMITED", message: "Demasiados análisis previos. Espera un momento." },
+  },
+});
+
+/**
+ * POST /api/supplier-intelligence/pre-scan
+ *
+ * Detección determinística del proveedor + datos regex + historial, sin
+ * IA. Corre al soltar el archivo en el Paso 1. Ver `preScanService.ts`.
+ */
+router.post(
+  "/pre-scan",
+  requireAuth,
+  preScanLimiter,
+  handleContractUpload,
+  asyncHandler(preScanHandler),
+);
+
+/**
  * POST /api/supplier-intelligence/extract
  *
  * Order matters:
@@ -172,6 +205,7 @@ const contractsReadLimiter = rateLimit({
  */
 router.post(
   "/extract",
+  requireAuth,
   extractLimiter,
   handleContractUpload,
   asyncHandler(extractContractHandler),
@@ -185,6 +219,7 @@ router.post(
  */
 router.get(
   "/extract/:jobId",
+  requireAuth,
   extractStatusLimiter,
   asyncHandler(getExtractionStatusHandler),
 );
@@ -199,6 +234,7 @@ router.get(
  */
 router.post(
   "/analyze-brief",
+  requireAuth,
   extractLimiter,
   handleContractUpload,
   asyncHandler(analyzeBriefHandler),
@@ -211,6 +247,7 @@ router.post(
  */
 router.post(
   "/refine-brief",
+  requireAuth,
   extractLimiter,
   handleContractUpload,
   asyncHandler(refineBriefHandler),
@@ -224,6 +261,7 @@ router.post(
  */
 router.post(
   "/match-supplier",
+  requireAuth,
   matchLimiter,
   matchJsonParser,
   asyncHandler(matchSupplierHandler),
@@ -239,6 +277,7 @@ router.post(
  */
 router.post(
   "/match-service",
+  requireAuth,
   matchLimiter,
   matchJsonParser,
   asyncHandler(matchServiceHandler),
@@ -253,6 +292,7 @@ router.post(
  */
 router.post(
   "/generate-xlsx",
+  requireAuth,
   generateLimiter,
   generateJsonParser,
   asyncHandler(generateXlsxHandler),
@@ -269,6 +309,7 @@ router.post(
  */
 router.post(
   "/refine-table",
+  requireAuth,
   refineTableLimiter,
   refineTableJsonParser,
   asyncHandler(refineTableHandler),
@@ -279,8 +320,9 @@ router.post(
  *
  * Persiste un run completo (tras una generación de xlsx exitosa). Auth
  * requerida — guardamos `processedById` para auditoría aunque la lectura
- * sea global. Idempotencia es responsabilidad del cliente: el frontend
- * dispara este POST una sola vez cuando el step 3 entra a phase="ready".
+ * sea global. Idempotente por `extraction_id`: el frontend puede disparar
+ * este POST en cada descarga del xlsx (Paso 3 y Paso 4) y el backend
+ * hace upsert, así una extracción es exactamente un run.
  *
  * GET  /api/supplier-intelligence/contracts
  * GET  /api/supplier-intelligence/contracts/stats

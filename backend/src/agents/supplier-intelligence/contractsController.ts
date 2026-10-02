@@ -13,12 +13,17 @@ import { normalizeDate, normalizeSeasonDateField } from "./validators.js";
 /**
  * Persistence + read endpoints for Supplier Intelligence runs.
  *
- *   POST /api/supplier-intelligence/contracts          — save a finished run
- *   GET  /api/supplier-intelligence/contracts          — list (global, paginated)
- *   GET  /api/supplier-intelligence/contracts/stats    — counts per range
+ *   POST /api/supplier-intelligence/contracts          — save a finished run (upsert by extraction_id)
+ *   GET  /api/supplier-intelligence/contracts          — list (global, paginated, ?range=&tz=)
+ *   GET  /api/supplier-intelligence/contracts/stats    — counts per range (?tz=)
+ *
+ * The list and the stats endpoints share `rangeStart()` so the number the
+ * dashboard shows for a range is, by construction, the `total` the history
+ * page reports for the same range: same cutoff instants, same timezone.
  *
  * Scope is global: every authenticated user reads every run; `processedById`
- * is captured for audit only. The product team explicitly chose this over
+ * is captured for audit only and becomes null if that user is later deleted
+ * (runs are never blocked on, or removed with, a user). The product team explicitly chose this over
  * per-user isolation to avoid the "I can't see what my colleague processed"
  * support thread.
  *
@@ -240,7 +245,8 @@ function coerceCatalogPrefill(input: unknown): CatalogPrefill | null {
 interface PublicContractRun {
   id: string;
   processedAt: string;
-  processedBy: { id: string; name: string; email: string };
+  /** Null when the user that processed the run has since been deleted. */
+  processedBy: { id: string; name: string; email: string } | null;
   filename: string;
   fileKind: string;
   fileSize: number;
@@ -273,14 +279,14 @@ interface ContractRunRow {
   inputTokens: number | null;
   outputTokens: number | null;
   costUsd: number | null;
-  processedBy: { id: string; name: string; email: string };
+  processedBy: { id: string; name: string; email: string } | null;
 }
 
 function toPublicRun(row: ContractRunRow): PublicContractRun {
   return {
     id: row.id,
     processedAt: row.processedAt.toISOString(),
-    processedBy: row.processedBy,
+    processedBy: row.processedBy ?? null,
     filename: row.filename,
     fileKind: row.fileKind,
     fileSize: row.fileSize,
@@ -317,6 +323,23 @@ interface SaveBody {
   input_tokens?: unknown;
   output_tokens?: unknown;
   cost_usd?: unknown;
+  /**
+   * Client-generated UUID, one per extraction. When present the save is an
+   * upsert: re-downloading the same extraction updates the existing row
+   * instead of inserting a duplicate. Optional for backwards compat.
+   */
+  extraction_id?: unknown;
+}
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function coerceOptionalUuid(v: unknown, field: string): string | null {
+  if (v === undefined || v === null || v === "") return null;
+  if (typeof v !== "string" || !UUID_RE.test(v)) {
+    throw ApiError.badRequest(`\`${field}\` debe ser un UUID.`);
+  }
+  return v.toLowerCase();
 }
 
 const ALLOWED_FILE_KINDS = new Set(["pdf", "docx", "xlsx", "image"]);
@@ -384,32 +407,57 @@ export async function saveContractRunHandler(
     "output_tokens",
   );
   const costUsd = coerceOptionalNonNegativeFloat(body.cost_usd, "cost_usd");
+  const extractionId = coerceOptionalUuid(body.extraction_id, "extraction_id");
 
-  const created = await prisma.contractRun.create({
-    data: {
-      processedById: req.auth.id,
-      filename,
-      fileKind,
-      fileSize: Math.floor(fileSize),
-      aiModel,
-      // Cast to satisfy Prisma's `JsonValue` shape — `null` is allowed but
-      // requires `as unknown as Prisma.InputJsonValue` at the type level.
-      sharedFields: sharedFields as unknown as object,
-      rows: rows as unknown as object,
-      catalogPrefill: (catalogPrefill ?? undefined) as unknown as object | undefined,
-      manualFields: (manualFields ?? undefined) as unknown as object | undefined,
-      inputTokens: inputTokens ?? undefined,
-      outputTokens: outputTokens ?? undefined,
-      costUsd: costUsd ?? undefined,
-    },
-    include: {
-      processedBy: { select: { id: true, name: true, email: true } },
-    },
-  });
+  const data = {
+    filename,
+    fileKind,
+    fileSize: Math.floor(fileSize),
+    aiModel,
+    // Cast to satisfy Prisma's `JsonValue` shape — `null` is allowed but
+    // requires `as unknown as Prisma.InputJsonValue` at the type level.
+    sharedFields: sharedFields as unknown as object,
+    rows: rows as unknown as object,
+    catalogPrefill: (catalogPrefill ?? undefined) as unknown as object | undefined,
+    manualFields: (manualFields ?? undefined) as unknown as object | undefined,
+    inputTokens: inputTokens ?? undefined,
+    outputTokens: outputTokens ?? undefined,
+    costUsd: costUsd ?? undefined,
+  };
+  const include = {
+    processedBy: { select: { id: true, name: true, email: true } },
+  };
 
-  logger.info("ContractRun saved", {
+  // Idempotent save: the same extraction downloaded twice (Paso 3 button +
+  // Paso 4 auto-download, or a re-click) must stay one history row, and so
+  // be counted once in the dashboard. On a repeat we refresh the payload
+  // (the user may have edited rows between downloads) but keep the original
+  // `processedAt` and `processedById` — the run happened once.
+  let saved;
+  let created = true;
+  if (extractionId) {
+    const existing = await prisma.contractRun.findUnique({
+      where: { extractionId },
+      select: { id: true },
+    });
+    created = existing === null;
+    saved = await prisma.contractRun.upsert({
+      where: { extractionId },
+      create: { ...data, extractionId, processedById: req.auth.id },
+      update: data,
+      include,
+    });
+  } else {
+    saved = await prisma.contractRun.create({
+      data: { ...data, processedById: req.auth.id },
+      include,
+    });
+  }
+
+  logger.info(created ? "ContractRun saved" : "ContractRun updated (same extraction)", {
     requestId: req.id,
-    runId: created.id,
+    runId: saved.id,
+    extractionId,
     actorId: req.auth.id,
     rowCount: rows.length,
     filename,
@@ -418,7 +466,86 @@ export async function saveContractRunHandler(
     costUsd,
   });
 
-  res.status(201).json({ run: toPublicRun(created as unknown as ContractRunRow) });
+  res
+    .status(created ? 201 : 200)
+    .json({ run: toPublicRun(saved as unknown as ContractRunRow), created });
+}
+
+/* -------------------------------------------------------------------------- */
+/*                         Time ranges (shared by list + stats)               */
+/* -------------------------------------------------------------------------- */
+
+export const RANGE_KEYS = ["today", "week", "month", "quarter", "all"] as const;
+export type RangeKey = (typeof RANGE_KEYS)[number];
+
+function isRangeKey(v: unknown): v is RangeKey {
+  return typeof v === "string" && (RANGE_KEYS as readonly string[]).includes(v);
+}
+
+/**
+ * Resolve the IANA timezone the client asked for (`?tz=America/Costa_Rica`).
+ * "Hoy" is a calendar concept, so it must be computed in the *user's* day,
+ * not the server's — otherwise an API running in UTC starts "today" at
+ * 18:00 Costa Rica time the previous evening and the dashboard disagrees
+ * with what the user sees in the history list. Invalid / missing values
+ * fall back to UTC so the response is still deterministic.
+ */
+function resolveTimeZone(raw: unknown): string {
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > 64) return "UTC";
+  try {
+    // Throws RangeError for unknown zones.
+    new Intl.DateTimeFormat("en-US", { timeZone: raw });
+    return raw;
+  } catch {
+    return "UTC";
+  }
+}
+
+/** Start of the calendar day containing `now` in `timeZone`, as a UTC instant. */
+function startOfDayIn(timeZone: string, now: Date): Date {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  const parts: Record<string, number> = {};
+  for (const p of fmt.formatToParts(now)) {
+    if (p.type !== "literal") parts[p.type] = Number(p.value);
+  }
+  const y = parts.year ?? now.getUTCFullYear();
+  const m = (parts.month ?? now.getUTCMonth() + 1) - 1;
+  const d = parts.day ?? now.getUTCDate();
+  // Wall-clock "now" in the zone, read as if it were UTC → the difference to
+  // the real instant is the zone's current UTC offset.
+  const wallNow = Date.UTC(y, m, d, parts.hour ?? 0, parts.minute ?? 0, parts.second ?? 0);
+  const offsetMs = wallNow - Math.floor(now.getTime() / 1000) * 1000;
+  return new Date(Date.UTC(y, m, d) - offsetMs);
+}
+
+/**
+ * Cutoff instant for a range, or null for "all". Rolling windows for
+ * week/month/quarter (the user reasons "últimos 7 días"), calendar day for
+ * today — both screens must use exactly this function.
+ */
+export function rangeStart(range: RangeKey, timeZone: string, now = new Date()): Date | null {
+  const day = 24 * 60 * 60 * 1000;
+  switch (range) {
+    case "today":
+      return startOfDayIn(timeZone, now);
+    case "week":
+      return new Date(now.getTime() - 7 * day);
+    case "month":
+      return new Date(now.getTime() - 30 * day);
+    case "quarter":
+      return new Date(now.getTime() - 90 * day);
+    case "all":
+      return null;
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -428,24 +555,51 @@ export async function saveContractRunHandler(
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
 
+function parseIntParam(raw: unknown, fallback: number, min: number, max: number): number {
+  const n = typeof raw === "string" ? Number.parseInt(raw, 10) : NaN;
+  return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : fallback;
+}
+
+/**
+ * GET /contracts?range=&tz=&limit=&offset=
+ *
+ * Returns the page plus `total` — the number of runs matching the range,
+ * regardless of pagination — so the history page can show "mostrando X de
+ * N" and N always equals the dashboard card for the same range.
+ */
 export async function listContractRunsHandler(
   req: Request,
   res: Response,
 ): Promise<void> {
-  const limitRaw = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : NaN;
-  const limit = Number.isFinite(limitRaw)
-    ? Math.max(1, Math.min(MAX_LIMIT, limitRaw))
-    : DEFAULT_LIMIT;
+  const limit = parseIntParam(req.query.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
+  const offset = parseIntParam(req.query.offset, 0, 0, 1_000_000);
+  const range: RangeKey = isRangeKey(req.query.range) ? req.query.range : "all";
+  const timeZone = resolveTimeZone(req.query.tz);
 
-  const rows = (await prisma.contractRun.findMany({
-    orderBy: { processedAt: "desc" },
-    take: limit,
-    include: {
-      processedBy: { select: { id: true, name: true, email: true } },
-    },
-  })) as unknown as ContractRunRow[];
+  const since = rangeStart(range, timeZone);
+  const where = since ? { processedAt: { gte: since } } : {};
 
-  res.json({ runs: rows.map(toPublicRun) });
+  const [rows, total] = await Promise.all([
+    prisma.contractRun.findMany({
+      where,
+      orderBy: { processedAt: "desc" },
+      skip: offset,
+      take: limit,
+      include: {
+        processedBy: { select: { id: true, name: true, email: true } },
+      },
+    }) as unknown as Promise<ContractRunRow[]>,
+    prisma.contractRun.count({ where }),
+  ]);
+
+  res.json({
+    runs: rows.map(toPublicRun),
+    total,
+    range,
+    tz: timeZone,
+    limit,
+    offset,
+  });
 }
 
 /* -------------------------------------------------------------------------- */
@@ -460,7 +614,7 @@ export async function listContractRunsHandler(
  * Definitions (all rolling windows, not calendar boundaries — el usuario
  * razona "en los últimos 7 días" y queremos evitar resets sorpresa los
  * lunes a las 00:00):
- *   today    — desde las 00:00 de hoy (hora del servidor)
+ *   today    — desde las 00:00 de hoy en la zona horaria del cliente (`?tz=`)
  *   week     — últimos 7 días
  *   month    — últimos 30 días
  *   quarter  — últimos 90 días
@@ -507,17 +661,18 @@ const toInt = (v: bigint | number | null | undefined): number =>
   typeof v === "bigint" ? Number(v) : typeof v === "number" ? v : 0;
 
 export async function contractRunStatsHandler(
-  _req: Request,
+  req: Request,
   res: Response,
 ): Promise<void> {
   const now = new Date();
+  const timeZone = resolveTimeZone(req.query.tz);
 
-  const startOfToday = new Date(now);
-  startOfToday.setHours(0, 0, 0, 0);
-
-  const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-  const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-  const ninetyDaysAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+  // Same cutoffs as GET /contracts (see `rangeStart`) so the two screens
+  // can never disagree on which runs fall inside a range.
+  const startOfToday = rangeStart("today", timeZone, now) as Date;
+  const sevenDaysAgo = rangeStart("week", timeZone, now) as Date;
+  const thirtyDaysAgo = rangeStart("month", timeZone, now) as Date;
+  const ninetyDaysAgo = rangeStart("quarter", timeZone, now) as Date;
 
   // Single round-trip: contamos contratos y sumamos filas (jsonb_array_length)
   // en una sola query usando FILTER clauses. El índice en processed_at hace
@@ -558,5 +713,5 @@ export async function contractRunStatsHandler(
     },
   };
 
-  res.json({ stats });
+  res.json({ stats, tz: timeZone });
 }

@@ -7,9 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "build:catalog": "node scripts/build-supplier-catalog.mjs",
     "build:service-types": "node scripts/build-service-types-catalog.mjs",
-    "build:catalogs": "npm run build:catalog && npm run build:service-types",
+    "build:catalogs": "npm run build:service-types",
     "prebuild": "npm run build:catalogs",
     "predev": "npm run build:catalogs"
   },

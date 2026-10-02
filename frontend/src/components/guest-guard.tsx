@@ -6,7 +6,7 @@ import { useAuth } from "@/lib/useAuth";
 
 /**
  * Inverse of `AuthGuard` — prevents a logged-in user from seeing the
- * /login or /register pages and sends them back to the portal instead.
+ * /login page and sends them back to the portal instead.
  */
 export default function GuestGuard({
   children,

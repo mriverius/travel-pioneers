@@ -1,10 +1,9 @@
 /**
  * Búsqueda en el catálogo de proveedores (lista-proveedores).
  *
- * Por qué un módulo separado del JSON generado: para que `supplierCatalog.ts`
- * (1.6 MB) se cargue por **dynamic import** únicamente cuando el usuario marca
- * "Sí, existente" en step 1. Si la página inicial lo importara estáticamente,
- * los 1.6 MB entrarían al chunk del agente sin necesidad.
+ * El catálogo se sirve desde el backend (`GET /suppliers`, tabla `suppliers`
+ * administrada por los admins en /suppliers) y se cachea aquí en memoria la
+ * primera vez que se necesita (dropdown del Paso 1 o lookup por nombre).
  *
  * Estrategia de matching:
  *   1. Normalizamos la entrada (sin acentos, lowercase, sin signos).
@@ -20,13 +19,104 @@
  * anterior (campos vacíos en step 2).
  */
 
-import type { CatalogSupplier, CatalogService } from "./supplierCatalog";
-import { api, ApiError, type MatchSupplierConfidence } from "./api";
+import {
+  api,
+  ApiError,
+  type CatalogService,
+  type CatalogSupplier,
+  type MatchSupplierConfidence,
+} from "./api";
+
+export type { CatalogService, CatalogSupplier };
+
+/* ------------------------------ catalog cache ----------------------------- */
+
+interface LoadedCatalog {
+  suppliers: CatalogSupplier[];
+  /** normalizedKey (nombre o código) → codigo. Empate: gana el primero. */
+  indexByName: Record<string, string>;
+}
+
+let catalogPromise: Promise<LoadedCatalog> | null = null;
+/** Proveedores completos (con servicios) ya pedidos, por id. */
+const fullSupplierCache = new Map<string, Promise<CatalogSupplier>>();
+
+function buildIndex(suppliers: CatalogSupplier[]): Record<string, string> {
+  const index: Record<string, string> = {};
+  for (const s of suppliers) {
+    if (s.nombre) {
+      const k = normalizeKey(s.nombre);
+      if (k && !index[k]) index[k] = s.codigo;
+    }
+    const kc = normalizeKey(s.codigo);
+    if (kc && !index[kc]) index[kc] = s.codigo;
+  }
+  return index;
+}
+
+/**
+ * Carga el catálogo desde el backend una sola vez por sesión de página y lo
+ * cachea en memoria (promesa compartida: llamadas concurrentes esperan al
+ * mismo request). Si el request falla, la promesa se descarta para que el
+ * siguiente intento vuelva a pedirlo.
+ */
+export function loadSupplierCatalog(): Promise<LoadedCatalog> {
+  if (!catalogPromise) {
+    // Summary: sin servicios. Los del proveedor elegido se piden aparte con
+    // `withServices()` — así el Paso 1 no descarga ~14k servicios.
+    catalogPromise = api.suppliers
+      .list({ summary: true })
+      .then(({ suppliers }) => ({ suppliers, indexByName: buildIndex(suppliers) }))
+      .catch((err: unknown) => {
+        catalogPromise = null;
+        throw err;
+      });
+  }
+  return catalogPromise;
+}
+
+/** Lista plana de proveedores (ordenada por nombre), para dropdowns. */
+export async function listSuppliers(): Promise<CatalogSupplier[]> {
+  return (await loadSupplierCatalog()).suppliers;
+}
+
+/**
+ * Devuelve el proveedor con su lista completa de servicios, pidiéndola al
+ * backend la primera vez (cache por id). Si ya la trae (p. ej. viene del
+ * catálogo completo), no hace request.
+ */
+export function withServices(supplier: CatalogSupplier): Promise<CatalogSupplier> {
+  if (supplier.servicios.length > 0 || supplier.serviceCount === 0) {
+    return Promise.resolve(supplier);
+  }
+  let p = fullSupplierCache.get(supplier.id);
+  if (!p) {
+    p = api.suppliers
+      .get(supplier.id)
+      .then(({ supplier: full }) => full)
+      .catch((err: unknown) => {
+        fullSupplierCache.delete(supplier.id);
+        throw err;
+      });
+    fullSupplierCache.set(supplier.id, p);
+  }
+  return p;
+}
+
+/**
+ * Invalida la cache. Lo llama la pantalla de administración de proveedores
+ * después de crear/editar/eliminar para que el agente vea los cambios sin
+ * recargar la página.
+ */
+export function invalidateSupplierCatalog(): void {
+  catalogPromise = null;
+  fullSupplierCache.clear();
+}
 
 /**
  * Normaliza un string para comparación tolerante a acentos/casing/signos.
- * Igual a la usada por `build-supplier-catalog.mjs` al construir el índice —
- * mantenerlas en sync es crítico para que los lookups exactos funcionen.
+ * Se usa tanto para indexar el catálogo como para normalizar el query, así
+ * que los lookups exactos funcionan por construcción.
  */
 export function normalizeKey(s: string | null | undefined): string {
   if (!s) return "";
@@ -46,8 +136,9 @@ export interface SupplierMatch {
    * Cómo se hizo el match — útil para diagnóstico/UI:
    *   - "exact" / "prefix" / "includes" → matchers locales (gratis, instantáneos)
    *   - "ai" → fallback Claude vía POST /match-supplier (cuesta tokens)
+   *   - "manual" → el usuario lo eligió en el dropdown del Paso 1
    */
-  matchedBy: "exact" | "prefix" | "includes" | "ai";
+  matchedBy: "exact" | "prefix" | "includes" | "ai" | "manual";
   /** El query original que se buscó (post-trim, sin normalizar). */
   query: string;
   /**
@@ -69,8 +160,8 @@ export async function findSupplierByName(
   const query = (rawName ?? "").trim();
   if (!query) return null;
 
-  // Dynamic import — el catálogo (~1.6 MB) se code-splittea en su propio chunk.
-  const { SUPPLIERS, SUPPLIER_INDEX_BY_NAME } = await import("./supplierCatalog");
+  const { suppliers: SUPPLIERS, indexByName: SUPPLIER_INDEX_BY_NAME } =
+    await loadSupplierCatalog();
 
   const key = normalizeKey(query);
   if (!key) return null;
@@ -132,9 +223,8 @@ export async function findSupplierByNameWithAI(
   const query = (rawName ?? "").trim();
   if (!query) return null;
 
-  // Reusamos el módulo ya cargado para `findSupplierByName` (mismo dynamic
-  // import) — el catálogo está en cache después del primer intento local.
-  const { SUPPLIERS } = await import("./supplierCatalog");
+  // El catálogo ya está en cache después del intento local.
+  const { suppliers: SUPPLIERS } = await loadSupplierCatalog();
 
   const candidates = SUPPLIERS
     .filter((s): s is CatalogSupplier & { nombre: string } => !!s.nombre)

@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   AlertCircle,
@@ -229,14 +228,9 @@ export default function LoginPage() {
               </button>
             </form>
 
-            <p className="mt-7 text-center text-[13.5px] text-muted-foreground">
-              ¿No tienes una cuenta?{" "}
-              <Link
-                href="/register"
-                className="text-emerald-400 hover:text-emerald-300 transition-colors font-semibold"
-              >
-                Regístrate aquí
-              </Link>
+            <p className="mt-7 text-center text-[13px] text-muted-foreground">
+              ¿No tienes una cuenta? Solicita acceso a un administrador del
+              portal.
             </p>
           </div>
         </div>

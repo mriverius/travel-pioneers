@@ -6,6 +6,7 @@ import {
   FileSearch,
   History,
   BookOpen,
+  Building2,
   Users as UsersIcon,
   Menu,
   X,
@@ -45,6 +46,12 @@ const agentItems: NavItem[] = [
 
 const configItems: NavItem[] = [
   { label: "Cómo usar el sistema", href: "/resources", icon: BookOpen },
+  {
+    label: "Proveedores",
+    href: "/suppliers",
+    icon: Building2,
+    adminOnly: true,
+  },
   {
     label: "Gestión de usuarios",
     href: "/users",

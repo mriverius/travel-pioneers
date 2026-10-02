@@ -40,7 +40,8 @@ model User {
  * Persisted record of a Supplier Intelligence agent run that successfully
  * generated an xlsx in step 3. One row per generated contract — global
  * scope (every authenticated user can read every run; `processedById`
- * is kept for audit only, not for filtering).
+ * is kept for audit only, not for filtering, and may be null once the
+ * user that ran it has been deleted).
  *
  * The 52 product fields are stored as JSONB rather than as columns to keep
  * the schema agile while the agent is still calibrating: shared/manual/
@@ -51,10 +52,25 @@ model User {
  */
 model ContractRun {
   id              String   @id @default(uuid()) @db.Uuid
-  /** User who hit "Descargar xlsx". Kept for audit; not used to filter. */
-  processedById   String   @map("processed_by_id") @db.Uuid
-  processedBy     User     @relation(fields: [processedById], references: [id], onDelete: Restrict)
+  /**
+   * User who hit "Descargar xlsx". Kept for audit only; not used to filter.
+   * Nullable + ON DELETE SET NULL so a run is never tied to a user's
+   * lifetime: deleting the user keeps the history row and simply drops the
+   * reference.
+   */
+  processedById   String?  @map("processed_by_id") @db.Uuid
+  processedBy     User?    @relation(fields: [processedById], references: [id], onDelete: SetNull)
   processedAt     DateTime @default(now()) @map("processed_at") @db.Timestamptz(6)
+
+  /**
+   * Client-generated idempotency key, one per extraction (Paso 3 result).
+   * The xlsx can be downloaded several times for the same extraction
+   * (Paso 3 "Descargar aquí", Paso 4 auto-download, re-clicks); every save
+   * upserts on this key so one extraction is exactly one history row and
+   * is counted once in the dashboard. Nullable for rows created before the
+   * key existed.
+   */
+  extractionId    String?  @unique @map("extraction_id") @db.Uuid
 
   /** Original uploaded filename (no path), e.g. `parador_2026.pdf`. */
   filename        String
@@ -96,4 +112,53 @@ model ContractRun {
   @@index([processedAt(sort: Desc)])
   @@index([processedById])
   @@map("contract_runs")
+}
+
+/**
+ * Maestro de proveedores ("lista-proveedores"). Antes era un .ts generado
+ * en build desde un xlsx; ahora vive en la DB para que los admins lo
+ * administren desde el portal. Un proveedor tiene N servicios.
+ *
+ * `codigo` es la llave de negocio (columna C del xlsx de salida) y se
+ * mantiene única; `id` existe para que renombrar un código no rompa URLs.
+ */
+model Supplier {
+  id        String   @id @default(uuid()) @db.Uuid
+  /** Código corto del maestro (columna "proveedor"). */
+  codigo    String   @unique
+  /** Nombre comercial (columna "Nombre"). */
+  nombre    String?
+  /** Tipo de actividad (columna "Actividad"), ej. HO, TR. */
+  actividad String?
+  /** Zona / destino turístico (columna "Zona"). */
+  zona      String?
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt      @map("updated_at") @db.Timestamptz(6)
+
+  servicios SupplierService[]
+
+  @@index([nombre])
+  @@map("suppliers")
+}
+
+model SupplierService {
+  id          String   @id @default(uuid()) @db.Uuid
+  supplierId  String   @map("supplier_id") @db.Uuid
+  supplier    Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  /** Código de servicio (columna "Servicio"). */
+  codigo      String
+  /** Descripción libre (columna "Descripción"). */
+  descripcion String?
+  /**
+   * En el xlsx, Actividad y Zona vienen por fila (= por servicio) y ~30
+   * proveedores mezclan varias (hotel + tours + transporte). Las guardamos
+   * por servicio para no perder información; el valor del proveedor es el
+   * más frecuente y sirve de fallback cuando el servicio no tiene el suyo.
+   */
+  actividad   String?
+  zona        String?
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([supplierId, codigo])
+  @@map("supplier_services")
 }

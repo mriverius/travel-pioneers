@@ -469,7 +469,7 @@ async function startAndPollExtraction(
   const start = await requestForm<ExtractJobStartResponse>(
     "/api/supplier-intelligence/extract",
     form,
-    { timeoutMs: 3 * 60 * 1000 },
+    { auth: true, timeoutMs: 3 * 60 * 1000 },
   );
   const jobId = start.job_id;
   if (!jobId) {
@@ -503,7 +503,7 @@ async function startAndPollExtraction(
     try {
       status = await request<ExtractStatusResponse>(
         `/api/supplier-intelligence/extract/${encodeURIComponent(jobId)}`,
-        { timeoutMs: 30 * 1000 },
+        { timeoutMs: 30 * 1000, auth: true },
       );
       consecutiveFailures = 0;
     } catch (err) {
@@ -560,12 +560,6 @@ export interface AuthResponse {
   token: string;
 }
 
-export interface RegisterPayload {
-  name: string;
-  email: string;
-  password: string;
-}
-
 export interface LoginPayload {
   email: string;
   password: string;
@@ -601,6 +595,196 @@ export interface CreateUserResponse {
   user: ManagedUser;
   /** One-time generated password. Show once and discard. */
   tempPassword: string;
+}
+
+/* ------------------------------ suppliers ------------------------------- */
+
+/**
+ * Maestro de proveedores ("lista-proveedores"), servido por el backend desde
+ * la DB. Antes era un .ts generado en build desde un xlsx; ahora los admins
+ * lo administran desde /suppliers y el agente lo consume vía
+ * `supplierLookup.ts` (cache en memoria por sesión).
+ */
+export interface CatalogService {
+  id?: string;
+  /** Código de servicio del maestro (columna "Servicio"). */
+  codigo: string;
+  /** Descripción libre del servicio (columna "Descripción"). */
+  descripcion: string | null;
+  /**
+   * Actividad / zona propias del servicio (en el xlsx vienen por fila).
+   * `null` → usar las del proveedor. Prefill: servicio ?? proveedor.
+   */
+  actividad?: string | null;
+  zona?: string | null;
+}
+
+export interface CatalogSupplier {
+  id: string;
+  /** Código corto del proveedor en el maestro (columna "proveedor"). */
+  codigo: string;
+  /** Nombre comercial visible (columna "Nombre"). */
+  nombre: string | null;
+  /** Tipo de actividad (columna "Actividad"). */
+  actividad: string | null;
+  /** Zona/destino turístico (columna "Zona"). */
+  zona: string | null;
+  /**
+   * Servicios del proveedor — un proveedor tiene N servicios. Vacío cuando
+   * el proveedor viene de `list({ summary: true })`; usa `serviceCount` para
+   * el conteo y `api.suppliers.get(id)` para traerlos.
+   */
+  servicios: CatalogService[];
+  serviceCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SupplierServiceInput {
+  codigo: string;
+  descripcion?: string | null;
+  actividad?: string | null;
+  zona?: string | null;
+}
+
+export interface CreateSupplierPayload {
+  codigo: string;
+  nombre?: string | null;
+  actividad?: string | null;
+  zona?: string | null;
+  servicios?: SupplierServiceInput[];
+}
+
+export type UpdateSupplierPayload = Partial<
+  Pick<CreateSupplierPayload, "codigo" | "nombre" | "actividad" | "zona">
+>;
+
+/* ------------------------------- pre-scan -------------------------------- */
+
+/**
+ * Resultado de `POST /api/supplier-intelligence/pre-scan`: análisis
+ * determinístico (sin IA) del contrato recién subido. Ver backend
+ * `preScanService.ts` para el detalle de cada señal.
+ */
+export type PreScanConfidence = "alta" | "media" | "ninguna";
+
+export interface PreScanCandidate {
+  id: string;
+  codigo: string;
+  nombre: string | null;
+  actividad: string | null;
+  zona: string | null;
+  serviceCount: number;
+  score: number;
+  reasons: string[];
+}
+
+export interface PreScanFacts {
+  cedulas: string[];
+  ibans: string[];
+  emails: string[];
+  phones: string[];
+  currencies: string[];
+  /** ISO YYYY-MM-DD, en orden de aparición. */
+  dates: string[];
+  yearRange: { min: number; max: number } | null;
+}
+
+export interface PreScanPreviousRun {
+  id: string;
+  processedAt: string;
+  filename: string;
+  cedula: string | null;
+  numero_cuenta: string | null;
+  banco: string | null;
+  tipo_moneda: string | null;
+  contract_starts: string | null;
+  contract_ends: string | null;
+  reservations_email: string | null;
+}
+
+export interface PreScanSeason {
+  name: string | null;
+  /** MM-DD, sin año. */
+  ranges: { start: string; end: string }[];
+}
+
+export interface PreScanBankAccount {
+  bank: string | null;
+  currency: string | null;
+  accountNumber: string | null;
+  iban: string | null;
+}
+
+export interface PreScanTerm {
+  daysBefore: number | null;
+  percent: number | null;
+  season: string | null;
+  sentence: string;
+}
+
+export interface PreScanSection {
+  key: string;
+  title: string;
+  text: string;
+}
+
+export interface PreScanInferences {
+  legalName: string | null;
+  address: string | null;
+  website: string | null;
+  checkIn: string | null;
+  checkOut: string | null;
+  meals: string[];
+  paymentTerms: PreScanTerm[];
+  cancellationTerms: PreScanTerm[];
+  childTerms: string[];
+  bankAccounts: PreScanBankAccount[];
+  sections: PreScanSection[];
+  estimatedProducts: number | null;
+  country: { value: string; reasons: string[] } | null;
+  validity: { start: string; end: string; source: "explicit" | "year" } | null;
+  taxes: { included: boolean | null; percent: number | null; snippet: string } | null;
+  commission: { net: boolean; percent: number | null; snippet: string } | null;
+  rateBasis: string[];
+  occupancies: string[];
+  seasons: PreScanSeason[];
+  minNights: number | null;
+  childPolicy: string | null;
+  cancellationPolicy: string | null;
+  paymentPolicy: string | null;
+  prices: number[];
+  priceMentions: number;
+  productHints: string[];
+}
+
+export interface PreScanDocument {
+  filename: string;
+  kind: ContractFileKind;
+  role: "primary" | "secondary";
+  textAvailable: boolean;
+  pages: { scanned: number; total: number } | null;
+  chars: number;
+  /** "72 precios", "2 temporadas", "cancelación", "IBAN"… */
+  contributes: string[];
+  supplierHint: { codigo: string; nombre: string | null; confidence: PreScanConfidence } | null;
+}
+
+export interface PreScanResult {
+  filename: string;
+  kind: ContractFileKind;
+  /** false para imágenes y PDFs escaneados (sin capa de texto). */
+  textAvailable: boolean;
+  pages: { scanned: number; total: number } | null;
+  chars: number;
+  /** Todos los adjuntos (primario primero) y qué aportó cada uno. */
+  documents: PreScanDocument[];
+  crossDocumentWarnings: string[];
+  supplier: { confidence: PreScanConfidence; candidates: PreScanCandidate[] };
+  facts: PreScanFacts;
+  inferences: PreScanInferences;
+  previous: { runs: PreScanPreviousRun[]; warnings: string[] } | null;
+  durationMs: number;
 }
 
 /* --------------------- supplier-intelligence endpoints -------------------- */
@@ -741,6 +925,14 @@ export interface ExtractionMeta {
    * el contrato tiene una sola cuenta.
    */
   manual_prefill?: ManualBankPrefill | null;
+  /**
+   * Idempotency key for this extraction, generated client-side the moment
+   * the extract response lands (one UUID per Paso 3 result). Every xlsx
+   * download of this extraction sends it in `saveRun`, and the backend
+   * upserts on it — so one extraction is exactly one history row no matter
+   * how many times it is downloaded.
+   */
+  extraction_id?: string;
 }
 
 export interface ManualBankPrefill {
@@ -787,6 +979,11 @@ export interface ExtractContractInput {
   comments?: string;
   /** Required toggle from step 1 — `true` if the supplier already exists. */
   isExistingSupplier: boolean;
+  /**
+   * Hechos verificados (pre-scan sin IA + proveedor confirmado) que el
+   * backend inyecta en el prompt como anclas. Ver `buildPreScanHints`.
+   */
+  preScanHints?: Record<string, unknown> | null;
   /**
    * Variables de Configuración confirmadas por el usuario en el step gated
    * (entre upload y review). Cuando vienen, el backend SALTA la Fase 1 y usa
@@ -1115,6 +1312,8 @@ export interface SaveContractRunInput {
   input_tokens?: number;
   output_tokens?: number;
   cost_usd?: number;
+  /** See `ExtractionMeta.extraction_id`. Makes the save an upsert. */
+  extraction_id?: string;
 }
 
 export interface ContractRunUserRef {
@@ -1127,7 +1326,8 @@ export interface ContractRun {
   id: string;
   /** ISO timestamp. */
   processedAt: string;
-  processedBy: ContractRunUserRef;
+  /** Null when the user that processed the run has since been deleted. */
+  processedBy: ContractRunUserRef | null;
   filename: string;
   fileKind: ContractFileKind;
   fileSize: number;
@@ -1168,29 +1368,45 @@ export interface ContractStats {
   lines: ContractStatsBuckets;
 }
 
+/** Time ranges understood by both `/contracts` and `/contracts/stats`. */
+export type ContractRangeKey = keyof ContractStatsBuckets;
+
+export interface ListContractRunsParams {
+  /** Only runs inside this range (same cutoffs the stats card uses). */
+  range?: ContractRangeKey;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ListContractRunsResponse {
+  runs: ContractRun[];
+  /** Runs matching `range` regardless of pagination — equals the stats card. */
+  total: number;
+  range: ContractRangeKey;
+  tz: string;
+  limit: number;
+  offset: number;
+}
+
+/**
+ * IANA zone of the browser, sent as `?tz=` so the backend computes "hoy"
+ * in the user's calendar day instead of the server's. Falls back to UTC
+ * when `Intl` can't resolve one (very old browsers).
+ */
+export function browserTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
 export const api = {
-  register(payload: RegisterPayload) {
-    return request<AuthResponse>("/auth/register", {
-      method: "POST",
-      body: payload,
-    });
-  },
   login(payload: LoginPayload) {
     return request<AuthResponse>("/auth/login", {
       method: "POST",
       body: payload,
     });
-  },
-  /**
-   * Availability pre-check used by the register form to flag taken emails
-   * on blur — doesn't replace the server-side 409 handling at submit time.
-   */
-  checkEmailAvailability(email: string) {
-    const qs = new URLSearchParams({ email });
-    return request<{ email: string; available: boolean }>(
-      `/auth/check-email?${qs.toString()}`,
-      { method: "GET" },
-    );
   },
   users: {
     list() {
@@ -1218,6 +1434,51 @@ export const api = {
     },
     remove(id: string) {
       return request<void>(`/users/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        auth: true,
+      });
+    },
+  },
+  suppliers: {
+    /**
+     * `summary: true` → sin servicios (~60 KB en vez de ~2.7 MB). Es lo que
+     * usa el agente; la pantalla de administración pide el catálogo completo.
+     */
+    list(opts: { summary?: boolean } = {}) {
+      const qs = opts.summary ? "?summary=1" : "";
+      return request<{ suppliers: CatalogSupplier[]; summary: boolean }>(
+        `/suppliers${qs}`,
+        { method: "GET", auth: true },
+      );
+    },
+    get(id: string) {
+      return request<{ supplier: CatalogSupplier }>(
+        `/suppliers/${encodeURIComponent(id)}`,
+        { method: "GET", auth: true },
+      );
+    },
+    create(payload: CreateSupplierPayload) {
+      return request<{ supplier: CatalogSupplier }>("/suppliers", {
+        method: "POST",
+        body: payload,
+        auth: true,
+      });
+    },
+    update(id: string, payload: UpdateSupplierPayload) {
+      return request<{ supplier: CatalogSupplier }>(
+        `/suppliers/${encodeURIComponent(id)}`,
+        { method: "PATCH", body: payload, auth: true },
+      );
+    },
+    /** Replaces the whole services list of a supplier. */
+    replaceServices(id: string, servicios: SupplierServiceInput[]) {
+      return request<{ supplier: CatalogSupplier }>(
+        `/suppliers/${encodeURIComponent(id)}/servicios`,
+        { method: "PUT", body: { servicios }, auth: true },
+      );
+    },
+    remove(id: string) {
+      return request<void>(`/suppliers/${encodeURIComponent(id)}`, {
         method: "DELETE",
         auth: true,
       });
@@ -1257,6 +1518,9 @@ export const api = {
       if (trimmed) {
         form.append("comments", trimmed);
       }
+      if (input.preScanHints && Object.keys(input.preScanHints).length > 0) {
+        form.append("pre_scan_hints", JSON.stringify(input.preScanHints));
+      }
       // Variables de Configuración confirmadas en el step gated. Cuando vienen,
       // el backend salta la Fase 1 y usa estas reglas globales tal cual.
       // `briefs` (array, uno por documento) tiene prioridad; `brief` es
@@ -1282,6 +1546,21 @@ export const api = {
      * Mucho más rápido que `extract` (un solo pase de Sonnet, sin filas), así
      * que un timeout de 3 minutos es holgado.
      */
+    /**
+     * Pre-scan determinístico de TODOS los adjuntos (sin IA): proveedor
+     * detectado, datos regex por documento y contratos anteriores del mismo
+     * proveedor. El primario va primero. Corre cada vez que cambia el
+     * conjunto de archivos en el Paso 1; `signal` cancela el anterior.
+     */
+    preScan(files: File[], opts: { signal?: AbortSignal } = {}) {
+      const form = new FormData();
+      for (const f of files) form.append("files", f);
+      return requestForm<{ success: true; scan: PreScanResult }>(
+        "/api/supplier-intelligence/pre-scan",
+        form,
+        { auth: true, timeoutMs: 60 * 1000, signal: opts.signal },
+      );
+    },
     analyzeBrief(files: File[], input: ExtractContractInput) {
       if (files.length === 0) {
         throw new ApiError(
@@ -1301,10 +1580,13 @@ export const api = {
       if (trimmed) {
         form.append("comments", trimmed);
       }
+      if (input.preScanHints && Object.keys(input.preScanHints).length > 0) {
+        form.append("pre_scan_hints", JSON.stringify(input.preScanHints));
+      }
       return requestForm<AnalyzeBriefResponse>(
         "/api/supplier-intelligence/analyze-brief",
         form,
-        { timeoutMs: 3 * 60 * 1000 },
+        { auth: true, timeoutMs: 3 * 60 * 1000 },
       );
     },
     /**
@@ -1332,6 +1614,9 @@ export const api = {
       if (trimmed) {
         form.append("comments", trimmed);
       }
+      if (input.preScanHints && Object.keys(input.preScanHints).length > 0) {
+        form.append("pre_scan_hints", JSON.stringify(input.preScanHints));
+      }
       form.append("brief", JSON.stringify(input.previousBrief));
       form.append("feedback_message", input.feedbackMessage.trim());
       if (input.chatHistory && input.chatHistory.length > 0) {
@@ -1340,7 +1625,7 @@ export const api = {
       return requestForm<RefineBriefResponse>(
         "/api/supplier-intelligence/refine-brief",
         form,
-        { timeoutMs: 3 * 60 * 1000 },
+        { auth: true, timeoutMs: 3 * 60 * 1000 },
       );
     },
     /**
@@ -1354,6 +1639,7 @@ export const api = {
         {
           method: "POST",
           body: input,
+          auth: true,
         },
       );
     },
@@ -1370,6 +1656,7 @@ export const api = {
         {
           method: "POST",
           body: input,
+          auth: true,
         },
       );
     },
@@ -1425,16 +1712,20 @@ export const api = {
         },
       );
     },
-    listRuns(limit?: number) {
-      const qs = limit ? `?limit=${encodeURIComponent(String(limit))}` : "";
-      return request<{ runs: ContractRun[] }>(
-        `/api/supplier-intelligence/contracts${qs}`,
+    listRuns(params: ListContractRunsParams = {}) {
+      const qs = new URLSearchParams({ tz: browserTimeZone() });
+      if (params.range) qs.set("range", params.range);
+      if (params.limit) qs.set("limit", String(params.limit));
+      if (params.offset) qs.set("offset", String(params.offset));
+      return request<ListContractRunsResponse>(
+        `/api/supplier-intelligence/contracts?${qs.toString()}`,
         { method: "GET", auth: true },
       );
     },
     stats() {
-      return request<{ stats: ContractStats }>(
-        "/api/supplier-intelligence/contracts/stats",
+      const qs = new URLSearchParams({ tz: browserTimeZone() });
+      return request<{ stats: ContractStats; tz: string }>(
+        `/api/supplier-intelligence/contracts/stats?${qs.toString()}`,
         { method: "GET", auth: true },
       );
     },

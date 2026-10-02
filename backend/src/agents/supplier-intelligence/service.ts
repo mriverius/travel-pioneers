@@ -326,6 +326,13 @@ async function runStreamWithRetry(
 export interface ExtractionContext {
   comments?: string;
   isExistingSupplier?: boolean;
+  /**
+   * Hechos determinísticos leídos del documento por software (pre-scan, sin
+   * IA) y proveedor confirmado por el usuario. Se inyectan como ANCLAS: el
+   * modelo los usa para completar y validar, pero el documento manda si lo
+   * contradice claramente. JSON ya validado/acotado por el controller.
+   */
+  preScanHints?: Record<string, unknown>;
 }
 
 /**
@@ -376,6 +383,36 @@ function buildContextBlock(ctx: ExtractionContext | undefined): string | null {
         ? "Este proveedor YA EXISTE en el sistema (es un proveedor recurrente)."
         : "Este proveedor es NUEVO (primera vez que se registra).",
     );
+  }
+
+  if (ctx.preScanHints && Object.keys(ctx.preScanHints).length > 0) {
+    const lines = [
+      "═══════════════════════════════════════════════════════════════════",
+      "HECHOS VERIFICADOS DEL DOCUMENTO — PRIORIDAD MEDIA",
+      "═══════════════════════════════════════════════════════════════════",
+      "",
+      "Los siguientes datos fueron leídos LITERALMENTE del texto de los " +
+        "documentos por software determinístico (sin IA) antes de este " +
+        "análisis, y el proveedor fue confirmado por el usuario contra el " +
+        "maestro. Úsalos como anclas:",
+      "  - PRECEDENCIA: instrucciones del usuario (arriba) > texto literal del documento > estos hechos > tus inferencias. " +
+        "Si una instrucción del usuario contradice un hecho de esta lista, gana la instrucción y márcalo como user-override.",
+      "  - Si un campo está aquí y el documento no lo contradice, usa este valor tal cual.",
+      "  - Si el documento muestra claramente otra cosa, el documento manda; " +
+        "anota la discrepancia en `notes`.",
+      "  - `supplier` es el proveedor del maestro: sus `servicios` son los " +
+        "únicos códigos de servicio válidos para `codigo_servicio`.",
+      "  - `seasons` son los rangos de fecha exactos del documento: " +
+        "cada fila debe usar uno de ellos.",
+      "  - `priceMentions` / `estimatedProducts`: cuántos precios hay en el " +
+        "documento y cuántos productos los explican. Si tu inventario de " +
+        "filas no reproduce esa cantidad, revisa qué falta.",
+      "",
+      "-----BEGIN VERIFIED FACTS (JSON)-----",
+      JSON.stringify(ctx.preScanHints, null, 1),
+      "-----END VERIFIED FACTS-----",
+    ];
+    parts.push(lines.join("\n"));
   }
 
   if (parts.length === 0) return null;

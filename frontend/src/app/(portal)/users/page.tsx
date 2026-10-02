@@ -1,27 +1,33 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { createPortal } from "react-dom";
 import {
   AlertCircle,
+  AlertTriangle,
   ArrowDownAZ,
   ArrowUpAZ,
-  ChevronLeft,
-  ChevronRight,
+  Check,
+  Copy,
   Eye,
+  KeyRound,
   Pencil,
   RefreshCcw,
   Search,
   Shield,
   Trash2,
+  UserPlus,
   Users as UsersIcon,
   X,
 } from "lucide-react";
 import { Select } from "@/components/ui/select";
+import { Pagination } from "@/components/ui/pagination";
+import { ModalHeader, ModalShell } from "@/components/ui/modal";
 import AdminGuard from "@/components/admin-guard";
 import {
   ApiError,
   api,
+  type CreateUserPayload,
+  type CreateUserResponse,
   type ManagedUser,
   type Role,
   type ValidationDetail,
@@ -99,6 +105,8 @@ function UsersPageContent() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const [editing, setEditing] = useState<ManagedUser | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<ManagedUser | null>(null);
 
   // Initial load. State starts as { loading: true, loadError: null, users: [] },
   // so the effect doesn't need to touch state synchronously — it only writes
@@ -248,23 +256,24 @@ function UsersPageContent() {
     }
   };
 
-  const removeUser = async (u: ManagedUser) => {
+  const requestDelete = (u: ManagedUser) => {
     if (u.id === currentUserId) {
       setActionError("No puedes eliminar tu propia cuenta desde aquí.");
       return;
     }
-    if (!confirm(`¿Eliminar a ${u.name}? Esta acción no se puede deshacer.`)) {
-      return;
-    }
     setActionError(null);
-    const prev = users;
+    setPendingDelete(u);
+  };
+
+  // Invoked from the confirmation modal. Errors are thrown back so the modal
+  // can render them inline; the row is only removed once the server agrees.
+  const confirmDelete = async (u: ManagedUser) => {
+    await api.users.remove(u.id);
     setUsers((list) => list.filter((x) => x.id !== u.id));
-    try {
-      await api.users.remove(u.id);
-    } catch (err) {
-      setUsers(prev);
-      setActionError(describeError(err, "No se pudo eliminar el usuario."));
-    }
+  };
+
+  const handleCreated = ({ user }: CreateUserResponse) => {
+    setUsers((prev) => [user, ...prev]);
   };
 
   return (
@@ -280,6 +289,14 @@ function UsersPageContent() {
           </p>
         </div>
         <div className="flex items-center gap-2 self-stretch sm:self-auto">
+          <button
+            type="button"
+            onClick={() => setCreating(true)}
+            className="inline-flex flex-1 sm:flex-none items-center justify-center gap-2 h-10 px-4 rounded-md gradient-primary text-white text-[13px] font-medium hover:opacity-90 transition-opacity"
+          >
+            <UserPlus className="w-4 h-4" />
+            Nuevo usuario
+          </button>
           <button
             type="button"
             onClick={() => void reloadUsers()}
@@ -518,7 +535,7 @@ function UsersPageContent() {
                         </button>
                         <button
                           type="button"
-                          onClick={() => void removeUser(u)}
+                          onClick={() => requestDelete(u)}
                           disabled={isSelf}
                           className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-destructive/40 text-destructive text-[12px] hover:bg-destructive/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                           aria-label={`Eliminar a ${u.name}`}
@@ -553,6 +570,17 @@ function UsersPageContent() {
         )}
       </section>
 
+      {creating && (
+        <CreateUserDialog
+          onClose={() => setCreating(false)}
+          onCreate={async (payload) => {
+            const result = await api.users.create(payload);
+            handleCreated(result);
+            return result;
+          }}
+        />
+      )}
+
       {editing && (
         <UserDialog
           user={editing}
@@ -562,6 +590,14 @@ function UsersPageContent() {
             const { user } = await api.users.update(id, payload);
             setUsers((prev) => prev.map((x) => (x.id === id ? user : x)));
           }}
+        />
+      )}
+
+      {pendingDelete && (
+        <ConfirmDeleteDialog
+          user={pendingDelete}
+          onClose={() => setPendingDelete(null)}
+          onConfirm={() => confirmDelete(pendingDelete)}
         />
       )}
     </div>
@@ -623,130 +659,6 @@ function StatCard({
       <p className={`text-[22px] font-bold mt-1 ${tones[tone]}`}>{value}</p>
     </div>
   );
-}
-
-function Pagination({
-  rangeStart,
-  rangeEnd,
-  total,
-  page,
-  totalPages,
-  pageSize,
-  onPageChange,
-  onPageSizeChange,
-}: {
-  rangeStart: number;
-  rangeEnd: number;
-  total: number;
-  page: number;
-  totalPages: number;
-  pageSize: number;
-  onPageChange: (page: number) => void;
-  onPageSizeChange: (size: number) => void;
-}) {
-  // Build the page-number pill list. For long result sets, collapse the
-  // middle with "…" so we never render an unbounded strip of buttons.
-  const pages = buildPageList(page, totalPages);
-
-  return (
-    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between px-4 sm:px-6 py-3 border-t border-border bg-secondary/20">
-      <div className="flex items-center gap-3 text-[12.5px] text-muted-foreground">
-        <span>
-          Mostrando{" "}
-          <span className="font-semibold text-foreground">
-            {rangeStart}–{rangeEnd}
-          </span>{" "}
-          de <span className="font-semibold text-foreground">{total}</span>
-        </span>
-        <span className="hidden sm:inline-block h-4 w-px bg-border" />
-        <div className="hidden sm:flex items-center gap-2">
-          <span>Por página:</span>
-          <div className="w-20">
-            <Select
-              options={[
-                { value: "10", label: "10" },
-                { value: "25", label: "25" },
-                { value: "50", label: "50" },
-              ]}
-              value={String(pageSize)}
-              onChange={(e) => onPageSizeChange(Number(e.target.value))}
-            />
-          </div>
-        </div>
-      </div>
-
-      <div className="flex items-center gap-1.5">
-        <button
-          type="button"
-          onClick={() => onPageChange(Math.max(1, page - 1))}
-          disabled={page <= 1}
-          className="inline-flex items-center justify-center w-8 h-8 rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/60 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-          aria-label="Página anterior"
-        >
-          <ChevronLeft className="w-4 h-4" />
-        </button>
-
-        {pages.map((p, i) =>
-          p === "…" ? (
-            <span
-              key={`gap-${i}`}
-              className="px-1.5 text-[12.5px] text-muted-foreground select-none"
-            >
-              …
-            </span>
-          ) : (
-            <button
-              key={p}
-              type="button"
-              onClick={() => onPageChange(p)}
-              aria-current={p === page ? "page" : undefined}
-              className={`min-w-[32px] h-8 px-2 rounded-md text-[12.5px] font-medium border transition-colors ${
-                p === page
-                  ? "bg-primary/15 border-primary/40 text-primary"
-                  : "border-border text-muted-foreground hover:text-foreground hover:bg-secondary/60"
-              }`}
-            >
-              {p}
-            </button>
-          ),
-        )}
-
-        <button
-          type="button"
-          onClick={() => onPageChange(Math.min(totalPages, page + 1))}
-          disabled={page >= totalPages}
-          className="inline-flex items-center justify-center w-8 h-8 rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/60 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-          aria-label="Página siguiente"
-        >
-          <ChevronRight className="w-4 h-4" />
-        </button>
-      </div>
-    </div>
-  );
-}
-
-/**
- * Compact page number strip. Always shows first / last page, the current
- * page, and its immediate neighbours. Gaps are filled with "…" sentinels.
- *
- * Examples (current page in parens):
- *   totalPages=5, page=(3) → [1, 2, (3), 4, 5]
- *   totalPages=10, page=(1) → [(1), 2, 3, "…", 10]
- *   totalPages=10, page=(5) → [1, "…", 4, (5), 6, "…", 10]
- *   totalPages=10, page=(10) → [1, "…", 8, 9, (10)]
- */
-function buildPageList(page: number, totalPages: number): (number | "…")[] {
-  if (totalPages <= 7) {
-    return Array.from({ length: totalPages }, (_, i) => i + 1);
-  }
-  const out: (number | "…")[] = [1];
-  const start = Math.max(2, page - 1);
-  const end = Math.min(totalPages - 1, page + 1);
-  if (start > 2) out.push("…");
-  for (let i = start; i <= end; i++) out.push(i);
-  if (end < totalPages - 1) out.push("…");
-  out.push(totalPages);
-  return out;
 }
 
 function BannerError({
@@ -863,54 +775,10 @@ function UserDialog({
     }
   };
 
-  // Lock body scroll while the modal is open, and close on Escape. The
-  // modal itself is rendered through a portal attached to <body> so it
-  // escapes any transformed ancestor (e.g. the `animate-fade-up` wrapper in
-  // the portal layout) — without that, `fixed inset-0` is positioned
-  // relative to the transformed ancestor instead of the viewport, which
-  // causes the modal to appear off-center.
-  useEffect(() => {
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.body.style.overflow = prev;
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
-
-  // `createPortal` must not run during SSR — guard against a missing window.
-  if (typeof window === "undefined") return null;
-
-  const modal = (
-    <div
-      className="fixed inset-0 z-[100] overflow-y-auto overscroll-contain bg-black/60 p-4 sm:p-6"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-    >
-      {/* Flex wrapper handles centering; min-h-full + my-auto keeps the modal
-          centered when it fits, and lets it scroll when it doesn't. */}
-      <div className="flex min-h-full items-center justify-center">
-        <form
-          onSubmit={handleSubmit}
-          onClick={(e) => e.stopPropagation()}
-          className="w-full max-w-lg bg-card border border-border rounded-xl shadow-2xl animate-fade-in my-auto"
-        >
-          <header className="flex items-center justify-between px-4 sm:px-6 py-4 border-b border-border">
-            <h3 className="text-[15px] font-semibold">Editar usuario</h3>
-            <button
-              type="button"
-              onClick={onClose}
-              className="text-muted-foreground hover:text-foreground transition-colors"
-              aria-label="Cerrar"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </header>
+  return (
+    <ModalShell onClose={onClose} labelledBy="edit-user-title">
+      <form onSubmit={handleSubmit}>
+        <ModalHeader id="edit-user-title" title="Editar usuario" onClose={onClose} />
 
           <div className="p-4 sm:p-6 space-y-4">
             {error && (
@@ -1019,12 +887,421 @@ function UserDialog({
               Guardar cambios
             </button>
           </footer>
-        </form>
-      </div>
+      </form>
+    </ModalShell>
+  );
+}
+
+/* --------------------------- create user dialog -------------------------- */
+
+const EMPTY_DRAFT: DraftUser = {
+  name: "",
+  email: "",
+  role: "member",
+  views: ["supplier-intelligence"],
+};
+
+function CreateUserDialog({
+  onClose,
+  onCreate,
+}: {
+  onClose: () => void;
+  onCreate: (payload: CreateUserPayload) => Promise<CreateUserResponse>;
+}) {
+  const [draft, setDraft] = useState<DraftUser>(EMPTY_DRAFT);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<
+    Partial<Record<"name" | "email", string>>
+  >({});
+  // Once the backend answers we swap the form for the one-time credentials
+  // panel. The temp password only ever lives in this component's state.
+  const [created, setCreated] = useState<CreateUserResponse | null>(null);
+
+  const update = <K extends keyof DraftUser>(key: K, value: DraftUser[K]) =>
+    setDraft((prev) => ({ ...prev, [key]: value }));
+
+  const toggleView = (view: ViewId) =>
+    setDraft((prev) => ({
+      ...prev,
+      views: prev.views.includes(view)
+        ? prev.views.filter((v) => v !== view)
+        : [...prev.views, view],
+    }));
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setFieldErrors({});
+    if (!draft.name.trim() || !draft.email.trim()) {
+      setError("Nombre y correo son obligatorios.");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const result = await onCreate({
+        name: draft.name.trim(),
+        email: draft.email.trim().toLowerCase(),
+        role: draft.role,
+        views: draft.views,
+      });
+      setCreated(result);
+    } catch (err) {
+      if (err instanceof ApiError) {
+        applyFieldErrors(err.details, setFieldErrors);
+        setError(
+          err.details.length === 0
+            ? err.message
+            : "Revisa los errores señalados arriba.",
+        );
+      } else {
+        setError(describeError(err, "No se pudo crear el usuario."));
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (created) {
+    return (
+      <ModalShell onClose={onClose} labelledBy="create-user-title">
+        <ModalHeader
+          id="create-user-title"
+          title="Usuario creado"
+          onClose={onClose}
+        />
+        <div className="p-4 sm:p-6 space-y-4">
+          <div className="flex items-start gap-3 rounded-lg border border-primary/30 bg-primary/10 px-3 py-3">
+            <div className="w-9 h-9 rounded-full bg-primary/15 border border-primary/30 flex items-center justify-center text-primary text-[12px] font-semibold shrink-0">
+              {initials(created.user.name)}
+            </div>
+            <div className="min-w-0">
+              <p className="text-[13.5px] font-semibold text-foreground truncate">
+                {created.user.name}
+              </p>
+              <p className="text-[12px] text-muted-foreground truncate">
+                {created.user.email}
+              </p>
+            </div>
+          </div>
+
+          <div>
+            <p className="flex items-center gap-1.5 text-[12.5px] font-medium text-muted-foreground mb-1.5">
+              <KeyRound className="w-3.5 h-3.5" />
+              Contraseña temporal
+            </p>
+            <CopyField value={created.tempPassword} />
+            <p className="mt-2 text-[11.5px] text-muted-foreground">
+              Compártela con la persona por un canal seguro. Por seguridad{" "}
+              <span className="font-semibold text-foreground">
+                esta contraseña no se volverá a mostrar
+              </span>{" "}
+              una vez que cierres esta ventana.
+            </p>
+          </div>
+        </div>
+        <footer className="flex items-center justify-end px-4 sm:px-6 py-4 border-t border-border">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3.5 py-2 rounded-md gradient-primary text-white text-[13px] font-medium hover:opacity-90 transition-opacity"
+          >
+            Listo
+          </button>
+        </footer>
+      </ModalShell>
+    );
+  }
+
+  return (
+    <ModalShell onClose={onClose} labelledBy="create-user-title">
+      <form onSubmit={handleSubmit}>
+        <ModalHeader
+          id="create-user-title"
+          title="Nuevo usuario"
+          onClose={onClose}
+        />
+
+        <div className="p-4 sm:p-6 space-y-4">
+          {error && (
+            <div
+              role="alert"
+              className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2.5 text-[12.5px] text-destructive"
+            >
+              <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
+
+          <Field label="Nombre completo" error={fieldErrors.name}>
+            <input
+              type="text"
+              value={draft.name}
+              onChange={(e) => update("name", e.target.value)}
+              required
+              autoFocus
+              minLength={2}
+              maxLength={120}
+              placeholder="Ej. María Pérez"
+              className="w-full h-10 px-3 rounded-md bg-input/70 border border-border text-sm outline-none focus:border-primary/60 focus:ring-2 focus:ring-ring/30 transition-colors"
+            />
+          </Field>
+          <Field label="Correo electrónico" error={fieldErrors.email}>
+            <input
+              type="email"
+              value={draft.email}
+              onChange={(e) => update("email", e.target.value)}
+              required
+              autoComplete="off"
+              placeholder="nombre@empresa.com"
+              className="w-full h-10 px-3 rounded-md bg-input/70 border border-border text-sm outline-none focus:border-primary/60 focus:ring-2 focus:ring-ring/30 transition-colors"
+            />
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              Será su usuario para iniciar sesión y no podrá modificarse
+              después.
+            </p>
+          </Field>
+
+          <Field label="Rol">
+            <Select
+              options={ROLE_OPTIONS}
+              value={draft.role}
+              onChange={(e) => update("role", e.target.value as Role)}
+            />
+          </Field>
+
+          <div>
+            <p className="text-[12.5px] font-medium text-muted-foreground mb-2">
+              Vistas con acceso
+            </p>
+            <div className="space-y-2">
+              {AVAILABLE_VIEWS.map((v) => {
+                const checked = draft.views.includes(v.id);
+                return (
+                  <label
+                    key={v.id}
+                    className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+                      checked
+                        ? "bg-primary/10 border-primary/40"
+                        : "bg-secondary/40 border-border hover:bg-secondary/60"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleView(v.id)}
+                      className="mt-0.5 w-4 h-4 rounded border-border bg-secondary accent-primary"
+                    />
+                    <div className="min-w-0">
+                      <p className="text-[13px] font-semibold text-foreground">
+                        {v.label}
+                      </p>
+                      <p className="text-[12px] text-muted-foreground mt-0.5">
+                        {v.description}
+                      </p>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="flex items-start gap-2 rounded-lg border border-border bg-secondary/40 px-3 py-2.5 text-[12px] text-muted-foreground">
+            <KeyRound className="w-4 h-4 mt-0.5 shrink-0 text-primary" />
+            <span>
+              Se generará una contraseña temporal que verás una sola vez al
+              crear el usuario.
+            </span>
+          </div>
+        </div>
+
+        <footer className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center sm:justify-end gap-2 px-4 sm:px-6 py-4 border-t border-border">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={submitting}
+            className="px-3.5 py-2 rounded-md border border-border text-[13px] hover:bg-secondary/60 transition-colors disabled:opacity-50"
+          >
+            Cancelar
+          </button>
+          <button
+            type="submit"
+            disabled={submitting}
+            className="inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-md gradient-primary text-white text-[13px] font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
+          >
+            {submitting ? (
+              <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            ) : (
+              <UserPlus className="w-4 h-4" />
+            )}
+            Crear usuario
+          </button>
+        </footer>
+      </form>
+    </ModalShell>
+  );
+}
+
+/** Read-only monospace value with a copy-to-clipboard button. */
+function CopyField({ value }: { value: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1800);
+    } catch {
+      // Clipboard can be unavailable (insecure context / permissions). The
+      // value is still selectable by hand, so we just skip the feedback.
+    }
+  };
+
+  return (
+    <div className="flex items-stretch gap-2">
+      <code
+        className="flex-1 min-w-0 h-10 px-3 rounded-md bg-input/70 border border-border font-mono text-[14px] tracking-wider text-foreground flex items-center select-all overflow-x-auto"
+        aria-label="Contraseña temporal"
+      >
+        {value}
+      </code>
+      <button
+        type="button"
+        onClick={() => void copy()}
+        className={`inline-flex items-center gap-1.5 h-10 px-3 rounded-md border text-[12.5px] transition-colors ${
+          copied
+            ? "border-primary/40 bg-primary/10 text-primary"
+            : "border-border text-muted-foreground hover:text-foreground hover:bg-secondary/60"
+        }`}
+        aria-live="polite"
+      >
+        {copied ? (
+          <Check className="w-3.5 h-3.5" />
+        ) : (
+          <Copy className="w-3.5 h-3.5" />
+        )}
+        {copied ? "Copiada" : "Copiar"}
+      </button>
     </div>
   );
+}
 
-  return createPortal(modal, document.body);
+/* -------------------------- delete confirm dialog ------------------------- */
+
+function ConfirmDeleteDialog({
+  user,
+  onClose,
+  onConfirm,
+}: {
+  user: ManagedUser;
+  onClose: () => void;
+  onConfirm: () => Promise<void>;
+}) {
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // While the request is in flight, ignore backdrop / Escape so we don't
+  // unmount mid-call and lose the error feedback.
+  const close = useCallback(() => {
+    if (!submitting) onClose();
+  }, [submitting, onClose]);
+
+  const handleConfirm = async () => {
+    setError(null);
+    setSubmitting(true);
+    try {
+      await onConfirm();
+      onClose();
+    } catch (err) {
+      setError(describeError(err, "No se pudo eliminar el usuario."));
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <ModalShell onClose={close} labelledBy="delete-user-title" maxWidth="max-w-md">
+      <ModalHeader
+        id="delete-user-title"
+        title="Eliminar usuario"
+        onClose={close}
+        tone="danger"
+      />
+
+      <div className="p-4 sm:p-6 space-y-4">
+        <div className="flex items-start gap-3">
+          <div className="w-10 h-10 rounded-full bg-destructive/10 border border-destructive/30 flex items-center justify-center text-destructive shrink-0">
+            <AlertTriangle className="w-5 h-5" />
+          </div>
+          <div className="min-w-0 text-[13.5px] text-foreground">
+            <p>
+              ¿Seguro que quieres eliminar a{" "}
+              <span className="font-semibold">{user.name}</span>?
+            </p>
+            <p className="mt-1.5 text-[12.5px] text-muted-foreground">
+              Perderá el acceso al portal de inmediato. Los contratos que haya
+              procesado se conservan en el historial. Esta acción no se puede
+              deshacer.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3 rounded-lg border border-border bg-secondary/40 px-3 py-2.5">
+          <div className="w-9 h-9 rounded-full bg-primary/15 border border-primary/30 flex items-center justify-center text-primary text-[12px] font-semibold shrink-0">
+            {initials(user.name)}
+          </div>
+          <div className="min-w-0">
+            <p className="text-[13px] font-semibold text-foreground truncate">
+              {user.name}
+            </p>
+            <p className="text-[12px] text-muted-foreground truncate">
+              {user.email}
+            </p>
+          </div>
+          <span
+            className={`ml-auto inline-flex items-center gap-1.5 shrink-0 px-2 py-0.5 rounded-full text-[11px] font-medium border ${ROLE_TONE[user.role]}`}
+          >
+            <Shield className="w-3 h-3" />
+            {ROLE_LABEL[user.role]}
+          </span>
+        </div>
+
+        {error && (
+          <div
+            role="alert"
+            className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2.5 text-[12.5px] text-destructive"
+          >
+            <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+            <span>{error}</span>
+          </div>
+        )}
+      </div>
+
+      <footer className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center sm:justify-end gap-2 px-4 sm:px-6 py-4 border-t border-border">
+        <button
+          type="button"
+          onClick={close}
+          disabled={submitting}
+          className="px-3.5 py-2 rounded-md border border-border text-[13px] hover:bg-secondary/60 transition-colors disabled:opacity-50"
+        >
+          Cancelar
+        </button>
+        <button
+          type="button"
+          onClick={() => void handleConfirm()}
+          disabled={submitting}
+          autoFocus
+          className="inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-md bg-destructive text-white text-[13px] font-medium hover:bg-destructive/90 transition-colors disabled:opacity-50"
+        >
+          {submitting ? (
+            <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+          ) : (
+            <Trash2 className="w-4 h-4" />
+          )}
+          Eliminar usuario
+        </button>
+      </footer>
+    </ModalShell>
+  );
 }
 
 function applyFieldErrors(

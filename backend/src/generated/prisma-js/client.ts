@@ -52,7 +52,8 @@ export type User = Prisma.UserModel
  *  * Persisted record of a Supplier Intelligence agent run that successfully
  *  * generated an xlsx in step 3. One row per generated contract — global
  *  * scope (every authenticated user can read every run; `processedById`
- *  * is kept for audit only, not for filtering).
+ *  * is kept for audit only, not for filtering, and may be null once the
+ *  * user that ran it has been deleted).
  *  *
  *  * The 52 product fields are stored as JSONB rather than as columns to keep
  *  * the schema agile while the agent is still calibrating: shared/manual/
@@ -62,3 +63,19 @@ export type User = Prisma.UserModel
  *  * isn't required for the current product surface (history list + counts).
  */
 export type ContractRun = Prisma.ContractRunModel
+/**
+ * Model Supplier
+ * *
+ *  * Maestro de proveedores ("lista-proveedores"). Antes era un .ts generado
+ *  * en build desde un xlsx; ahora vive en la DB para que los admins lo
+ *  * administren desde el portal. Un proveedor tiene N servicios.
+ *  *
+ *  * `codigo` es la llave de negocio (columna C del xlsx de salida) y se
+ *  * mantiene única; `id` existe para que renombrar un código no rompa URLs.
+ */
+export type Supplier = Prisma.SupplierModel
+/**
+ * Model SupplierService
+ * 
+ */
+export type SupplierService = Prisma.SupplierServiceModel

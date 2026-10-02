@@ -1,17 +1,4 @@
-import { FileText, CircleHelp, Download } from "lucide-react";
-
-type Guide = {
-  title: string;
-  description: string;
-};
-
-const guides: Guide[] = [
-  {
-    title: "Reportar un bug",
-    description:
-      "Formulario para reportar problemas encontrados en el sistema",
-  },
-];
+import { CircleHelp } from "lucide-react";
 
 type Faq = {
   question: string;
@@ -47,43 +34,6 @@ export default function ResourcesPage() {
           Documentación y guías del AI Supplier Intelligence Agent.
         </p>
       </header>
-
-      {/* Documentos */}
-      <section className="bg-card/80 border border-border rounded-xl">
-        <header className="flex items-center gap-2.5 px-6 pt-5 pb-4 border-b border-border">
-          <FileText className="w-5 h-5 text-primary" />
-          <h2 className="text-[15px] font-semibold">Documentos y guías</h2>
-        </header>
-        <div className="p-4 space-y-3">
-          {guides.map((g) => (
-            <article
-              key={g.title}
-              className="flex items-center gap-4 p-4 bg-secondary/40 border border-border/70 rounded-lg hover:bg-secondary/60 transition-colors"
-            >
-              <div className="w-10 h-10 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0">
-                <FileText className="w-5 h-5 text-primary" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-[14px] font-semibold text-foreground">
-                  {g.title}
-                </p>
-                <p className="text-[12.5px] text-muted-foreground mt-0.5">
-                  {g.description}
-                </p>
-              </div>
-              <a
-                href="https://forms.gle/GANUbdcuAS3P7szS8"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center px-3 py-1.5 rounded-md border border-border text-[12.5px] text-primary hover:bg-primary/10 transition-colors"
-              >
-                <Download className="w-4 h-4 mr-1.5" />
-                Reportar
-              </a>
-            </article>
-          ))}
-        </div>
-      </section>
 
       {/* FAQ */}
       <section className="bg-card/80 border border-border rounded-xl">

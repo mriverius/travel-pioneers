@@ -4,9 +4,8 @@ import type { Request, Response } from "express";
 import prisma from "../config/prisma.js";
 import logger from "../config/logger.js";
 import ApiError from "../utils/ApiError.js";
-import { isPrismaKnownError, type Role, type UserRow } from "../types/domain.js";
+import type { Role, UserRow } from "../types/domain.js";
 
-const SALT_ROUNDS = Number(process.env.BCRYPT_SALT_ROUNDS ?? 12);
 const JWT_EXPIRES_IN = (process.env.JWT_EXPIRES_IN ?? "7d") as SignOptions["expiresIn"];
 
 interface PublicUser {
@@ -17,12 +16,6 @@ interface PublicUser {
   views: string[];
   createdAt: string;
   updatedAt: string;
-}
-
-interface RegisterBody {
-  name: string;
-  email: string;
-  password: string;
 }
 
 interface LoginBody {
@@ -58,88 +51,6 @@ function toPublicUser(row: UserRow): PublicUser {
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
-}
-
-/**
- * GET /auth/check-email?email=<address>
- * Lightweight availability check used by the registration form so users get
- * immediate feedback instead of waiting for submit-time 409. Returns the
- * normalized email alongside an `available` flag; never reveals anything
- * beyond that.
- *
- * NOTE: This endpoint leaks whether a given address is registered, which is
- * the same signal the `register` endpoint already leaks via 409. It is
- * rate-limited at the router level for the same reason.
- */
-export async function checkEmail(
-  req: Request<unknown, unknown, unknown, { email?: string }>,
-  res: Response,
-): Promise<void> {
-  const raw = (req.query.email ?? "").toString();
-  const normalizedEmail = raw.trim().toLowerCase();
-
-  if (!normalizedEmail) {
-    throw ApiError.badRequest("Email is required");
-  }
-
-  const existing = await prisma.user.findUnique({
-    where: { email: normalizedEmail },
-    select: { id: true },
-  });
-
-  res.json({ email: normalizedEmail, available: existing === null });
-}
-
-/**
- * POST /auth/register
- * Creates a new user with a bcrypt-hashed password.
- */
-export async function register(
-  req: Request<unknown, unknown, RegisterBody>,
-  res: Response,
-): Promise<void> {
-  const { name, email, password } = req.body;
-  const normalizedEmail = email.trim().toLowerCase();
-
-  logger.info("Registration attempt", {
-    requestId: req.id,
-    email: normalizedEmail,
-  });
-
-  const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
-
-  try {
-    const created = (await prisma.user.create({
-      data: {
-        name: name.trim(),
-        email: normalizedEmail,
-        passwordHash,
-        role: "member",
-        views: ["supplier-intelligence"],
-      },
-    })) as UserRow;
-
-    const user = toPublicUser(created);
-    const token = signToken(user);
-
-    logger.info("Registration successful", {
-      requestId: req.id,
-      userId: user.id,
-      email: user.email,
-    });
-
-    res.status(201).json({ user, token });
-  } catch (err: unknown) {
-    // P2002 = Prisma unique-constraint violation.
-    if (isPrismaKnownError(err) && err.code === "P2002") {
-      throw ApiError.conflict("An account with that email already exists");
-    }
-    logger.error("Prisma insert failed during register", {
-      requestId: req.id,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    throw ApiError.internal("Unable to create account");
-  }
 }
 
 /**

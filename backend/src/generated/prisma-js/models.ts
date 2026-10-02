@@ -10,4 +10,6 @@
  */
 export type * from './models/User.js'
 export type * from './models/ContractRun.js'
+export type * from './models/Supplier.js'
+export type * from './models/SupplierService.js'
 export type * from './commonInputTypes.js'

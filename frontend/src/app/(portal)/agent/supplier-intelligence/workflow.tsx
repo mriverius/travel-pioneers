@@ -16,6 +16,9 @@ import {
   RotateCcw,
   Sparkles,
   Trash2,
+  ChevronDown,
+  Search,
+  ScanSearch,
   UserCheck,
   UserPlus,
   Download,
@@ -23,7 +26,6 @@ import {
   Undo2,
   Wand2,
   X,
-  type LucideIcon,
 } from "lucide-react";
 import { combinePipelineUsage } from "@/lib/anthropicUsage";
 import {
@@ -42,6 +44,8 @@ import {
   describeRequestFailure,
   type AnalyzeBriefMeta,
   type BriefChatMessage,
+  type CatalogSupplier,
+  type PreScanResult,
   type ContractConfigVariables,
   type ExtractContractResponse,
   type ExtractedContract,
@@ -58,14 +62,32 @@ import {
 } from "@/lib/api";
 import { ConfigVariablesStep } from "./configStep";
 import {
-  findSupplierByNameWithAI,
   findServiceForSupplierWithAI,
+  listSuppliers,
+  normalizeKey,
+  withServices,
   type SupplierMatch,
 } from "@/lib/supplierLookup";
 import {
   CATEGORIAS_BY_TIPO_SERVICIO,
   TIPOS_SERVICIO,
 } from "@/lib/serviceTypesCatalog";
+
+/**
+ * UUID v4 for `ExtractionMeta.extraction_id`. `crypto.randomUUID` needs a
+ * secure context; on plain-http LAN setups we fall back to getRandomValues.
+ */
+function newExtractionId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
 
 /**
  * Three-step supplier-contract workflow wired to the backend agent at
@@ -102,6 +124,261 @@ export type CatalogPrefill = {
   codigo_servicio: string | null;
 };
 
+/**
+ * Respuesta al "¿Es un proveedor existente?" del Paso 1. `null` = todavía no
+ * respondió (campo requerido). Si es existente, el proveedor elegido en el
+ * dropdown es el que alimenta el prefill de catálogo — ya no se adivina por
+ * nombre.
+ */
+export type SupplierChoice =
+  | { existing: false }
+  | { existing: true; supplier: CatalogSupplier };
+
+export type PreScanState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "done"; result: PreScanResult }
+  | { status: "error"; message: string };
+
+/** Candidato del pre-scan → forma de catálogo (sin servicios; se piden al analizar). */
+function candidateToSupplier(c: PreScanResult["supplier"]["candidates"][number]): CatalogSupplier {
+  return {
+    id: c.id,
+    codigo: c.codigo,
+    nombre: c.nombre,
+    actividad: c.actividad,
+    zona: c.zona,
+    servicios: [],
+    serviceCount: c.serviceCount,
+    createdAt: "",
+    updatedAt: "",
+  };
+}
+
+/**
+ * Fallback + contraste del brief IA con lo leído sin IA en el pre-scan.
+ *
+ *  - Rellena huecos (el brief dejó `null`) con datos determinísticos del
+ *    documento: correo, teléfono, país, cédula, vigencia, moneda, IVA,
+ *    comisión. Nunca pisa un valor que la IA sí dio.
+ *  - Devuelve avisos cuando ambos tienen valor y discrepan: es justo el
+ *    tipo de error que envenena todas las filas (IVA incluido o no, moneda).
+ */
+/**
+ * Temas sobre los que el usuario escribió instrucciones en "Comentarios".
+ * Precedencia del sistema: instrucción humana > texto literal del documento
+ * > inferencias. Cuando hay un comentario sobre un tema, una discrepancia
+ * IA-vs-documento en ese tema NO es un error: es el comentario mandando, y
+ * así se le dice al revisor.
+ */
+function commentTopics(comments: string): Set<"tax" | "commission" | "currency" | "validity" | "seasons"> {
+  const c = comments.toLowerCase();
+  const out = new Set<"tax" | "commission" | "currency" | "validity" | "seasons">();
+  if (/\b(iva|impuesto|tax|vat)\b/.test(c)) out.add("tax");
+  if (/\b(comisi[oó]n|commission|neto|net rate|rack)\b/.test(c)) out.add("commission");
+  if (/\b(moneda|currency|d[oó]lares?|colones|usd|crc|\$|₡)/.test(c)) out.add("currency");
+  if (/\b(vigencia|validez|v[aá]lido|valid|vence|expira|desde|hasta|from|until)\b/.test(c)) out.add("validity");
+  if (/\b(temporada|season)\b/.test(c)) out.add("seasons");
+  return out;
+}
+
+function reconcileBriefWithPreScan(
+  brief: ContractConfigVariables,
+  scan: PreScanResult,
+  comments = "",
+): { brief: ContractConfigVariables; advisories: string[] } {
+  const inf = scan.inferences;
+  const facts = scan.facts;
+  const advisories: string[] = [];
+  const overridden = commentTopics(comments);
+  const overrideNote = (topic: Parameters<typeof overridden.has>[0], text: string) =>
+    overridden.has(topic)
+      ? `${text} Tienes un comentario sobre esto: el comentario tiene prioridad sobre el documento.`
+      : text;
+  const sf = { ...brief.shared_fields };
+  const out: ContractConfigVariables = { ...brief, shared_fields: sf };
+
+  const fill = <K extends keyof typeof sf>(key: K, value: string | null | undefined) => {
+    if ((sf[key] === null || sf[key] === "") && value) sf[key] = value as (typeof sf)[K];
+  };
+  fill("reservations_email", facts.emails.find((e) => /reserv|book|ventas|sales/i.test(e)) ?? facts.emails[0]);
+  fill("telefono", facts.phones[0]);
+  fill("cedula", facts.cedulas[0]);
+  fill("pais", inf.country?.value);
+  fill("proveedor", inf.legalName);
+  fill("direccion", inf.address);
+  if (inf.validity) {
+    fill("contract_starts", inf.validity.start);
+    fill("contract_ends", inf.validity.end);
+  }
+
+  if (out.currency === null && facts.currencies.length === 1) out.currency = facts.currencies[0]!;
+  if (inf.taxes) {
+    if (out.prices_include_tax === null && inf.taxes.included !== null) out.prices_include_tax = inf.taxes.included;
+    if (out.tax_rate_pct === null && inf.taxes.percent !== null) out.tax_rate_pct = inf.taxes.percent;
+  }
+  if (inf.commission && out.commission_default_pct === null) {
+    out.commission_default_pct = inf.commission.net ? 0 : inf.commission.percent;
+  }
+
+  // Contrastes (sólo cuando ambos lados tienen valor).
+  if (inf.taxes && inf.taxes.included !== null && brief.prices_include_tax !== null && inf.taxes.included !== brief.prices_include_tax) {
+    advisories.push(
+      overrideNote(
+        "tax",
+        `IVA: la IA marcó "${brief.prices_include_tax ? "precios con impuesto incluido" : "precios sin impuesto"}" pero el documento dice «${inf.taxes.snippet.slice(0, 90)}…».${overridden.has("tax") ? "" : " Revisa antes de confirmar."}`,
+      ),
+    );
+  }
+  if (inf.taxes?.percent !== null && inf.taxes?.percent !== undefined && brief.tax_rate_pct !== null && inf.taxes.percent !== brief.tax_rate_pct) {
+    advisories.push(overrideNote("tax", `IVA: la IA puso ${brief.tax_rate_pct}% y el documento menciona ${inf.taxes.percent}%.`));
+  }
+  if (inf.commission && brief.commission_default_pct !== null) {
+    if (inf.commission.net && brief.commission_default_pct > 0) {
+      advisories.push(overrideNote("commission", `Comisión: la IA puso ${brief.commission_default_pct}% pero el documento dice tarifas netas / no comisionables.`));
+    } else if (inf.commission.percent !== null && inf.commission.percent !== brief.commission_default_pct) {
+      advisories.push(overrideNote("commission", `Comisión: la IA puso ${brief.commission_default_pct}% y el documento menciona ${inf.commission.percent}%.`));
+    }
+  }
+  if (brief.currency && facts.currencies.length > 0 && !facts.currencies.some((c) => brief.currency!.toUpperCase().includes(c))) {
+    advisories.push(overrideNote("currency", `Moneda: la IA puso ${brief.currency} pero el documento menciona ${facts.currencies.join(", ")}.`));
+  }
+  if (inf.validity?.source === "explicit" && brief.shared_fields.contract_starts && brief.shared_fields.contract_starts !== inf.validity.start) {
+    advisories.push(overrideNote("validity", `Vigencia: la IA puso inicio ${brief.shared_fields.contract_starts}; el documento indica ${inf.validity.start} → ${inf.validity.end}.`));
+  }
+  if (inf.seasons.length > 0 && brief.seasons_detail.length > 0 && inf.seasons.length !== brief.seasons_detail.length) {
+    advisories.push(overrideNote("seasons", `Temporadas: la IA identificó ${brief.seasons_detail.length} y el documento parece tener ${inf.seasons.length} (${inf.seasons.map((x) => x.name ?? "sin nombre").join(", ")}).`));
+  }
+
+  return { brief: out, advisories };
+}
+
+/**
+ * JSON compacto de hechos verificados para el prompt (ver backend
+ * `buildContextBlock`). Sólo lo que ayuda al modelo a anclar o validar; nada
+ * de snippets largos ni listas gigantes (tope ~24 KB en el backend).
+ */
+function buildPreScanHints(
+  scan: PreScanResult | null,
+  supplier: CatalogSupplier | null,
+): Record<string, unknown> | null {
+  if (!scan && !supplier) return null;
+  const out: Record<string, unknown> = {};
+  if (supplier) {
+    out.supplier = {
+      codigo: supplier.codigo,
+      nombre: supplier.nombre,
+      actividad: supplier.actividad,
+      zona: supplier.zona,
+      servicios: supplier.servicios.slice(0, 60).map((s) => ({
+        codigo: s.codigo,
+        descripcion: s.descripcion,
+        actividad: s.actividad ?? null,
+        zona: s.zona ?? null,
+      })),
+    };
+  }
+  if (scan && scan.documents.some((d) => d.textAvailable)) {
+    const f = scan.facts;
+    const i = scan.inferences;
+    out.documents = scan.documents.map((d) => ({ filename: d.filename, role: d.role, contributes: d.contributes }));
+    out.identity = {
+      legalName: i.legalName,
+      cedulas: f.cedulas,
+      address: i.address,
+      country: i.country?.value ?? null,
+      emails: f.emails,
+      phones: f.phones,
+      website: i.website,
+    };
+    out.validity = i.validity;
+    out.currencies = f.currencies;
+    out.taxes = i.taxes ? { included: i.taxes.included, percent: i.taxes.percent } : null;
+    out.commission = i.commission ? { net: i.commission.net, percent: i.commission.percent } : null;
+    out.rateBasis = i.rateBasis;
+    out.occupancies = i.occupancies;
+    out.seasons = i.seasons;
+    out.minNights = i.minNights;
+    out.checkIn = i.checkIn;
+    out.checkOut = i.checkOut;
+    out.meals = i.meals;
+    out.paymentTerms = i.paymentTerms.map((t) => ({ daysBefore: t.daysBefore, percent: t.percent, season: t.season }));
+    out.cancellationTerms = i.cancellationTerms.map((t) => ({ daysBefore: t.daysBefore, percent: t.percent, season: t.season }));
+    out.childTerms = i.childTerms;
+    out.bankAccounts = i.bankAccounts;
+    out.priceMentions = i.priceMentions;
+    out.distinctPrices = i.prices.length;
+    out.estimatedProducts = i.estimatedProducts;
+    out.productHints = i.productHints;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/** Normaliza un precio de la tabla ("$1.006,40", "671,20", "295") a número. */
+function parseRowAmount(raw: string | null | undefined): number | null {
+  if (!raw) return null;
+  let t = raw.replace(/[^\d.,]/g, "");
+  if (!t) return null;
+  const lc = t.lastIndexOf(",");
+  const ld = t.lastIndexOf(".");
+  if (lc > -1 && ld > -1) t = lc > ld ? t.replace(/\./g, "").replace(",", ".") : t.replace(/,/g, "");
+  else if (lc > -1) t = t.length - lc - 1 === 2 ? t.replace(",", ".") : t.replace(/,/g, "");
+  else if (ld > -1 && t.length - ld - 1 === 3 && /^\d{1,3}(\.\d{3})+$/.test(t)) t = t.replace(/\./g, "");
+  const n = Number(t);
+  return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null;
+}
+
+/**
+ * Paso 3: contrasta la tabla extraída con los montos y temporadas que el
+ * pre-scan leyó del documento. Barato y muy indicativo: si el documento
+ * tiene 72 precios y la tabla sólo contiene 40 de ellos, faltan filas.
+ */
+function buildExtractionChecks(
+  rows: ExtractedContractRow[],
+  scan: PreScanResult | null,
+): string[] {
+  if (!scan || !scan.documents.some((d) => d.textAvailable)) return [];
+  const out: string[] = [];
+  const inf = scan.inferences;
+
+  if (inf.prices.length >= 4) {
+    const inTable = new Set<number>();
+    for (const r of rows) {
+      for (const v of [r.precios_neto_iva, r.precio_rack_iva, r.precios_neto_iva_fds, r.precio_rack_iva_fds]) {
+        const n = parseRowAmount(v);
+        if (n !== null) inTable.add(n);
+      }
+    }
+    const docPrices = inf.prices;
+    const matched = docPrices.filter((p) => inTable.has(p));
+    const missing = docPrices.filter((p) => !inTable.has(p));
+    const ratio = matched.length / docPrices.length;
+    if (ratio < 0.9) {
+      out.push(
+        `El documento contiene ${docPrices.length} precios distintos y la tabla incluye ${matched.length} (${Math.round(ratio * 100)}%). Posibles faltantes: ${missing.slice(0, 10).map((m) => m.toLocaleString("es-CR")).join(", ")}${missing.length > 10 ? "…" : ""}.`,
+      );
+    }
+  }
+
+  if (inf.seasons.length > 0) {
+    const docDays = new Set<string>();
+    for (const se of inf.seasons) for (const r of se.ranges) { docDays.add(r.start); docDays.add(r.end); }
+    const bad = new Set<string>();
+    for (const r of rows) {
+      for (const d of [r.season_starts, r.season_ends]) {
+        const m = /^(\d{4})-(\d{2}-\d{2})$/.exec(d ?? "");
+        if (m && !docDays.has(m[2]!)) bad.add(d as string);
+      }
+    }
+    if (bad.size > 0) {
+      out.push(
+        `Fechas de temporada en la tabla que no aparecen en el documento: ${[...bad].slice(0, 6).join(", ")}${bad.size > 6 ? "…" : ""}. El documento define: ${inf.seasons.map((se) => `${se.name ?? "temporada"} ${se.ranges.map((x) => `${x.start}→${x.end}`).join("/")}`).join("; ")}.`,
+      );
+    }
+  }
+  return out;
+}
+
 export type CatalogMatchInfo =
   | {
       status: "matched";
@@ -122,7 +399,6 @@ const MAX_FILE_BYTES = 20 * 1024 * 1024;
  * manually — if the backend raises this, bump it here too.
  */
 const MAX_FILES_PER_REQUEST = 10;
-const MAX_SECONDARY_FILES = MAX_FILES_PER_REQUEST - 1;
 
 const STEP2_ANALYSIS_FOOTER =
   "Corre en dos fases: un pre-análisis rápido (Opus) que detecta las reglas " +
@@ -261,8 +537,10 @@ export interface ApprovedPayload {
 export function SupplierWorkflow() {
   const [step, setStep] = useState<Step>(1);
   /**
-   * Documento principal (índice 0) + secundarios opcionales. El orden se
-   * preserva end-to-end para el backend.
+   * Documentos del contrato, todos pares. Internamente el primero vive en
+   * `primaryFile` y el resto en `secondaryFiles` porque el flujo (brief por
+   * documento, nombre del run en el historial) está escrito sobre esa forma;
+   * la UI muestra una sola lista y el orden sólo da nombre al run.
    */
   const [primaryFile, setPrimaryFile] = useState<File | null>(null);
   const [secondaryFiles, setSecondaryFiles] = useState<File[]>([]);
@@ -275,8 +553,7 @@ export function SupplierWorkflow() {
   const [result, setResult] = useState<ExtractContractResponse | null>(null);
   const [serverError, setServerError] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
-  const primaryFileInputRef = useRef<HTMLInputElement>(null);
-  const secondaryFileInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   /**
    * Variables de Configuración detectadas en la Fase 1 (step 1 → 2) — UNA por
@@ -315,9 +592,69 @@ export function SupplierWorkflow() {
   );
 
   const [comments, setComments] = useState("");
-  const [isExistingSupplier, setIsExistingSupplier] = useState<boolean | null>(
+  const [supplierChoice, setSupplierChoice] = useState<SupplierChoice | null>(
     null,
   );
+  const isExistingSupplier =
+    supplierChoice === null ? null : supplierChoice.existing;
+
+  /**
+   * Pre-scan determinístico (sin IA) del contrato primario. Arranca en cuanto
+   * hay archivo, se cancela si cambia, y con confianza "alta" pre-selecciona
+   * el proveedor en el dropdown (marcado como detectado) si el usuario aún no
+   * eligió nada. Con "media" sólo sugiere.
+   */
+  const [preScan, setPreScan] = useState<PreScanState>({ status: "idle" });
+  const [autoDetectedId, setAutoDetectedId] = useState<string | null>(null);
+  /** Avisos del contraste brief IA vs pre-scan (Paso 2). */
+  const [briefAdvisories, setBriefAdvisories] = useState<string[]>([]);
+  /** Hechos verificados que viajan a brief / refine / extract. */
+  const [preScanHints, setPreScanHints] = useState<Record<string, unknown> | null>(null);
+
+  useEffect(() => {
+    if (!primaryFile) return;
+    const controller = new AbortController();
+    const files = [primaryFile, ...secondaryFiles];
+    // Debounce corto: al soltar 3 archivos seguidos queremos UN request con
+    // los 3, no tres requests. También evita un setState síncrono en el effect.
+    const t = window.setTimeout(() => {
+      setPreScan({ status: "loading" });
+      api.supplierIntelligence
+        .preScan(files, { signal: controller.signal })
+        .then(({ scan }) => {
+          if (controller.signal.aborted) return;
+          setPreScan({ status: "done", result: scan });
+          const top = scan.supplier.candidates[0];
+          if (top && scan.supplier.confidence === "alta") {
+            // Sólo rellenamos si el usuario no eligió nada todavía; el
+            // updater funcional evita leer estado viejo desde el closure.
+            setSupplierChoice((prev) =>
+              prev === null ? { existing: true, supplier: candidateToSupplier(top) } : prev,
+            );
+            setAutoDetectedId(top.id);
+          }
+        })
+        .catch((err: unknown) => {
+          if (controller.signal.aborted) return;
+          setPreScan({
+            status: "error",
+            message: describeRequestFailure(
+              err,
+              "No pudimos analizar el documento. Puedes continuar normalmente.",
+            ),
+          });
+        });
+    }, 350);
+    return () => {
+      window.clearTimeout(t);
+      controller.abort();
+    };
+  }, [primaryFile, secondaryFiles]);
+
+  const chooseSupplier = (next: SupplierChoice) => {
+    setSupplierChoice(next);
+    setAutoDetectedId(null);
+  };
   const [catalogPrefill, setCatalogPrefill] = useState<CatalogPrefill | null>(
     null,
   );
@@ -399,130 +736,103 @@ export function SupplierWorkflow() {
     return seen;
   };
 
-  const acceptPrimaryFiles = async (incoming: FileList | File[]) => {
+  /**
+   * Una sola zona de carga: los documentos son pares (tarifario, políticas,
+   * anexos…). Internamente seguimos guardando `primaryFile` + `secondaryFiles`
+   * porque el resto del flujo (briefs por documento, nombre del run en el
+   * historial) está escrito sobre esa forma; el primer archivo de la lista
+   * ocupa el slot "primary" y nada más depende de ello.
+   */
+  const acceptFiles = async (incoming: FileList | File[]) => {
     setServerError(null);
     const list = Array.from(incoming);
     if (list.length === 0) {
       setUploadError(null);
       return;
     }
-
-    const errors: string[] = [];
-    if (list.length > 1) {
-      errors.push(
-        "Solo se permite 1 documento principal. Usá la sección de documentos secundarios para archivos adicionales.",
-      );
-    }
-
-    const seen = buildSeenKeys();
-    const { accepted, errors: validationErrors } = validateIncomingFiles(
-      list.slice(0, 1),
-      seen,
-      1,
-      "Solo se permite 1 documento principal",
-    );
-    errors.push(...validationErrors);
-
-    setUploadError(errors.length > 0 ? errors.join(" ") : null);
-    if (accepted.length > 0) {
-      try {
-        setPrimaryFile(await materializeUploadFile(accepted[0]!));
-      } catch (err) {
-        setUploadError(
-          describeRequestFailure(
-            err,
-            `No se pudo leer "${accepted[0]!.name}". Intentá seleccionarlo de nuevo.`,
-          ),
-        );
-      }
-    }
-  };
-
-  const acceptSecondaryFiles = async (incoming: FileList | File[]) => {
-    setServerError(null);
-    const list = Array.from(incoming);
-    if (list.length === 0) {
-      setUploadError(null);
-      return;
-    }
-
-    const slotsLeft = MAX_SECONDARY_FILES - secondaryFiles.length;
+    const slotsLeft = MAX_FILES_PER_REQUEST - selectedFiles.length;
     if (slotsLeft <= 0) {
       setUploadError(
-        `Máximo ${MAX_SECONDARY_FILES} documentos secundarios — quitá alguno para agregar más.`,
+        `Máximo ${MAX_FILES_PER_REQUEST} documentos por contrato — quita alguno para agregar más.`,
       );
       return;
     }
-
     const seen = buildSeenKeys();
     const { accepted, errors } = validateIncomingFiles(
       list,
       seen,
       slotsLeft,
-      `Máximo ${MAX_SECONDARY_FILES} documentos secundarios`,
+      `Máximo ${MAX_FILES_PER_REQUEST} documentos por contrato`,
     );
     setUploadError(errors.length > 0 ? errors.join(" ") : null);
-    if (accepted.length > 0) {
-      try {
-        const persisted = await materializeUploadFiles(accepted);
+    if (accepted.length === 0) return;
+    try {
+      const persisted = await materializeUploadFiles(accepted);
+      if (!primaryFile) {
+        setPrimaryFile(persisted[0]!);
+        setSecondaryFiles((prev) => [...prev, ...persisted.slice(1)]);
+      } else {
         setSecondaryFiles((prev) => [...prev, ...persisted]);
-      } catch (err) {
-        setUploadError(
-          describeRequestFailure(
-            err,
-            "No se pudieron leer uno o más archivos. Intentá seleccionarlos de nuevo.",
-          ),
-        );
       }
+    } catch (err) {
+      setUploadError(
+        describeRequestFailure(
+          err,
+          "No se pudieron leer uno o más archivos. Intenta seleccionarlos de nuevo.",
+        ),
+      );
     }
   };
 
-  const handlePrimaryDrop = (e: DragEvent<HTMLDivElement>) => {
+  const handleFilesDrop = (e: DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     const files = e.dataTransfer.files;
     if (!files || files.length === 0) return;
-    void acceptPrimaryFiles(Array.from(files));
+    void acceptFiles(Array.from(files));
   };
 
-  const handleSecondaryDrop = (e: DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    const files = e.dataTransfer.files;
-    if (!files || files.length === 0) return;
-    void acceptSecondaryFiles(Array.from(files));
-  };
-
-  const handlePrimaryPick = (e: ChangeEvent<HTMLInputElement>) => {
+  const handleFilesPick = (e: ChangeEvent<HTMLInputElement>) => {
     const fileList = e.target.files;
     if (!fileList || fileList.length === 0) return;
     const files = Array.from(fileList);
     e.target.value = "";
-    void acceptPrimaryFiles(files);
+    void acceptFiles(files);
   };
 
-  const handleSecondaryPick = (e: ChangeEvent<HTMLInputElement>) => {
-    const fileList = e.target.files;
-    if (!fileList || fileList.length === 0) return;
-    const files = Array.from(fileList);
-    e.target.value = "";
-    void acceptSecondaryFiles(files);
+  /** Quita el proveedor auto-detectado cuando cambia el conjunto de archivos. */
+  const forgetAutoDetection = () => {
+    setPreScan({ status: "idle" });
+    if (
+      autoDetectedId !== null &&
+      supplierChoice?.existing === true &&
+      supplierChoice.supplier.id === autoDetectedId
+    ) {
+      setSupplierChoice(null);
+    }
+    setAutoDetectedId(null);
   };
 
-  const removePrimary = () => {
+  /** Índice sobre la lista combinada (0 = slot primary). */
+  const removeFileAt = (index: number) => {
+    setUploadError(null);
+    setServerError(null);
+    if (index === 0) {
+      // El siguiente documento pasa a ocupar el slot primary.
+      const [next, ...rest] = secondaryFiles;
+      setPrimaryFile(next ?? null);
+      setSecondaryFiles(rest);
+    } else {
+      setSecondaryFiles((prev) => prev.filter((_, i) => i !== index - 1));
+    }
+    forgetAutoDetection();
+  };
+
+  const clearAllFiles = () => {
     setPrimaryFile(null);
-    setUploadError(null);
-    setServerError(null);
-  };
-
-  const removeSecondary = (index: number) => {
-    setSecondaryFiles((prev) => prev.filter((_, i) => i !== index));
-    setUploadError(null);
-    setServerError(null);
-  };
-
-  const clearSecondaryFiles = () => {
     setSecondaryFiles([]);
     setUploadError(null);
     setServerError(null);
+    forgetAutoDetection();
   };
 
   /**
@@ -544,12 +854,31 @@ export function SupplierWorkflow() {
     setStep(2);
     try {
       const files = selectedFiles;
+
+      // Proveedor confirmado con sus servicios (el dropdown trae el catálogo
+      // resumido) — lo necesitamos ANTES del brief para que viaje como ancla.
+      let confirmedSupplier: CatalogSupplier | null = null;
+      if (supplierChoice?.existing) {
+        confirmedSupplier = supplierChoice.supplier;
+        try {
+          confirmedSupplier = await withServices(confirmedSupplier);
+        } catch (err) {
+          console.warn("[workflow] no se pudieron cargar los servicios del proveedor", err);
+        }
+      }
+      const hints = buildPreScanHints(
+        preScan.status === "done" ? preScan.result : null,
+        confirmedSupplier,
+      );
+      setPreScanHints(hints);
+
       const responses: Awaited<ReturnType<typeof api.supplierIntelligence.analyzeBrief>>[] = [];
       for (const f of files) {
         responses.push(
           await api.supplierIntelligence.analyzeBrief([f], {
             comments,
             isExistingSupplier,
+            preScanHints: hints,
           }),
         );
       }
@@ -559,96 +888,75 @@ export function SupplierWorkflow() {
       const brief = responses[0]!.brief;
       let prefill: CatalogPrefill | null = null;
       let matchInfo: CatalogMatchInfo | null = null;
-      if (isExistingSupplier) {
+      if (confirmedSupplier) {
+        // El proveedor viene elegido a mano en el Paso 1 — no hay que
+        // adivinarlo por nombre. Solo resolvemos el servicio.
         setMatchingPhase("local");
-        const sharedNames = [
-          brief.shared_fields.nombre_comercial,
-          brief.shared_fields.proveedor,
-        ]
-          .map((s) => s?.trim())
-          .filter((s): s is string => !!s);
-        if (sharedNames.length === 0) {
-          matchInfo = { status: "skipped", reason: "no_query" };
-        } else {
-          let match: SupplierMatch | null = null;
-          let aiAttempted = false;
-          for (const c of sharedNames) {
-            match = await findSupplierByNameWithAI(c, { enableAIFallback: false });
-            if (match) break;
-          }
-          if (!match) {
-            setMatchingPhase("ai");
-            aiAttempted = true;
-            match = await findSupplierByNameWithAI(sharedNames[0] as string, {
-              enableAIFallback: true,
-            });
-          }
-          if (match) {
-            // Hint de servicio desde el BRIEF (no hay filas todavía en este
-            // punto del flujo gated): usamos el inventario de categorías de
-            // producto + país + moneda como señal para elegir entre los
-            // servicios del proveedor.
-            const dedupe = (xs: Array<string | null>, cap: number): string[] =>
-              Array.from(
-                new Set(xs.filter((s): s is string => !!s && s.trim() !== "")),
-              ).slice(0, cap);
-            const categorias = dedupe(brief.product_categories, 8);
-            const hintParts = [
-              brief.shared_fields.nombre_comercial
-                ? `Proveedor: ${brief.shared_fields.nombre_comercial}`
-                : null,
-              brief.shared_fields.type_of_business
-                ? `Tipo negocio: ${brief.shared_fields.type_of_business}`
-                : null,
-              categorias.length > 0
-                ? `Categorías/Productos: ${categorias.join(", ")}`
-                : null,
-              brief.currency ? `Moneda: ${brief.currency}` : null,
-              brief.shared_fields.pais
-                ? `País proveedor: ${brief.shared_fields.pais}`
-                : null,
-              comments?.trim() ? `Notas: ${comments.trim()}` : null,
-              selectedFiles[0]?.name
-                ? `Archivo: ${selectedFiles[0].name}` +
-                  (selectedFiles.length > 1
-                    ? ` (+${selectedFiles.length - 1} más)`
-                    : "")
-                : null,
-            ].filter((s): s is string => s !== null);
-            const serviceHint = hintParts.join(" · ");
+        const chosen = confirmedSupplier;
+        const match: SupplierMatch = {
+          supplier: chosen,
+          matchedBy: "manual",
+          query: chosen.nombre ?? chosen.codigo,
+        };
 
-            setMatchingPhase("ai");
-            const serviceMatch = await findServiceForSupplierWithAI(
-              match.supplier,
-              serviceHint,
-              { enableAIFallback: true },
-            );
-            setMatchingPhase(null);
+        // Hint de servicio desde el BRIEF (no hay filas todavía en este
+        // punto del flujo gated): usamos el inventario de categorías de
+        // producto + país + moneda como señal para elegir entre los
+        // servicios del proveedor.
+        const dedupe = (xs: Array<string | null>, cap: number): string[] =>
+          Array.from(
+            new Set(xs.filter((s): s is string => !!s && s.trim() !== "")),
+          ).slice(0, cap);
+        const categorias = dedupe(brief.product_categories, 8);
+        const hintParts = [
+          brief.shared_fields.nombre_comercial
+            ? `Proveedor: ${brief.shared_fields.nombre_comercial}`
+            : null,
+          brief.shared_fields.type_of_business
+            ? `Tipo negocio: ${brief.shared_fields.type_of_business}`
+            : null,
+          categorias.length > 0
+            ? `Categorías/Productos: ${categorias.join(", ")}`
+            : null,
+          brief.currency ? `Moneda: ${brief.currency}` : null,
+          brief.shared_fields.pais
+            ? `País proveedor: ${brief.shared_fields.pais}`
+            : null,
+          comments?.trim() ? `Notas: ${comments.trim()}` : null,
+          selectedFiles[0]?.name
+            ? `Archivo: ${selectedFiles[0].name}` +
+              (selectedFiles.length > 1
+                ? ` (+${selectedFiles.length - 1} más)`
+                : "")
+            : null,
+        ].filter((s): s is string => s !== null);
+        const serviceHint = hintParts.join(" · ");
 
-            prefill = {
-              tipo_actividad: match.supplier.actividad,
-              zona_turismo: match.supplier.zona,
-              proveedor_codigo: match.supplier.codigo,
-              codigo_servicio: serviceMatch?.service.codigo ?? null,
-            };
-            matchInfo = {
-              status: "matched",
-              supplierName: match.supplier.nombre ?? match.supplier.codigo,
-              supplierCode: match.supplier.codigo,
-              matchedBy: match.matchedBy,
-              serviceMatched: serviceMatch !== null,
-              aiConfidence: match.aiConfidence,
-              aiReasoning: match.aiReasoning,
-            };
-          } else {
-            matchInfo = {
-              status: "not_found",
-              query: sharedNames[0] as string,
-              aiAttempted,
-            };
-          }
-        }
+        setMatchingPhase("ai");
+        const serviceMatch = await findServiceForSupplierWithAI(
+          match.supplier,
+          serviceHint,
+          { enableAIFallback: true },
+        );
         setMatchingPhase(null);
+
+        // Actividad/zona: las del servicio elegido cuando las tiene (varios
+        // proveedores mezclan hotel + tours + transporte), si no, las del
+        // proveedor (el valor más frecuente en el maestro).
+        const svc = serviceMatch?.service ?? null;
+        prefill = {
+          tipo_actividad: svc?.actividad ?? match.supplier.actividad,
+          zona_turismo: svc?.zona ?? match.supplier.zona,
+          proveedor_codigo: match.supplier.codigo,
+          codigo_servicio: svc?.codigo ?? null,
+        };
+        matchInfo = {
+          status: "matched",
+          supplierName: match.supplier.nombre ?? match.supplier.codigo,
+          supplierCode: match.supplier.codigo,
+          matchedBy: match.matchedBy,
+          serviceMatched: serviceMatch !== null,
+        };
       } else {
         matchInfo = { status: "skipped", reason: "new_supplier" };
       }
@@ -659,7 +967,17 @@ export function SupplierWorkflow() {
       // Fusiona bancos/políticas de docs secundarios (T&C) en el brief primario
       // para que el Paso 2 no quede vacío (caso Lapa Rios rates + TC).
       const rawBriefs = responses.map((r) => r.brief);
-      const newBriefs = mergeSecondaryBriefIntoPrimary(rawBriefs);
+      const merged = mergeSecondaryBriefIntoPrimary(rawBriefs);
+      // Pre-scan (sin IA) rellena huecos del brief primario y avisa si la
+      // IA contradice lo que el documento dice literalmente.
+      let newBriefs = merged;
+      if (preScan.status === "done" && merged[0]) {
+        const rec = reconcileBriefWithPreScan(merged[0], preScan.result, comments);
+        newBriefs = [rec.brief, ...merged.slice(1)];
+        setBriefAdvisories(rec.advisories);
+      } else {
+        setBriefAdvisories([]);
+      }
       setBriefs(newBriefs);
       setEditedBriefs(newBriefs.map((b) => b));
       setMetas(responses.map((r) => r.meta));
@@ -725,6 +1043,7 @@ export function SupplierWorkflow() {
       const response = await api.supplierIntelligence.refineBrief([file], {
         comments,
         isExistingSupplier,
+        preScanHints,
         previousBrief: prevBrief,
         feedbackMessage: userMsg,
         chatHistory: chatHistories[tabIndex] ?? [],
@@ -825,10 +1144,18 @@ export function SupplierWorkflow() {
       const response = await api.supplierIntelligence.extract(filesToExtract, {
         comments,
         isExistingSupplier,
+        preScanHints,
         confirmedConfigs: finalBriefs,
       });
       setProgress(100);
-      setResult(response);
+      // One idempotency key per extraction: every xlsx download of this
+      // result (Paso 3 "Descargar aquí", Paso 4 auto-download, re-clicks)
+      // saves against the same key, so Historial and the dashboard count
+      // the contract exactly once.
+      setResult({
+        ...response,
+        meta: { ...response.meta, extraction_id: newExtractionId() },
+      });
       setPreparingGrid(true);
     } catch (err) {
       setServerError(
@@ -863,7 +1190,11 @@ export function SupplierWorkflow() {
     setServerError(null);
     setProgress(0);
     setComments("");
-    setIsExistingSupplier(null);
+    setSupplierChoice(null);
+    setPreScan({ status: "idle" });
+    setAutoDetectedId(null);
+    setPreScanHints(null);
+    setBriefAdvisories([]);
     setCatalogPrefill(null);
     setCatalogMatchInfo(null);
     setMatchingPhase(null);
@@ -959,24 +1290,21 @@ export function SupplierWorkflow() {
       <div key={step} className="animate-page-enter">
         {step === 1 && (
           <UploadStep
-            primaryFile={primaryFile}
-            secondaryFiles={secondaryFiles}
+            files={selectedFiles}
             uploadError={uploadError}
             serverError={serverError}
             analyzing={analyzing}
-            primaryFileInputRef={primaryFileInputRef}
-            secondaryFileInputRef={secondaryFileInputRef}
+            fileInputRef={fileInputRef}
             comments={comments}
             onCommentsChange={setComments}
-            isExistingSupplier={isExistingSupplier}
-            onExistingSupplierChange={setIsExistingSupplier}
-            onPrimaryDrop={handlePrimaryDrop}
-            onSecondaryDrop={handleSecondaryDrop}
-            onPrimaryPick={handlePrimaryPick}
-            onSecondaryPick={handleSecondaryPick}
-            onRemovePrimary={removePrimary}
-            onRemoveSecondary={removeSecondary}
-            onClearSecondary={clearSecondaryFiles}
+            supplierChoice={supplierChoice}
+            onSupplierChoiceChange={chooseSupplier}
+            preScan={preScan}
+            autoDetectedId={autoDetectedId}
+            onDrop={handleFilesDrop}
+            onPick={handleFilesPick}
+            onRemove={removeFileAt}
+            onClearAll={clearAllFiles}
             onStart={startAnalysis}
           />
         )}
@@ -1071,6 +1399,21 @@ export function SupplierWorkflow() {
                 />
               </div>
             ))}
+
+            {briefAdvisories.length > 0 && (
+              <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 px-4 py-3 space-y-1.5">
+                <p className="flex items-center gap-1.5 text-[12.5px] font-semibold text-amber-200">
+                  <ScanSearch className="h-4 w-4 text-amber-400" />
+                  Contraste con el documento (sin IA)
+                </p>
+                {briefAdvisories.map((a) => (
+                  <p key={a} className="flex items-start gap-2 text-[12px] text-amber-100/90">
+                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />
+                    <span>{a}</span>
+                  </p>
+                ))}
+              </div>
+            )}
 
             {/* Acciones GLOBALES (una sola extracción para todos los docs) */}
             <div className="pb-7 space-y-4">
@@ -1185,6 +1528,7 @@ export function SupplierWorkflow() {
           >
             <ReviewStep
               result={result}
+              preScanResult={preScan.status === "done" ? preScan.result : null}
               catalogPrefill={catalogPrefill}
               briefMetas={metas}
               comments={comments}
@@ -1206,16 +1550,8 @@ export function SupplierWorkflow() {
       </div>
     </section>
 
-    <div className="text-center mt-4 space-y-1">
-      <p className="text-[11px] text-muted-foreground/60">Version 2.0.3 - Agosto 27</p>
-      <a
-        href="https://forms.gle/GANUbdcuAS3P7szS8"
-        target="_blank"
-        rel="noopener noreferrer"
-        className="text-[11px] text-primary/70 hover:text-primary transition-colors"
-      >
-        ¿Encontraste un bug? Repórtalo
-      </a>
+    <div className="text-center mt-4">
+      <p className="text-[11px] text-muted-foreground/60">Version 2.0.4 - Octubre 01</p>
     </div>
     </>
   );
@@ -1226,132 +1562,107 @@ export function SupplierWorkflow() {
    ========================================================================== */
 
 function UploadStep({
-  primaryFile,
-  secondaryFiles,
+  files,
   uploadError,
   serverError,
   analyzing,
-  primaryFileInputRef,
-  secondaryFileInputRef,
+  fileInputRef,
   comments,
   onCommentsChange,
-  isExistingSupplier,
-  onExistingSupplierChange,
-  onPrimaryDrop,
-  onSecondaryDrop,
-  onPrimaryPick,
-  onSecondaryPick,
-  onRemovePrimary,
-  onRemoveSecondary,
-  onClearSecondary,
+  supplierChoice,
+  onSupplierChoiceChange,
+  preScan,
+  autoDetectedId,
+  onDrop,
+  onPick,
+  onRemove,
+  onClearAll,
   onStart,
 }: {
-  primaryFile: File | null;
-  secondaryFiles: File[];
+  files: File[];
   uploadError: string | null;
   serverError: string | null;
   analyzing: boolean;
-  primaryFileInputRef: React.RefObject<HTMLInputElement | null>;
-  secondaryFileInputRef: React.RefObject<HTMLInputElement | null>;
+  fileInputRef: React.RefObject<HTMLInputElement | null>;
   comments: string;
   onCommentsChange: (value: string) => void;
-  isExistingSupplier: boolean | null;
-  onExistingSupplierChange: (value: boolean) => void;
-  onPrimaryDrop: (e: DragEvent<HTMLDivElement>) => void;
-  onSecondaryDrop: (e: DragEvent<HTMLDivElement>) => void;
-  onPrimaryPick: (e: ChangeEvent<HTMLInputElement>) => void;
-  onSecondaryPick: (e: ChangeEvent<HTMLInputElement>) => void;
-  onRemovePrimary: () => void;
-  onRemoveSecondary: (index: number) => void;
-  onClearSecondary: () => void;
+  supplierChoice: SupplierChoice | null;
+  onSupplierChoiceChange: (value: SupplierChoice) => void;
+  preScan: PreScanState;
+  autoDetectedId: string | null;
+  onDrop: (e: DragEvent<HTMLDivElement>) => void;
+  onPick: (e: ChangeEvent<HTMLInputElement>) => void;
+  onRemove: (index: number) => void;
+  onClearAll: () => void;
   onStart: () => void;
 }) {
   const COMMENTS_MAX = 5000;
-  const secondarySlotsLeft = MAX_SECONDARY_FILES - secondaryFiles.length;
-  const canAddSecondary = secondarySlotsLeft > 0 && !analyzing;
-  const canSubmit = !!primaryFile && !analyzing && isExistingSupplier !== null;
+  const slotsLeft = MAX_FILES_PER_REQUEST - files.length;
+  const canAdd = slotsLeft > 0 && !analyzing;
+  const hasFiles = files.length > 0;
+  const canSubmit = hasFiles && !analyzing && supplierChoice !== null;
 
   return (
     <div className="px-5 sm:px-8 py-7 space-y-5">
-      <div className="grid gap-5 lg:grid-cols-2">
-        <DocumentUploadSection
-          title="Documento principal"
-          description="El contrato o cotización base. Solo se acepta 1 archivo."
-          disabled={analyzing}
-          inputRef={primaryFileInputRef}
-          multiple={false}
-          onDrop={onPrimaryDrop}
-          onPick={onPrimaryPick}
-          emptyTitle="Arrastra el documento principal aquí"
-          emptyHint="o haz click para buscar en tu equipo"
-        >
-          {primaryFile && (
-            <UploadedFileRow file={primaryFile} onRemove={onRemovePrimary} />
-          )}
-        </DocumentUploadSection>
-
-        <DocumentUploadSection
-          title="Documentos secundarios"
-          badge="opcional"
-          description="Listas de precios, anexos, catálogos u otros archivos de apoyo. Podés subir hasta 9."
-          disabled={!canAddSecondary}
-          inputRef={secondaryFileInputRef}
-          multiple
-          onDrop={onSecondaryDrop}
-          onPick={onSecondaryPick}
-          emptyTitle="Arrastra documentos de apoyo aquí"
-          emptyHint={
-            secondaryFiles.length > 0
-              ? "o haz click para agregar más archivos"
-              : "o haz click para buscar en tu equipo"
-          }
-        >
-          {secondaryFiles.length > 0 && (
-            <div className="mt-3 rounded-lg border border-border/60 bg-card/40 divide-y divide-border/60">
-              <header className="flex items-center justify-between px-3 py-2 border-b border-border/60">
-                <p className="text-[11.5px] font-medium text-foreground">
-                  {secondaryFiles.length}{" "}
-                  {secondaryFiles.length === 1 ? "archivo" : "archivos"}
-                </p>
-                {secondaryFiles.length > 1 && (
-                  <button
-                    type="button"
-                    onClick={onClearSecondary}
-                    className="text-[10.5px] text-muted-foreground hover:text-destructive transition-colors"
-                  >
-                    Quitar todos
-                  </button>
-                )}
-              </header>
-              <ul>
-                {secondaryFiles.map((f, idx) => (
-                  <UploadedFileRow
-                    key={`${f.name}|${f.size}|${idx}`}
-                    file={f}
-                    onRemove={() => onRemoveSecondary(idx)}
-                  />
-                ))}
-              </ul>
-              {canAddSecondary && (
-                <div className="px-3 py-2 border-t border-border/60">
-                  <button
-                    type="button"
-                    onClick={() => secondaryFileInputRef.current?.click()}
-                    className="inline-flex items-center gap-1.5 text-[11.5px] text-primary hover:text-primary/80 transition-colors"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    Agregar otro
-                    <span className="text-muted-foreground/80">
-                      ({secondarySlotsLeft}{" "}
-                      {secondarySlotsLeft === 1 ? "disponible" : "disponibles"})
-                    </span>
-                  </button>
-                </div>
+      <DocumentUploadSection
+        title="Documentos del contrato"
+        description={`Tarifario, políticas, anexos, catálogos… todos los archivos de este contrato juntos (hasta ${MAX_FILES_PER_REQUEST}). Se analizan como un solo contrato.`}
+        disabled={!canAdd}
+        inputRef={fileInputRef}
+        multiple
+        onDrop={onDrop}
+        onPick={onPick}
+        emptyTitle="Arrastra los documentos aquí"
+        emptyHint={
+          hasFiles
+            ? "o haz click para agregar más archivos"
+            : "o haz click para buscar en tu equipo"
+        }
+      >
+        {hasFiles && (
+          <div className="mt-3 rounded-lg border border-border/60 bg-card/40 divide-y divide-border/60">
+            <header className="flex items-center justify-between px-3 py-2 border-b border-border/60">
+              <p className="text-[11.5px] font-medium text-foreground">
+                {files.length} {files.length === 1 ? "documento" : "documentos"}
+              </p>
+              {files.length > 1 && (
+                <button
+                  type="button"
+                  onClick={onClearAll}
+                  disabled={analyzing}
+                  className="text-[10.5px] text-muted-foreground hover:text-destructive transition-colors disabled:opacity-50"
+                >
+                  Quitar todos
+                </button>
               )}
-            </div>
-          )}
-        </DocumentUploadSection>
-      </div>
+            </header>
+            <ul>
+              {files.map((f, idx) => (
+                <UploadedFileRow
+                  key={`${f.name}|${f.size}|${idx}`}
+                  file={f}
+                  onRemove={() => onRemove(idx)}
+                />
+              ))}
+            </ul>
+            {canAdd && (
+              <div className="px-3 py-2 border-t border-border/60">
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="inline-flex items-center gap-1.5 text-[11.5px] text-primary hover:text-primary/80 transition-colors"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Agregar otro
+                  <span className="text-muted-foreground/80">
+                    ({slotsLeft} {slotsLeft === 1 ? "disponible" : "disponibles"})
+                  </span>
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </DocumentUploadSection>
 
       {uploadError && (
         <div
@@ -1373,11 +1684,15 @@ function UploadStep({
         </div>
       )}
 
-      <ExistingSupplierToggle
-        value={isExistingSupplier}
-        onChange={onExistingSupplierChange}
-        disabled={analyzing}
-      />
+      {hasFiles && preScan.status !== "idle" && (
+        <PreScanCard
+          state={preScan}
+          choice={supplierChoice}
+          autoDetectedId={autoDetectedId}
+          onChoose={onSupplierChoiceChange}
+          disabled={analyzing}
+        />
+      )}
 
       <CommentsField
         value={comments}
@@ -1560,90 +1875,713 @@ function UploadedFileRow({
   );
 }
 
-function ExistingSupplierToggle({
-  value,
-  onChange,
+/**
+ * Tarjeta de pre-scan (Paso 1): lo que un revisor quiere ver antes de gastar
+ * una llamada a Claude — proveedor detectado, datos duros del documento y
+ * contratos anteriores del mismo proveedor con avisos de cambios.
+ */
+function PreScanCard({
+  state,
+  choice,
+  autoDetectedId,
+  onChoose,
   disabled,
 }: {
-  value: boolean | null;
-  onChange: (next: boolean) => void;
+  state: PreScanState;
+  choice: SupplierChoice | null;
+  autoDetectedId: string | null;
+  onChoose: (next: SupplierChoice) => void;
   disabled: boolean;
 }) {
-  const untouched = value === null;
-  return (
-    <div
-      className={`rounded-xl border bg-card/60 transition-colors ${
-        untouched ? "border-amber-500/40" : "border-border"
-      }`}
-    >
-      <div className="flex flex-col gap-3 px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between">
-        <div className="min-w-0">
-          <p className="text-[12.5px] font-semibold text-foreground">
-            ¿Es un proveedor existente?{" "}
-            <span className="text-rose-300" aria-hidden>
-              *
-            </span>
-          </p>
-          <p className="mt-0.5 text-[11.5px] text-muted-foreground">
-            Indica si el proveedor ya existe en el sistema o es uno nuevo.
-            Campo requerido.
-          </p>
+  const [showDetails, setShowDetails] = useState(false);
+  const [showPicker, setShowPicker] = useState(false);
+
+  if (state.status === "loading") {
+    return (
+      <div className="flex items-center gap-2.5 rounded-xl border border-border bg-card/60 px-4 py-3 text-[12.5px] text-muted-foreground">
+        <Loader2 className="h-4 w-4 animate-spin text-primary" />
+        Leyendo los documentos para identificar al proveedor (sin IA)…
+      </div>
+    );
+  }
+  if (state.status === "error") {
+    // Sin pre-scan igual hay que elegir proveedor: mostramos el selector.
+    return (
+      <div className="rounded-xl border border-amber-500/40 bg-card/60 px-4 py-3.5 space-y-3">
+        <div className="flex items-start gap-2.5 text-[12.5px] text-muted-foreground">
+          <ScanSearch className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>{state.message} Elige el proveedor para continuar.</span>
         </div>
-        <div
-          role="radiogroup"
-          aria-label="¿Es un proveedor existente?"
-          aria-required="true"
-          className="inline-flex shrink-0 self-start rounded-lg border border-border bg-secondary/40 p-0.5 sm:self-auto"
-        >
-          <ToggleButton
-            icon={UserCheck}
-            label="Sí, existente"
-            active={value === true}
-            disabled={disabled}
-            onClick={() => onChange(true)}
-          />
-          <ToggleButton
-            icon={UserPlus}
-            label="No, es nuevo"
-            active={value === false}
-            disabled={disabled}
-            onClick={() => onChange(false)}
-          />
+        <ExistingSupplierSelect value={choice} onChange={onChoose} disabled={disabled} compact />
+      </div>
+    );
+  }
+  if (state.status !== "done") return null;
+
+  const { result } = state;
+  const { confidence, candidates } = result.supplier;
+  const top = candidates[0] ?? null;
+  const chosenId = choice?.existing ? choice.supplier.id : null;
+  const facts = result.facts;
+  const inf = result.inferences;
+  const warnings = result.previous?.warnings ?? [];
+  const needsChoice = choice === null;
+  const hasFacts =
+    facts.cedulas.length + facts.ibans.length + facts.emails.length + facts.phones.length + facts.dates.length > 0;
+  const anyText = result.documents.some((d) => d.textAvailable);
+  // Si el pre-scan no pudo proponer nada, el selector va abierto de entrada.
+  const pickerOpen = showPicker || !anyText || confidence === "ninguna";
+
+  const tone = needsChoice
+    ? "border-amber-500/40 bg-amber-500/5"
+    : confidence === "alta"
+      ? "border-primary/40 bg-primary/5"
+      : "border-border bg-card/60";
+
+  const chip = (label: string, value: string, title?: string) => (
+    <span
+      key={label}
+      title={title}
+      className="inline-flex items-center gap-1 rounded-md border border-border bg-background/50 px-2 py-1 text-[11.5px]"
+    >
+      <span className="text-muted-foreground">{label}</span>
+      <span className="font-medium text-foreground">{value}</span>
+    </span>
+  );
+  const chips: React.ReactNode[] = [];
+  if (inf.country) chips.push(chip("País", inf.country.value, inf.country.reasons.join(" · ")));
+  if (inf.validity) {
+    chips.push(
+      chip(
+        "Vigencia",
+        `${inf.validity.start} → ${inf.validity.end}`,
+        inf.validity.source === "year" ? "Inferida del año del documento; confírmala en el Paso 2." : "Explícita en el documento",
+      ),
+    );
+  }
+  if (facts.currencies.length > 0) chips.push(chip("Moneda", facts.currencies.join(", ")));
+  if (inf.taxes) {
+    const t = inf.taxes;
+    const v = t.included === false ? `+ ${t.percent ?? "?"}% (no incluido)` : t.included === true ? `incluido${t.percent ? ` (${t.percent}%)` : ""}` : `${t.percent}%`;
+    chips.push(chip("Impuesto", v, t.snippet));
+  }
+  if (inf.commission) {
+    chips.push(chip("Comisión", inf.commission.net ? "neta / no comisionable" : `${inf.commission.percent}%`, inf.commission.snippet));
+  }
+  if (inf.rateBasis.length > 0) chips.push(chip("Tarifa", inf.rateBasis.join(", ")));
+  if (inf.occupancies.length > 0) chips.push(chip("Ocupación", inf.occupancies.join(" · ")));
+  if (inf.seasons.length > 0) {
+    chips.push(
+      chip(
+        "Temporadas",
+        String(inf.seasons.length),
+        inf.seasons
+          .map((se) => `${se.name ?? "Temporada"}: ${se.ranges.map((r) => `${r.start}→${r.end}`).join(", ")}`)
+          .join("\n"),
+      ),
+    );
+  }
+  if (inf.minNights) chips.push(chip("Mín. noches", String(inf.minNights)));
+  if (inf.priceMentions > 0) {
+    chips.push(
+      chip(
+        "Precios",
+        `${inf.priceMentions} (${inf.prices.length} distintos)${inf.estimatedProducts ? ` ≈ ${inf.estimatedProducts} productos` : ""}`,
+        inf.estimatedProducts
+          ? `${inf.priceMentions} precios = ${inf.estimatedProducts} productos × ${inf.occupancies.filter((o) => o !== "CHD").length || 1} ocupaciones × ${Math.max(1, inf.seasons.length)} temporadas`
+          : undefined,
+      ),
+    );
+  }
+  if (inf.checkIn || inf.checkOut) chips.push(chip("Check-in/out", `${inf.checkIn ?? "—"} / ${inf.checkOut ?? "—"}`));
+  if (inf.paymentTerms.length > 0) {
+    chips.push(
+      chip(
+        "Pago",
+        inf.paymentTerms
+          .slice(0, 3)
+          .map((t) => `${t.percent !== null ? `${t.percent}%` : "pago"}${t.daysBefore !== null ? ` ${t.daysBefore}d` : ""}${t.season ? ` (${t.season === "high" ? "alta" : "baja"})` : ""}`)
+          .join(" · "),
+        inf.paymentTerms[0]!.sentence,
+      ),
+    );
+  }
+  if (inf.cancellationTerms.length > 0) {
+    chips.push(
+      chip(
+        "Cancelación",
+        inf.cancellationTerms
+          .slice(0, 3)
+          .map((t) => `${t.daysBefore}d → ${t.percent !== null ? `${t.percent}%` : "?"}${t.season ? ` (${t.season === "high" ? "alta" : "baja"})` : ""}`)
+          .join(" · "),
+        inf.cancellationTerms[0]!.sentence,
+      ),
+    );
+  }
+  if (inf.bankAccounts.length > 0) {
+    chips.push(
+      chip(
+        "Bancos",
+        inf.bankAccounts.map((b) => `${b.bank ?? "banco"}${b.currency ? ` ${b.currency}` : ""}`).join(" · "),
+        inf.bankAccounts.map((b) => `${b.bank ?? ""} ${b.currency ?? ""} ${b.accountNumber ?? ""} ${b.iban ?? ""}`.trim()).join("\n"),
+      ),
+    );
+  }
+
+  return (
+    <div className={`rounded-xl border ${tone} px-4 py-3.5 space-y-3`}>
+      {/* Proveedor */}
+      <div className="flex items-start gap-2.5">
+        <ScanSearch className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+        <div className="min-w-0 flex-1">
+          {!anyText ? (
+            <>
+              <p className="text-[13px] font-semibold text-foreground">
+                {result.kind === "image" ? "Imagen" : "Documento sin texto legible"}
+                <span className="ml-1.5 text-rose-300" aria-hidden>*</span>
+              </p>
+              <p className="mt-0.5 text-[12px] text-muted-foreground">
+                No pudimos leer texto sin IA (parece escaneado). Elige el
+                proveedor o márcalo como nuevo; el agente leerá el documento en
+                el análisis.
+              </p>
+            </>
+          ) : top && confidence !== "ninguna" ? (
+            <>
+              <p className="text-[13px] font-semibold text-foreground">
+                {confidence === "alta" ? "Proveedor detectado" : "Posible proveedor"}
+                {": "}
+                <span className="text-primary">{top.nombre ?? top.codigo}</span>
+                <span className="ml-1.5 rounded-full border border-border bg-secondary/60 px-1.5 py-0.5 font-mono text-[10.5px] font-normal text-muted-foreground">
+                  {top.codigo}
+                </span>
+                {chosenId === top.id && autoDetectedId === top.id && (
+                  <span className="ml-1.5 rounded-full border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-[10.5px] font-medium text-primary">
+                    seleccionado
+                  </span>
+                )}
+              </p>
+              <p className="mt-0.5 text-[12px] text-muted-foreground">
+                {[top.actividad, top.zona].filter(Boolean).join(" · ") || "Sin clasificación"}
+                {" · "}
+                {top.serviceCount} servicio{top.serviceCount === 1 ? "" : "s"}
+                {" · "}
+                {top.reasons.slice(0, 2).join("; ")}
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="text-[13px] font-semibold text-foreground">
+                No encontramos el proveedor en el maestro
+                <span className="ml-1.5 text-rose-300" aria-hidden>*</span>
+              </p>
+              <p className="mt-0.5 text-[12px] text-muted-foreground">
+                Búscalo abajo o márcalo como nuevo. Si existe con otro nombre,
+                puedes corregirlo en Proveedores.
+              </p>
+            </>
+          )}
         </div>
       </div>
+
+      {/* Acciones */}
+      <div className="flex flex-wrap items-center gap-1.5">
+        {anyText &&
+          confidence !== "ninguna" &&
+          candidates.slice(0, 3).map((c, i) => {
+            const selected = chosenId === c.id;
+            return (
+              <button
+                key={c.id}
+                type="button"
+                disabled={disabled}
+                onClick={() => onChoose({ existing: true, supplier: candidateToSupplier(c) })}
+                title={c.reasons.join("; ")}
+                className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[12px] transition-colors disabled:opacity-50 ${
+                  selected
+                    ? "border-primary/50 bg-primary/15 text-primary"
+                    : "border-border bg-secondary/40 text-foreground hover:bg-secondary/70"
+                }`}
+              >
+                {selected ? <Check className="h-3.5 w-3.5" /> : <UserCheck className="h-3.5 w-3.5" />}
+                {i === 0 ? (selected ? "Confirmado" : "Confirmar proveedor") : (c.nombre ?? c.codigo)}
+              </button>
+            );
+          })}
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => onChoose({ existing: false })}
+          className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[12px] transition-colors disabled:opacity-50 ${
+            choice !== null && !choice.existing
+              ? "border-primary/50 bg-primary/15 text-primary"
+              : "border-border bg-secondary/40 text-muted-foreground hover:text-foreground hover:bg-secondary/70"
+          }`}
+        >
+          <UserPlus className="h-3.5 w-3.5" />
+          Es un proveedor nuevo
+        </button>
+        {!pickerOpen && (
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={() => setShowPicker(true)}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-secondary/40 px-2.5 py-1.5 text-[12px] text-muted-foreground transition-colors hover:bg-secondary/70 hover:text-foreground disabled:opacity-50"
+          >
+            <Search className="h-3.5 w-3.5" />
+            Elegir otro
+          </button>
+        )}
+      </div>
+
+      {pickerOpen && (
+        <ExistingSupplierSelect
+          value={choice}
+          onChange={(next) => {
+            onChoose(next);
+            setShowPicker(false);
+          }}
+          disabled={disabled}
+          autoDetected={choice?.existing === true && autoDetectedId === choice.supplier.id}
+          compact
+        />
+      )}
+
+      {/* Qué aportó cada documento */}
+      {result.documents.length > 0 && (
+        <ul className="space-y-1 rounded-lg border border-border/70 bg-background/40 px-3 py-2 text-[12px]">
+          {result.documents.map((d) => (
+            <li key={`${d.role}-${d.filename}`} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+              <span className="truncate max-w-[260px] font-medium text-foreground" title={d.filename}>
+                {d.filename}
+              </span>
+              <span className="text-[10.5px] uppercase tracking-wider text-muted-foreground">
+                {d.pages ? `${d.pages.total} pág.` : d.kind}
+              </span>
+              <span className={d.textAvailable ? "text-muted-foreground" : "text-amber-300"}>
+                {d.contributes.join(" · ")}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {/* Avisos: discrepancias entre documentos + contraste con contrato anterior */}
+      {(warnings.length > 0 || result.crossDocumentWarnings.length > 0) && (
+        <ul className="space-y-1.5 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 text-[12px]">
+          {[...result.crossDocumentWarnings, ...warnings].map((w) => (
+            <li key={w} className="flex items-start gap-2 text-amber-200">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />
+              <span>{w}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {/* Lo que ya sabemos del documento (sin IA) */}
+      {chips.length > 0 && (
+        <div>
+          <p className="mb-1.5 text-[11px] uppercase tracking-wider text-muted-foreground">
+            Leído del documento — para verificar en el Paso 2
+          </p>
+          <div className="flex flex-wrap gap-1.5">{chips}</div>
+        </div>
+      )}
+
+      {(hasFacts || inf.productHints.length > 0 || inf.childPolicy || inf.cancellationPolicy || inf.paymentPolicy) && (
+        <div>
+          <button
+            type="button"
+            onClick={() => setShowDetails((v) => !v)}
+            className="text-[12px] text-primary/80 hover:text-primary transition-colors"
+          >
+            {showDetails ? "Ocultar detalles" : "Ver más detalles del documento"}
+            {result.pages ? ` · ${result.pages.total} pág.` : ""}
+          </button>
+          {showDetails && (
+            <dl className="mt-2 grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2 text-[12px]">
+              <FactRow label="Razón social" values={inf.legalName ? [inf.legalName] : []} />
+              <FactRow label="Cédula" values={facts.cedulas} mono />
+              <FactRow label="Dirección" values={inf.address ? [inf.address] : []} />
+              <FactRow
+                label="Cuentas bancarias"
+                values={
+                  inf.bankAccounts.length > 0
+                    ? inf.bankAccounts.map((b) => [b.bank, b.currency, b.accountNumber, b.iban].filter(Boolean).join(" · "))
+                    : facts.ibans
+                }
+                mono
+              />
+              <FactRow label="Comidas" values={inf.meals.slice(0, 3)} />
+              <FactRow label="Correos" values={facts.emails.slice(0, 4)} />
+              <FactRow label="Teléfonos" values={facts.phones.slice(0, 4)} mono />
+              <FactRow
+                label="Fechas"
+                values={facts.dates.slice(0, 6)}
+                extra={facts.yearRange ? `años ${facts.yearRange.min}–${facts.yearRange.max}` : undefined}
+              />
+              <FactRow label="Productos mencionados" values={inf.productHints.slice(0, 10)} />
+              {inf.seasons.length > 0 && (
+                <FactRow
+                  label="Temporadas"
+                  values={inf.seasons.map(
+                    (se) => `${se.name ?? "Temporada"}: ${se.ranges.map((r) => `${r.start}→${r.end}`).join(", ")}`,
+                  )}
+                />
+              )}
+              <FactRow label="Niños" values={inf.childTerms.length > 0 ? inf.childTerms.slice(0, 3) : inf.childPolicy ? [inf.childPolicy] : []} />
+              <FactRow label="Cancelación" values={inf.cancellationPolicy ? [inf.cancellationPolicy] : []} />
+              <FactRow label="Pago" values={inf.paymentPolicy ? [inf.paymentPolicy] : []} />
+              <FactRow label="Web" values={inf.website ? [inf.website] : []} />
+            </dl>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-function ToggleButton({
-  icon: Icon,
+function FactRow({
   label,
-  active,
-  disabled,
-  onClick,
+  values,
+  mono = false,
+  extra,
 }: {
-  icon: LucideIcon;
   label: string;
-  active: boolean;
-  disabled: boolean;
-  onClick: () => void;
+  values: string[];
+  mono?: boolean;
+  extra?: string;
 }) {
+  if (values.length === 0 && !extra) return null;
   return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={active}
-      onClick={onClick}
-      disabled={disabled}
-      className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12.5px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-        active
-          ? "bg-primary text-primary-foreground shadow-[0_0_10px_0_hsl(var(--primary)/0.35)]"
-          : "text-muted-foreground hover:text-foreground hover:bg-secondary/70"
-      }`}
+    <div className="min-w-0">
+      <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">{label}</dt>
+      <dd className={`mt-0.5 flex flex-wrap gap-1 ${mono ? "font-mono" : ""}`}>
+        {values.map((v) => (
+          <span key={v} className="rounded border border-border bg-secondary/50 px-1.5 py-0.5 text-foreground">
+            {v}
+          </span>
+        ))}
+        {extra && <span className="self-center text-muted-foreground">{extra}</span>}
+      </dd>
+    </div>
+  );
+}
+
+/**
+ * "¿Es un proveedor existente?" — combobox con búsqueda sobre el maestro de
+ * proveedores (GET /suppliers, cacheado en `supplierLookup`). La primera
+ * opción, fija, es "No, es un proveedor nuevo". Elegir un proveedor fija el
+ * prefill de catálogo del Paso 2 sin pasar por el matching por nombre.
+ */
+function ExistingSupplierSelect({
+  value,
+  onChange,
+  disabled,
+  autoDetected = false,
+  compact = false,
+}: {
+  value: SupplierChoice | null;
+  onChange: (next: SupplierChoice) => void;
+  disabled: boolean;
+  /** El valor actual lo puso el pre-scan; se muestra como "detectado". */
+  autoDetected?: boolean;
+  /** Sin tarjeta ni título: sólo el combobox (para embeber en el pre-scan). */
+  compact?: boolean;
+}) {
+  const [suppliers, setSuppliers] = useState<CatalogSupplier[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloadToken, setReloadToken] = useState(0);
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [highlight, setHighlight] = useState(0);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    listSuppliers()
+      .then((list) => {
+        if (cancelled) return;
+        setSuppliers(list);
+        setLoadError(null);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setLoadError(
+          describeRequestFailure(
+            err,
+            "No pudimos cargar la lista de proveedores. Revisa tu conexión.",
+          ),
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [reloadToken]);
+
+  // Cerrar al hacer click fuera.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  const MAX_VISIBLE = 80;
+  const filtered = useMemo(() => {
+    const list = suppliers ?? [];
+    const k = normalizeKey(query);
+    if (!k) return list;
+    const tokens = k.split(" ").filter(Boolean);
+    return list.filter((s) => {
+      const hay = `${normalizeKey(s.nombre)} ${normalizeKey(s.codigo)}`;
+      return tokens.every((t) => hay.includes(t));
+    });
+  }, [suppliers, query]);
+  const visible = filtered.slice(0, MAX_VISIBLE);
+  const hiddenCount = filtered.length - visible.length;
+
+  // Índice 0 = "proveedor nuevo"; 1..n = proveedores visibles.
+  const optionCount = visible.length + 1;
+
+  const openList = () => {
+    if (disabled) return;
+    setOpen(true);
+    setHighlight(0);
+    window.setTimeout(() => inputRef.current?.focus(), 0);
+  };
+
+  const select = (choice: SupplierChoice) => {
+    onChange(choice);
+    setOpen(false);
+    setQuery("");
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape") {
+      setOpen(false);
+      return;
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setHighlight((h) => Math.min(optionCount - 1, h + 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHighlight((h) => Math.max(0, h - 1));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (highlight === 0) select({ existing: false });
+      else {
+        const s = visible[highlight - 1];
+        if (s) select({ existing: true, supplier: s });
+      }
+    }
+  };
+
+  // Mantener la opción resaltada a la vista al navegar con teclado.
+  useEffect(() => {
+    if (!open) return;
+    const el = listRef.current?.querySelector<HTMLElement>(
+      `[data-index="${highlight}"]`,
+    );
+    el?.scrollIntoView({ block: "nearest" });
+  }, [highlight, open]);
+
+  const untouched = value === null;
+  const triggerLabel =
+    value === null
+      ? "Selecciona un proveedor o indica que es nuevo"
+      : value.existing
+        ? (value.supplier.nombre ?? value.supplier.codigo)
+        : "No, es un proveedor nuevo";
+  const TriggerIcon = value?.existing ? UserCheck : UserPlus;
+
+  return (
+    <div
+      className={
+        compact
+          ? ""
+          : `rounded-xl border bg-card/60 transition-colors ${
+              untouched ? "border-amber-500/40" : "border-border"
+            }`
+      }
     >
-      <Icon className="h-3.5 w-3.5" />
-      {label}
-    </button>
+      <div className={compact ? "" : "flex flex-col gap-3 px-4 py-3.5"}>
+        {!compact && (
+          <div className="min-w-0">
+            <p className="text-[12.5px] font-semibold text-foreground">
+              ¿Es un proveedor existente?{" "}
+              <span className="text-rose-300" aria-hidden>
+                *
+              </span>
+            </p>
+            <p className="mt-0.5 text-[11.5px] text-muted-foreground">
+              Elige el proveedor del maestro para pre-llenar actividad, zona y
+              códigos, o indica que es uno nuevo. Campo requerido.
+            </p>
+          </div>
+        )}
+
+        <div ref={rootRef} className="relative">
+          <button
+            type="button"
+            onClick={() => (open ? setOpen(false) : openList())}
+            onKeyDown={(e) => {
+              if (!open && (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ")) {
+                e.preventDefault();
+                openList();
+              }
+            }}
+            disabled={disabled}
+            aria-haspopup="listbox"
+            aria-expanded={open}
+            aria-label="¿Es un proveedor existente?"
+            className={`w-full h-10 pl-3 pr-9 rounded-md border bg-input/70 text-left text-[13px] outline-none transition-colors focus:border-primary/60 focus:ring-2 focus:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50 ${
+              untouched ? "border-amber-500/40 text-muted-foreground" : "border-border text-foreground"
+            }`}
+          >
+            <span className="flex items-center gap-2 min-w-0">
+              {value !== null && (
+                <TriggerIcon className="h-3.5 w-3.5 shrink-0 text-primary" />
+              )}
+              <span className="truncate">{triggerLabel}</span>
+              {value?.existing && (
+                <span className="ml-auto flex shrink-0 items-center gap-1.5">
+                  {autoDetected && (
+                    <span className="rounded-full border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-[10.5px] font-medium text-primary">
+                      detectado
+                    </span>
+                  )}
+                  <span className="rounded-full border border-border bg-secondary/60 px-1.5 py-0.5 font-mono text-[10.5px] text-muted-foreground">
+                    {value.supplier.codigo}
+                  </span>
+                </span>
+              )}
+            </span>
+            <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 opacity-50" />
+          </button>
+
+          {open && (
+            <div
+              className="absolute z-30 mt-1.5 w-full overflow-hidden rounded-lg border border-border bg-card shadow-2xl animate-fade-in"
+              onKeyDown={onKeyDown}
+            >
+              <div className="relative border-b border-border">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/70" />
+                <input
+                  ref={inputRef}
+                  type="text"
+                  value={query}
+                  onChange={(e) => {
+                    setQuery(e.target.value);
+                    setHighlight(e.target.value ? 1 : 0);
+                  }}
+                  placeholder="Buscar por nombre o código…"
+                  aria-label="Buscar proveedor"
+                  className="h-10 w-full bg-transparent pl-9 pr-3 text-[13px] text-foreground placeholder:text-muted-foreground/60 outline-none"
+                />
+              </div>
+
+              <ul
+                ref={listRef}
+                role="listbox"
+                aria-label="Proveedores"
+                className="max-h-72 overflow-y-auto overscroll-contain py-1"
+              >
+                <li
+                  role="option"
+                  aria-selected={value !== null && !value.existing}
+                  data-index={0}
+                  onMouseEnter={() => setHighlight(0)}
+                  onClick={() => select({ existing: false })}
+                  className={`mx-1 flex cursor-pointer items-center gap-2.5 rounded-md px-3 py-2 text-[13px] transition-colors ${
+                    highlight === 0 ? "bg-primary/15 text-foreground" : "text-foreground hover:bg-secondary/60"
+                  }`}
+                >
+                  <UserPlus className="h-3.5 w-3.5 shrink-0 text-primary" />
+                  <span className="font-medium">No, es un proveedor nuevo</span>
+                  {value !== null && !value.existing && (
+                    <Check className="ml-auto h-3.5 w-3.5 text-primary" />
+                  )}
+                </li>
+
+                <li className="mx-3 my-1 border-t border-border/70" aria-hidden />
+
+                {suppliers === null && !loadError && (
+                  <li className="flex items-center gap-2 px-4 py-3 text-[12.5px] text-muted-foreground">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    Cargando proveedores…
+                  </li>
+                )}
+                {loadError && (
+                  <li className="px-4 py-3 text-[12.5px]">
+                    <p className="text-destructive">{loadError}</p>
+                    <button
+                      type="button"
+                      onClick={() => setReloadToken((t) => t + 1)}
+                      className="mt-1.5 text-primary hover:underline"
+                    >
+                      Reintentar
+                    </button>
+                  </li>
+                )}
+                {suppliers !== null && visible.length === 0 && (
+                  <li className="px-4 py-3 text-[12.5px] text-muted-foreground">
+                    {suppliers.length === 0
+                      ? "El maestro de proveedores está vacío."
+                      : "Ningún proveedor coincide con la búsqueda."}
+                  </li>
+                )}
+                {visible.map((s, i) => {
+                  const idx = i + 1;
+                  const selected = value?.existing === true && value.supplier.id === s.id;
+                  return (
+                    <li
+                      key={s.id}
+                      role="option"
+                      aria-selected={selected}
+                      data-index={idx}
+                      onMouseEnter={() => setHighlight(idx)}
+                      onClick={() => select({ existing: true, supplier: s })}
+                      className={`mx-1 flex cursor-pointer items-center gap-2.5 rounded-md px-3 py-2 text-[13px] transition-colors ${
+                        highlight === idx ? "bg-primary/15" : "hover:bg-secondary/60"
+                      }`}
+                    >
+                      <UserCheck className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-foreground">
+                          {s.nombre ?? s.codigo}
+                        </span>
+                        <span className="block truncate text-[11px] text-muted-foreground">
+                          {[s.actividad, s.zona].filter(Boolean).join(" · ") || "Sin clasificación"}
+                          {" · "}
+                          {s.serviceCount} servicio{s.serviceCount === 1 ? "" : "s"}
+                        </span>
+                      </span>
+                      <span className="shrink-0 rounded-full border border-border bg-secondary/60 px-1.5 py-0.5 font-mono text-[10.5px] text-muted-foreground">
+                        {s.codigo}
+                      </span>
+                      {selected && <Check className="h-3.5 w-3.5 shrink-0 text-primary" />}
+                    </li>
+                  );
+                })}
+                {hiddenCount > 0 && (
+                  <li className="px-4 py-2 text-[11.5px] text-muted-foreground">
+                    +{hiddenCount} más — sigue escribiendo para acotar.
+                  </li>
+                )}
+              </ul>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -1675,9 +2613,13 @@ function CommentsField({
           </p>
         </div>
         <p className="mt-0.5 text-[11.5px] text-muted-foreground">
-          A veces el correo trae datos que no están en los documentos
-          (cuenta bancaria, referencia, instrucciones). Pégalos aquí y la IA
-          los usará como contexto adicional.
+          A veces el correo trae datos o correcciones que no están en los
+          documentos («los precios sí incluyen el 13 % de IVA, el PDF está
+          mal»). Lo que escribas aquí{" "}
+          <span className="font-semibold text-foreground">
+            tiene prioridad sobre el documento
+          </span>{" "}
+          y queda marcado como instrucción del usuario en el resultado.
         </p>
       </div>
       <div className="px-4 py-3 space-y-1.5">
@@ -2435,6 +3377,7 @@ function TableChat({
 
 function ReviewStep({
   result,
+  preScanResult,
   catalogPrefill,
   briefMetas,
   comments,
@@ -2443,6 +3386,8 @@ function ReviewStep({
   onGridReady,
 }: {
   result: ExtractContractResponse;
+  /** Lectura sin IA del documento (Paso 1) para contrastar la tabla. */
+  preScanResult: PreScanResult | null;
   catalogPrefill: CatalogPrefill | null;
   briefMetas: AnalyzeBriefMeta[];
   /** Contexto libre que el operador escribió en el Paso 1. Alimenta el chat. */
@@ -2668,6 +3613,7 @@ function ReviewStep({
             input_tokens: pipelineUsage.input_tokens,
             output_tokens: pipelineUsage.output_tokens,
             cost_usd: pipelineUsage.cost_usd,
+            extraction_id: meta.extraction_id,
           })
           .catch((err) => console.warn("saveRun failed (non-blocking):", err));
       }
@@ -2798,8 +3744,28 @@ function ReviewStep({
   const completionPct =
     totalRowCells === 0 ? 0 : Math.round((filledRowCells / totalRowCells) * 100);
 
+  const extractionChecks = useMemo(
+    () => buildExtractionChecks(rows, preScanResult),
+    [rows, preScanResult],
+  );
+
   return (
     <div className="px-5 sm:px-8 py-7 space-y-5">
+      {extractionChecks.length > 0 && (
+        <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 px-4 py-3 space-y-1.5">
+          <p className="flex items-center gap-1.5 text-[12.5px] font-semibold text-amber-200">
+            <ScanSearch className="h-4 w-4 text-amber-400" />
+            Verificación automática contra el documento (sin IA)
+          </p>
+          {extractionChecks.map((c) => (
+            <p key={c} className="flex items-start gap-2 text-[12px] text-amber-100/90">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />
+              <span>{c}</span>
+            </p>
+          ))}
+        </div>
+      )}
+
       {/* Summary banner */}
       <div className="rounded-xl border border-primary/30 bg-gradient-to-br from-primary/12 via-primary/6 to-transparent px-4 py-4">
         <div className="flex items-start gap-3">
@@ -3461,6 +4427,7 @@ function DownloadStep({
               input_tokens: pipelineUsage.input_tokens,
               output_tokens: pipelineUsage.output_tokens,
               cost_usd: pipelineUsage.cost_usd,
+              extraction_id: meta.extraction_id,
             })
             .catch((err) => {
               // Logueamos a console para que sea visible en dev / Sentry,

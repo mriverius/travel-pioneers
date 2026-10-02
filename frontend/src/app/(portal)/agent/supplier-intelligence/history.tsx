@@ -14,7 +14,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   ALL_COLUMNS,
@@ -27,6 +27,7 @@ import {
   api,
   ApiError,
   type ContractRun,
+  type ContractRangeKey,
   type ContractFileKind,
   type ExtractedContractRow,
   type ExtractedSharedFields,
@@ -100,30 +101,48 @@ function toHistoryEntry(run: ContractRun): HistoryEntry {
   };
 }
 
+/** Runs fetched per request. The backend caps `limit` at 200. */
+const PAGE_SIZE = 100;
+
 /**
- * Fetch + cache de los runs persistidos. Carga al montar y refresca cuando
- * la pestaña vuelve a foreground (escenario común: el usuario procesa un
- * contrato en otra ruta y luego vuelve a Historial). Estados:
+ * Fetch + cache de los runs persistidos para un rango de fecha. El filtro
+ * de fecha se resuelve en el servidor (`?range=&tz=`) con exactamente los
+ * mismos cortes que usa la tarjeta "Contratos procesados" del dashboard, y
+ * el backend devuelve `total` — así el número del encabezado de Historial y
+ * el del dashboard salen de la misma query y no pueden divergir.
+ *
+ * Carga al montar / al cambiar de rango y refresca cuando la pestaña vuelve
+ * a foreground (escenario común: el usuario procesa un contrato en otra ruta
+ * y luego vuelve a Historial). `loadMore` pagina con offset. Estados:
  *   - loading inicial: `entries === null`, `error === null`
  *   - error:           `entries === null`, `error !== null`
  *   - listo:           `entries === HistoryEntry[]`, `error === null`
  */
-function useContractRuns(): {
+function useContractRuns(range: ContractRangeKey): {
   entries: HistoryEntry[] | null;
+  total: number;
   error: string | null;
+  loadingMore: boolean;
+  loadMore: () => void;
   reload: () => void;
 } {
   const [entries, setEntries] = useState<HistoryEntry[] | null>(null);
+  const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const { runs } = await api.supplierIntelligence.listRuns();
+        const { runs, total: t } = await api.supplierIntelligence.listRuns({
+          range,
+          limit: PAGE_SIZE,
+        });
         if (cancelled) return;
         setEntries(runs.map(toHistoryEntry));
+        setTotal(t);
         setError(null);
       } catch (err) {
         if (cancelled) return;
@@ -145,9 +164,44 @@ function useContractRuns(): {
       cancelled = true;
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [reloadToken]);
+  }, [range, reloadToken]);
 
-  return { entries, error, reload: () => setReloadToken((t) => t + 1) };
+  const loadMore = useCallback(async () => {
+    if (loadingMore || entries === null || entries.length >= total) return;
+    setLoadingMore(true);
+    try {
+      const { runs, total: t } = await api.supplierIntelligence.listRuns({
+        range,
+        limit: PAGE_SIZE,
+        offset: entries.length,
+      });
+      setEntries((prev) => {
+        // Dedupe by id: a run saved between the two requests shifts the
+        // offset by one and would otherwise appear twice.
+        const seen = new Set((prev ?? []).map((e) => e.id));
+        const fresh = runs.map(toHistoryEntry).filter((e) => !seen.has(e.id));
+        return [...(prev ?? []), ...fresh];
+      });
+      setTotal(t);
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? err.message
+          : "No pudimos cargar más contratos. Intenta de nuevo en un momento.",
+      );
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [loadingMore, entries, total, range]);
+
+  return {
+    entries,
+    total,
+    error,
+    loadingMore,
+    loadMore: () => void loadMore(),
+    reload: () => setReloadToken((t) => t + 1),
+  };
 }
 
 /* ----------------------------- Format helpers ----------------------------- */
@@ -250,7 +304,13 @@ const FILE_KIND_TONES: Record<
 /* --------------------------------- Filters -------------------------------- */
 
 type FileFilter = "all" | FileKind;
-type DateFilter = "all" | "today" | "week" | "month";
+/**
+ * Subset of the backend's range keys exposed in the toolbar. Same labels
+ * and semantics as the dashboard selector ("Hoy" = calendar day in the
+ * browser's timezone; 7 / 30 días = rolling windows) because both are
+ * resolved by the same server function.
+ */
+type DateFilter = Extract<ContractRangeKey, "all" | "today" | "week" | "month">;
 
 const FILE_FILTERS: { id: FileFilter; label: string }[] = [
   { id: "all", label: "Todos" },
@@ -267,18 +327,6 @@ const DATE_FILTERS: { id: DateFilter; label: string }[] = [
   { id: "month", label: "30 días" },
 ];
 
-function dateMatches(entry: HistoryEntry, filter: DateFilter): boolean {
-  if (filter === "all") return true;
-  const processed = new Date(entry.processedAt);
-  const now = new Date();
-  if (filter === "today") {
-    return processed.toDateString() === now.toDateString();
-  }
-  const days = filter === "week" ? 7 : 30;
-  const cutoff = now.getTime() - days * 24 * 60 * 60 * 1000;
-  return processed.getTime() >= cutoff;
-}
-
 /* -------------------------------- Components ------------------------------ */
 
 /**
@@ -287,12 +335,17 @@ function dateMatches(entry: HistoryEntry, filter: DateFilter): boolean {
  * opens the read-only 52-field modal.
  */
 export function HistoryTable() {
-  const { entries, error: loadError } = useContractRuns();
-  const [active, setActive] = useState<HistoryEntry | null>(null);
-
   const [search, setSearch] = useState("");
   const [fileFilter, setFileFilter] = useState<FileFilter>("all");
   const [dateFilter, setDateFilter] = useState<DateFilter>("all");
+  const {
+    entries,
+    total,
+    error: loadError,
+    loadingMore,
+    loadMore,
+  } = useContractRuns(dateFilter);
+  const [active, setActive] = useState<HistoryEntry | null>(null);
 
   const normSearch = search.trim().toLowerCase();
   // Trabajamos con `entries ?? []` para que el filtrado/sort no estalle
@@ -303,7 +356,6 @@ export function HistoryTable() {
     return safeEntries
       .filter((e) => {
         if (fileFilter !== "all" && e.fileKind !== fileFilter) return false;
-        if (!dateMatches(e, dateFilter)) return false;
         if (normSearch) {
           const haystack = [
             e.supplierName ?? "",
@@ -322,7 +374,13 @@ export function HistoryTable() {
           new Date(b.processedAt).getTime() -
           new Date(a.processedAt).getTime(),
       );
-  }, [safeEntries, normSearch, fileFilter, dateFilter]);
+  }, [safeEntries, normSearch, fileFilter]);
+
+  // Fecha se filtra en el servidor; tipo y búsqueda, en el cliente sobre lo
+  // ya cargado. `total` viene del servidor y es el mismo número que la
+  // tarjeta del dashboard para ese rango.
+  const localFiltersActive = fileFilter !== "all" || normSearch !== "";
+  const hasMore = entries !== null && entries.length < total;
 
   const filtersActive =
     fileFilter !== "all" || dateFilter !== "all" || normSearch !== "";
@@ -387,9 +445,11 @@ export function HistoryTable() {
               ? "Cargando…"
               : loadError
                 ? "Error al cargar"
-                : filtered.length === safeEntries.length
-                  ? `${safeEntries.length} contrato${safeEntries.length === 1 ? "" : "s"}`
-                  : `${filtered.length} de ${safeEntries.length} contratos`}
+                : localFiltersActive
+                  ? `${filtered.length} de ${safeEntries.length} cargados${hasMore ? ` (${total} en total)` : ""}`
+                  : hasMore
+                    ? `Mostrando ${safeEntries.length} de ${total} contratos`
+                    : `${total} contrato${total === 1 ? "" : "s"}`}
           </p>
           <p className="text-[11.5px] text-muted-foreground/80">
             Ordenado por más reciente
@@ -422,7 +482,9 @@ export function HistoryTable() {
           <div className="px-5 sm:px-8 py-14 text-center">
             <p className="text-[14px] text-muted-foreground">
               {safeEntries.length === 0
-                ? "Aún no hay contratos procesados. Procesa uno desde el agente para verlo aquí."
+                ? dateFilter === "all"
+                  ? "Aún no hay contratos procesados. Procesa uno desde el agente para verlo aquí."
+                  : "No hay contratos procesados en este rango de fechas."
                 : "Ningún contrato coincide con los filtros actuales."}
             </p>
             {filtersActive && (
@@ -457,6 +519,26 @@ export function HistoryTable() {
                 ))}
               </tbody>
             </table>
+            {hasMore && (
+              <div className="px-5 sm:px-6 py-3 border-t border-border/60 bg-secondary/10 flex items-center justify-between gap-3">
+                <p className="text-[12px] text-muted-foreground">
+                  {localFiltersActive
+                    ? "La búsqueda y el tipo solo aplican a los contratos cargados."
+                    : `${total - safeEntries.length} contrato${total - safeEntries.length === 1 ? "" : "s"} más en este rango.`}
+                </p>
+                <button
+                  type="button"
+                  onClick={loadMore}
+                  disabled={loadingMore}
+                  className="inline-flex items-center justify-center gap-1.5 h-9 px-3.5 rounded-md border border-border bg-secondary/40 text-[12.5px] font-medium text-foreground hover:bg-secondary transition-colors disabled:opacity-60 shrink-0"
+                >
+                  {loadingMore && (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden />
+                  )}
+                  Cargar más
+                </button>
+              </div>
+            )}
           </div>
         )}
       </section>

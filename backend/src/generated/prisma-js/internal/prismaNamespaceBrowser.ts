@@ -52,7 +52,9 @@ export const AnyNull = runtime.AnyNull
 
 export const ModelName = {
   User: 'User',
-  ContractRun: 'ContractRun'
+  ContractRun: 'ContractRun',
+  Supplier: 'Supplier',
+  SupplierService: 'SupplierService'
 } as const
 
 export type ModelName = (typeof ModelName)[keyof typeof ModelName]
@@ -90,6 +92,7 @@ export const ContractRunScalarFieldEnum = {
   id: 'id',
   processedById: 'processedById',
   processedAt: 'processedAt',
+  extractionId: 'extractionId',
   filename: 'filename',
   fileKind: 'fileKind',
   fileSize: 'fileSize',
@@ -104,6 +107,32 @@ export const ContractRunScalarFieldEnum = {
 } as const
 
 export type ContractRunScalarFieldEnum = (typeof ContractRunScalarFieldEnum)[keyof typeof ContractRunScalarFieldEnum]
+
+
+export const SupplierScalarFieldEnum = {
+  id: 'id',
+  codigo: 'codigo',
+  nombre: 'nombre',
+  actividad: 'actividad',
+  zona: 'zona',
+  createdAt: 'createdAt',
+  updatedAt: 'updatedAt'
+} as const
+
+export type SupplierScalarFieldEnum = (typeof SupplierScalarFieldEnum)[keyof typeof SupplierScalarFieldEnum]
+
+
+export const SupplierServiceScalarFieldEnum = {
+  id: 'id',
+  supplierId: 'supplierId',
+  codigo: 'codigo',
+  descripcion: 'descripcion',
+  actividad: 'actividad',
+  zona: 'zona',
+  createdAt: 'createdAt'
+} as const
+
+export type SupplierServiceScalarFieldEnum = (typeof SupplierServiceScalarFieldEnum)[keyof typeof SupplierServiceScalarFieldEnum]
 
 
 export const SortOrder = {
