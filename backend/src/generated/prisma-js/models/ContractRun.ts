@@ -96,6 +96,7 @@ export type ContractRunCountAggregateOutputType = {
   inputTokens: number
   outputTokens: number
   costUsd: number
+  feedback: number
   _all: number
 }
 
@@ -158,6 +159,7 @@ export type ContractRunCountAggregateInputType = {
   inputTokens?: true
   outputTokens?: true
   costUsd?: true
+  feedback?: true
   _all?: true
 }
 
@@ -263,6 +265,7 @@ export type ContractRunGroupByOutputType = {
   inputTokens: number | null
   outputTokens: number | null
   costUsd: number | null
+  feedback: runtime.JsonValue | null
   _count: ContractRunCountAggregateOutputType | null
   _avg: ContractRunAvgAggregateOutputType | null
   _sum: ContractRunSumAggregateOutputType | null
@@ -304,6 +307,7 @@ export type ContractRunWhereInput = {
   inputTokens?: Prisma.IntNullableFilter<"ContractRun"> | number | null
   outputTokens?: Prisma.IntNullableFilter<"ContractRun"> | number | null
   costUsd?: Prisma.FloatNullableFilter<"ContractRun"> | number | null
+  feedback?: Prisma.JsonNullableFilter<"ContractRun">
   processedBy?: Prisma.XOR<Prisma.UserNullableScalarRelationFilter, Prisma.UserWhereInput> | null
 }
 
@@ -323,6 +327,7 @@ export type ContractRunOrderByWithRelationInput = {
   inputTokens?: Prisma.SortOrderInput | Prisma.SortOrder
   outputTokens?: Prisma.SortOrderInput | Prisma.SortOrder
   costUsd?: Prisma.SortOrderInput | Prisma.SortOrder
+  feedback?: Prisma.SortOrderInput | Prisma.SortOrder
   processedBy?: Prisma.UserOrderByWithRelationInput
 }
 
@@ -345,6 +350,7 @@ export type ContractRunWhereUniqueInput = Prisma.AtLeast<{
   inputTokens?: Prisma.IntNullableFilter<"ContractRun"> | number | null
   outputTokens?: Prisma.IntNullableFilter<"ContractRun"> | number | null
   costUsd?: Prisma.FloatNullableFilter<"ContractRun"> | number | null
+  feedback?: Prisma.JsonNullableFilter<"ContractRun">
   processedBy?: Prisma.XOR<Prisma.UserNullableScalarRelationFilter, Prisma.UserWhereInput> | null
 }, "id" | "extractionId">
 
@@ -364,6 +370,7 @@ export type ContractRunOrderByWithAggregationInput = {
   inputTokens?: Prisma.SortOrderInput | Prisma.SortOrder
   outputTokens?: Prisma.SortOrderInput | Prisma.SortOrder
   costUsd?: Prisma.SortOrderInput | Prisma.SortOrder
+  feedback?: Prisma.SortOrderInput | Prisma.SortOrder
   _count?: Prisma.ContractRunCountOrderByAggregateInput
   _avg?: Prisma.ContractRunAvgOrderByAggregateInput
   _max?: Prisma.ContractRunMaxOrderByAggregateInput
@@ -390,6 +397,7 @@ export type ContractRunScalarWhereWithAggregatesInput = {
   inputTokens?: Prisma.IntNullableWithAggregatesFilter<"ContractRun"> | number | null
   outputTokens?: Prisma.IntNullableWithAggregatesFilter<"ContractRun"> | number | null
   costUsd?: Prisma.FloatNullableWithAggregatesFilter<"ContractRun"> | number | null
+  feedback?: Prisma.JsonNullableWithAggregatesFilter<"ContractRun">
 }
 
 export type ContractRunCreateInput = {
@@ -407,6 +415,7 @@ export type ContractRunCreateInput = {
   inputTokens?: number | null
   outputTokens?: number | null
   costUsd?: number | null
+  feedback?: Prisma.NullableJsonNullValueInput | runtime.InputJsonValue
   processedBy?: Prisma.UserCreateNestedOneWithoutContractRunsInput
 }
 
@@ -426,6 +435,7 @@ export type ContractRunUncheckedCreateInput = {
   inputTokens?: number | null
   outputTokens?: number | null
   costUsd?: number | null
+  feedback?: Prisma.NullableJsonNullValueInput | runtime.InputJsonValue
 }
 
 export type ContractRunUpdateInput = {
@@ -443,6 +453,7 @@ export type ContractRunUpdateInput = {
   inputTokens?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   outputTokens?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   costUsd?: Prisma.NullableFloatFieldUpdateOperationsInput | number | null
+  feedback?: Prisma.NullableJsonNullValueInput | runtime.InputJsonValue
   processedBy?: Prisma.UserUpdateOneWithoutContractRunsNestedInput
 }
 
@@ -462,6 +473,7 @@ export type ContractRunUncheckedUpdateInput = {
   inputTokens?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   outputTokens?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   costUsd?: Prisma.NullableFloatFieldUpdateOperationsInput | number | null
+  feedback?: Prisma.NullableJsonNullValueInput | runtime.InputJsonValue
 }
 
 export type ContractRunCreateManyInput = {
@@ -480,6 +492,7 @@ export type ContractRunCreateManyInput = {
   inputTokens?: number | null
   outputTokens?: number | null
   costUsd?: number | null
+  feedback?: Prisma.NullableJsonNullValueInput | runtime.InputJsonValue
 }
 
 export type ContractRunUpdateManyMutationInput = {
@@ -497,6 +510,7 @@ export type ContractRunUpdateManyMutationInput = {
   inputTokens?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   outputTokens?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   costUsd?: Prisma.NullableFloatFieldUpdateOperationsInput | number | null
+  feedback?: Prisma.NullableJsonNullValueInput | runtime.InputJsonValue
 }
 
 export type ContractRunUncheckedUpdateManyInput = {
@@ -515,6 +529,7 @@ export type ContractRunUncheckedUpdateManyInput = {
   inputTokens?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   outputTokens?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   costUsd?: Prisma.NullableFloatFieldUpdateOperationsInput | number | null
+  feedback?: Prisma.NullableJsonNullValueInput | runtime.InputJsonValue
 }
 
 export type ContractRunListRelationFilter = {
@@ -543,6 +558,7 @@ export type ContractRunCountOrderByAggregateInput = {
   inputTokens?: Prisma.SortOrder
   outputTokens?: Prisma.SortOrder
   costUsd?: Prisma.SortOrder
+  feedback?: Prisma.SortOrder
 }
 
 export type ContractRunAvgOrderByAggregateInput = {
@@ -672,6 +688,7 @@ export type ContractRunCreateWithoutProcessedByInput = {
   inputTokens?: number | null
   outputTokens?: number | null
   costUsd?: number | null
+  feedback?: Prisma.NullableJsonNullValueInput | runtime.InputJsonValue
 }
 
 export type ContractRunUncheckedCreateWithoutProcessedByInput = {
@@ -689,6 +706,7 @@ export type ContractRunUncheckedCreateWithoutProcessedByInput = {
   inputTokens?: number | null
   outputTokens?: number | null
   costUsd?: number | null
+  feedback?: Prisma.NullableJsonNullValueInput | runtime.InputJsonValue
 }
 
 export type ContractRunCreateOrConnectWithoutProcessedByInput = {
@@ -736,6 +754,7 @@ export type ContractRunScalarWhereInput = {
   inputTokens?: Prisma.IntNullableFilter<"ContractRun"> | number | null
   outputTokens?: Prisma.IntNullableFilter<"ContractRun"> | number | null
   costUsd?: Prisma.FloatNullableFilter<"ContractRun"> | number | null
+  feedback?: Prisma.JsonNullableFilter<"ContractRun">
 }
 
 export type ContractRunCreateManyProcessedByInput = {
@@ -753,6 +772,7 @@ export type ContractRunCreateManyProcessedByInput = {
   inputTokens?: number | null
   outputTokens?: number | null
   costUsd?: number | null
+  feedback?: Prisma.NullableJsonNullValueInput | runtime.InputJsonValue
 }
 
 export type ContractRunUpdateWithoutProcessedByInput = {
@@ -770,6 +790,7 @@ export type ContractRunUpdateWithoutProcessedByInput = {
   inputTokens?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   outputTokens?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   costUsd?: Prisma.NullableFloatFieldUpdateOperationsInput | number | null
+  feedback?: Prisma.NullableJsonNullValueInput | runtime.InputJsonValue
 }
 
 export type ContractRunUncheckedUpdateWithoutProcessedByInput = {
@@ -787,6 +808,7 @@ export type ContractRunUncheckedUpdateWithoutProcessedByInput = {
   inputTokens?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   outputTokens?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   costUsd?: Prisma.NullableFloatFieldUpdateOperationsInput | number | null
+  feedback?: Prisma.NullableJsonNullValueInput | runtime.InputJsonValue
 }
 
 export type ContractRunUncheckedUpdateManyWithoutProcessedByInput = {
@@ -804,6 +826,7 @@ export type ContractRunUncheckedUpdateManyWithoutProcessedByInput = {
   inputTokens?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   outputTokens?: Prisma.NullableIntFieldUpdateOperationsInput | number | null
   costUsd?: Prisma.NullableFloatFieldUpdateOperationsInput | number | null
+  feedback?: Prisma.NullableJsonNullValueInput | runtime.InputJsonValue
 }
 
 
@@ -824,6 +847,7 @@ export type ContractRunSelect<ExtArgs extends runtime.Types.Extensions.InternalA
   inputTokens?: boolean
   outputTokens?: boolean
   costUsd?: boolean
+  feedback?: boolean
   processedBy?: boolean | Prisma.ContractRun$processedByArgs<ExtArgs>
 }, ExtArgs["result"]["contractRun"]>
 
@@ -843,6 +867,7 @@ export type ContractRunSelectCreateManyAndReturn<ExtArgs extends runtime.Types.E
   inputTokens?: boolean
   outputTokens?: boolean
   costUsd?: boolean
+  feedback?: boolean
   processedBy?: boolean | Prisma.ContractRun$processedByArgs<ExtArgs>
 }, ExtArgs["result"]["contractRun"]>
 
@@ -862,6 +887,7 @@ export type ContractRunSelectUpdateManyAndReturn<ExtArgs extends runtime.Types.E
   inputTokens?: boolean
   outputTokens?: boolean
   costUsd?: boolean
+  feedback?: boolean
   processedBy?: boolean | Prisma.ContractRun$processedByArgs<ExtArgs>
 }, ExtArgs["result"]["contractRun"]>
 
@@ -881,9 +907,10 @@ export type ContractRunSelectScalar = {
   inputTokens?: boolean
   outputTokens?: boolean
   costUsd?: boolean
+  feedback?: boolean
 }
 
-export type ContractRunOmit<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetOmit<"id" | "processedById" | "processedAt" | "extractionId" | "filename" | "fileKind" | "fileSize" | "sharedFields" | "rows" | "catalogPrefill" | "manualFields" | "aiModel" | "inputTokens" | "outputTokens" | "costUsd", ExtArgs["result"]["contractRun"]>
+export type ContractRunOmit<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetOmit<"id" | "processedById" | "processedAt" | "extractionId" | "filename" | "fileKind" | "fileSize" | "sharedFields" | "rows" | "catalogPrefill" | "manualFields" | "aiModel" | "inputTokens" | "outputTokens" | "costUsd" | "feedback", ExtArgs["result"]["contractRun"]>
 export type ContractRunInclude<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
   processedBy?: boolean | Prisma.ContractRun$processedByArgs<ExtArgs>
 }
@@ -971,6 +998,16 @@ export type $ContractRunPayload<ExtArgs extends runtime.Types.Extensions.Interna
      *    * suficiente para nuestro rango de costos (centavos a ~$10/run).
      */
     costUsd: number | null
+    /**
+     * *
+     *    * Señal de aprendizaje del run (`RunFeedback` en contractsController):
+     *    * qué detectó el pre-scan vs. qué eligió el usuario, qué corrigió el
+     *    * revisor humano sobre lo que propuso la IA (Paso 2 brief, Paso 3 filas),
+     *    * qué hallazgos del QA aparecieron y cómo se respondieron las preguntas.
+     *    * Es lo que alimenta el panel de calidad y las sugerencias de reglas.
+     *    * Nullable: runs anteriores y clientes viejos no lo envían.
+     */
+    feedback: runtime.JsonValue | null
   }, ExtArgs["result"]["contractRun"]>
   composites: {}
 }
@@ -1410,6 +1447,7 @@ export interface ContractRunFieldRefs {
   readonly inputTokens: Prisma.FieldRef<"ContractRun", 'Int'>
   readonly outputTokens: Prisma.FieldRef<"ContractRun", 'Int'>
   readonly costUsd: Prisma.FieldRef<"ContractRun", 'Float'>
+  readonly feedback: Prisma.FieldRef<"ContractRun", 'Json'>
 }
     
 

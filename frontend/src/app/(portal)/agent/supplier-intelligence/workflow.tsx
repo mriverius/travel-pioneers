@@ -17,8 +17,12 @@ import {
   Sparkles,
   Trash2,
   ChevronDown,
+  History,
+  HelpCircle,
+  Info,
   Search,
   ScanSearch,
+  ShieldCheck,
   UserCheck,
   UserPlus,
   Download,
@@ -58,8 +62,23 @@ import {
   type GenerateXlsxCatalogPrefill,
   type GenerateXlsxManualFields,
   type ManualBankPrefill,
+  type RunCorrection,
+  type RunFeedback,
+  type SupplierMemory,
   type TableChatMessage,
 } from "@/lib/api";
+import { useAuth } from "@/lib/useAuth";
+import { SaveEvalCaseCard } from "./saveEvalCase";
+import {
+  qaBrief,
+  qaRows,
+  worstSeverity,
+  type BriefQaResult,
+  type QaFinding,
+  type QaOption,
+  type QaQuestion,
+  type QaSeverity,
+} from "@/lib/contractQa";
 import { ConfigVariablesStep } from "./configStep";
 import {
   findServiceForSupplierWithAI,
@@ -164,37 +183,12 @@ function candidateToSupplier(c: PreScanResult["supplier"]["candidates"][number])
  *  - Devuelve avisos cuando ambos tienen valor y discrepan: es justo el
  *    tipo de error que envenena todas las filas (IVA incluido o no, moneda).
  */
-/**
- * Temas sobre los que el usuario escribió instrucciones en "Comentarios".
- * Precedencia del sistema: instrucción humana > texto literal del documento
- * > inferencias. Cuando hay un comentario sobre un tema, una discrepancia
- * IA-vs-documento en ese tema NO es un error: es el comentario mandando, y
- * así se le dice al revisor.
- */
-function commentTopics(comments: string): Set<"tax" | "commission" | "currency" | "validity" | "seasons"> {
-  const c = comments.toLowerCase();
-  const out = new Set<"tax" | "commission" | "currency" | "validity" | "seasons">();
-  if (/\b(iva|impuesto|tax|vat)\b/.test(c)) out.add("tax");
-  if (/\b(comisi[oó]n|commission|neto|net rate|rack)\b/.test(c)) out.add("commission");
-  if (/\b(moneda|currency|d[oó]lares?|colones|usd|crc|\$|₡)/.test(c)) out.add("currency");
-  if (/\b(vigencia|validez|v[aá]lido|valid|vence|expira|desde|hasta|from|until)\b/.test(c)) out.add("validity");
-  if (/\b(temporada|season)\b/.test(c)) out.add("seasons");
-  return out;
-}
-
 function reconcileBriefWithPreScan(
   brief: ContractConfigVariables,
   scan: PreScanResult,
-  comments = "",
-): { brief: ContractConfigVariables; advisories: string[] } {
+): ContractConfigVariables {
   const inf = scan.inferences;
   const facts = scan.facts;
-  const advisories: string[] = [];
-  const overridden = commentTopics(comments);
-  const overrideNote = (topic: Parameters<typeof overridden.has>[0], text: string) =>
-    overridden.has(topic)
-      ? `${text} Tienes un comentario sobre esto: el comentario tiene prioridad sobre el documento.`
-      : text;
   const sf = { ...brief.shared_fields };
   const out: ContractConfigVariables = { ...brief, shared_fields: sf };
 
@@ -220,49 +214,26 @@ function reconcileBriefWithPreScan(
   if (inf.commission && out.commission_default_pct === null) {
     out.commission_default_pct = inf.commission.net ? 0 : inf.commission.percent;
   }
-
-  // Contrastes (sólo cuando ambos lados tienen valor).
-  if (inf.taxes && inf.taxes.included !== null && brief.prices_include_tax !== null && inf.taxes.included !== brief.prices_include_tax) {
-    advisories.push(
-      overrideNote(
-        "tax",
-        `IVA: la IA marcó "${brief.prices_include_tax ? "precios con impuesto incluido" : "precios sin impuesto"}" pero el documento dice «${inf.taxes.snippet.slice(0, 90)}…».${overridden.has("tax") ? "" : " Revisa antes de confirmar."}`,
-      ),
-    );
-  }
-  if (inf.taxes?.percent !== null && inf.taxes?.percent !== undefined && brief.tax_rate_pct !== null && inf.taxes.percent !== brief.tax_rate_pct) {
-    advisories.push(overrideNote("tax", `IVA: la IA puso ${brief.tax_rate_pct}% y el documento menciona ${inf.taxes.percent}%.`));
-  }
-  if (inf.commission && brief.commission_default_pct !== null) {
-    if (inf.commission.net && brief.commission_default_pct > 0) {
-      advisories.push(overrideNote("commission", `Comisión: la IA puso ${brief.commission_default_pct}% pero el documento dice tarifas netas / no comisionables.`));
-    } else if (inf.commission.percent !== null && inf.commission.percent !== brief.commission_default_pct) {
-      advisories.push(overrideNote("commission", `Comisión: la IA puso ${brief.commission_default_pct}% y el documento menciona ${inf.commission.percent}%.`));
-    }
-  }
-  if (brief.currency && facts.currencies.length > 0 && !facts.currencies.some((c) => brief.currency!.toUpperCase().includes(c))) {
-    advisories.push(overrideNote("currency", `Moneda: la IA puso ${brief.currency} pero el documento menciona ${facts.currencies.join(", ")}.`));
-  }
-  if (inf.validity?.source === "explicit" && brief.shared_fields.contract_starts && brief.shared_fields.contract_starts !== inf.validity.start) {
-    advisories.push(overrideNote("validity", `Vigencia: la IA puso inicio ${brief.shared_fields.contract_starts}; el documento indica ${inf.validity.start} → ${inf.validity.end}.`));
-  }
-  if (inf.seasons.length > 0 && brief.seasons_detail.length > 0 && inf.seasons.length !== brief.seasons_detail.length) {
-    advisories.push(overrideNote("seasons", `Temporadas: la IA identificó ${brief.seasons_detail.length} y el documento parece tener ${inf.seasons.length} (${inf.seasons.map((x) => x.name ?? "sin nombre").join(", ")}).`));
-  }
-
-  return { brief: out, advisories };
+  return out;
 }
 
 /**
  * JSON compacto de hechos verificados para el prompt (ver backend
  * `buildContextBlock`). Sólo lo que ayuda al modelo a anclar o validar; nada
  * de snippets largos ni listas gigantes (tope ~24 KB en el backend).
+ *
+ *  - `documents[].pageMap`: lectura dirigida — en qué página están tarifas,
+ *    temporadas, políticas y bancos, para que el modelo no "lea" 25 páginas
+ *    de cláusulas legales buscando una tabla.
+ *  - `previousConfirmed`: memoria del proveedor (lo que un revisor aprobó la
+ *    última vez). Prioridad media: el documento actual manda.
  */
 function buildPreScanHints(
   scan: PreScanResult | null,
   supplier: CatalogSupplier | null,
+  memory: SupplierMemory | null,
 ): Record<string, unknown> | null {
-  if (!scan && !supplier) return null;
+  if (!scan && !supplier && !memory) return null;
   const out: Record<string, unknown> = {};
   if (supplier) {
     out.supplier = {
@@ -281,7 +252,15 @@ function buildPreScanHints(
   if (scan && scan.documents.some((d) => d.textAvailable)) {
     const f = scan.facts;
     const i = scan.inferences;
-    out.documents = scan.documents.map((d) => ({ filename: d.filename, role: d.role, contributes: d.contributes }));
+    out.documents = scan.documents.map((d) => ({
+      filename: d.filename,
+      pages: d.pages?.total ?? null,
+      contributes: d.contributes,
+      pageMap: (d.pageMap ?? [])
+        .filter((pg) => pg.prices > 0 || pg.topics.length > 0)
+        .slice(0, 80)
+        .map((pg) => ({ page: pg.page, prices: pg.prices, topics: pg.topics })),
+    }));
     out.identity = {
       legalName: i.legalName,
       cedulas: f.cedulas,
@@ -311,72 +290,406 @@ function buildPreScanHints(
     out.estimatedProducts = i.estimatedProducts;
     out.productHints = i.productHints;
   }
+  if (memory) {
+    out.previousConfirmed = {
+      processedAt: memory.processedAt,
+      filename: memory.filename,
+      shared: memory.shared,
+      seasons: memory.seasons,
+      occupancies: memory.occupancies,
+      codigosServicio: memory.codigosServicio,
+      products: memory.products.slice(0, 40),
+      rowCount: memory.rowCount,
+    };
+  }
   return Object.keys(out).length > 0 ? out : null;
 }
 
-/** Normaliza un precio de la tabla ("$1.006,40", "671,20", "295") a número. */
-function parseRowAmount(raw: string | null | undefined): number | null {
-  if (!raw) return null;
-  let t = raw.replace(/[^\d.,]/g, "");
-  if (!t) return null;
-  const lc = t.lastIndexOf(",");
-  const ld = t.lastIndexOf(".");
-  if (lc > -1 && ld > -1) t = lc > ld ? t.replace(/\./g, "").replace(",", ".") : t.replace(/,/g, "");
-  else if (lc > -1) t = t.length - lc - 1 === 2 ? t.replace(",", ".") : t.replace(/,/g, "");
-  else if (ld > -1 && t.length - ld - 1 === 3 && /^\d{1,3}(\.\d{3})+$/.test(t)) t = t.replace(/\./g, "");
-  const n = Number(t);
-  return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null;
-}
+/* --------------------------- Feedback (aprendizaje) ----------------------- */
 
 /**
- * Paso 3: contrasta la tabla extraída con los montos y temporadas que el
- * pre-scan leyó del documento. Barato y muy indicativo: si el documento
- * tiene 72 precios y la tabla sólo contiene 40 de ellos, faltan filas.
+ * Aplana un brief a `clave → texto` para poder diferenciar lo que propuso
+ * la IA de lo que la persona aprobó. Objetos y arrays se serializan: nos
+ * interesa saber QUÉ campo cambió, no reconstruirlo.
  */
-function buildExtractionChecks(
-  rows: ExtractedContractRow[],
-  scan: PreScanResult | null,
-): string[] {
-  if (!scan || !scan.documents.some((d) => d.textAvailable)) return [];
-  const out: string[] = [];
-  const inf = scan.inferences;
+function flattenBrief(b: ContractConfigVariables): Record<string, string | null> {
+  const out: Record<string, string | null> = {};
+  const scalar = (v: unknown): string | null =>
+    v === null || v === undefined || v === "" ? null : typeof v === "string" ? v : JSON.stringify(v);
+  for (const [k, v] of Object.entries(b.shared_fields ?? {})) out[`shared_fields.${k}`] = scalar(v);
+  const keys: (keyof ContractConfigVariables)[] = [
+    "prices_include_tax", "tax_rate_pct", "tax_note", "commission_default_pct", "commission_summary",
+    "meal_plan_note", "currency", "bank_accounts", "additional_person", "special_periods_note",
+    "product_categories", "seasons_detail", "expected_row_estimate", "notes", "tipo_unidad",
+    "occupancy_codes", "occupancies_by_product", "max_adults_per_room", "quadruple_allowed", "row_plan",
+  ];
+  for (const k of keys) out[k] = scalar(b[k]);
+  return out;
+}
 
-  if (inf.prices.length >= 4) {
-    const inTable = new Set<number>();
-    for (const r of rows) {
-      for (const v of [r.precios_neto_iva, r.precio_rack_iva, r.precios_neto_iva_fds, r.precio_rack_iva_fds]) {
-        const n = parseRowAmount(v);
-        if (n !== null) inTable.add(n);
-      }
-    }
-    const docPrices = inf.prices;
-    const matched = docPrices.filter((p) => inTable.has(p));
-    const missing = docPrices.filter((p) => !inTable.has(p));
-    const ratio = matched.length / docPrices.length;
-    if (ratio < 0.9) {
-      out.push(
-        `El documento contiene ${docPrices.length} precios distintos y la tabla incluye ${matched.length} (${Math.round(ratio * 100)}%). Posibles faltantes: ${missing.slice(0, 10).map((m) => m.toLocaleString("es-CR")).join(", ")}${missing.length > 10 ? "…" : ""}.`,
-      );
-    }
+function diffFlat(
+  before: Record<string, string | null>,
+  after: Record<string, string | null>,
+  scope: RunCorrection["scope"],
+  prescanFilled: Set<string> = new Set(),
+): RunCorrection[] {
+  const out: RunCorrection[] = [];
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for (const k of keys) {
+    const a = before[k] ?? null;
+    const b = after[k] ?? null;
+    if ((a ?? "").trim() === (b ?? "").trim()) continue;
+    out.push({ scope, field: k, before: a, after: b, source: prescanFilled.has(k) && a === null ? "prescan" : "user" });
   }
+  return out;
+}
 
-  if (inf.seasons.length > 0) {
-    const docDays = new Set<string>();
-    for (const se of inf.seasons) for (const r of se.ranges) { docDays.add(r.start); docDays.add(r.end); }
-    const bad = new Set<string>();
-    for (const r of rows) {
-      for (const d of [r.season_starts, r.season_ends]) {
-        const m = /^(\d{4})-(\d{2}-\d{2})$/.exec(d ?? "");
-        if (m && !docDays.has(m[2]!)) bad.add(d as string);
-      }
-    }
-    if (bad.size > 0) {
-      out.push(
-        `Fechas de temporada en la tabla que no aparecen en el documento: ${[...bad].slice(0, 6).join(", ")}${bad.size > 6 ? "…" : ""}. El documento define: ${inf.seasons.map((se) => `${se.name ?? "temporada"} ${se.ranges.map((x) => `${x.start}→${x.end}`).join("/")}`).join("; ")}.`,
-      );
+/** Diferencias por celda entre las filas de la IA y las aprobadas (por índice). */
+function diffRows(before: ExtractedContractRow[], after: ExtractedContractRow[]): RunCorrection[] {
+  const out: RunCorrection[] = [];
+  const n = Math.min(before.length, after.length);
+  for (let i = 0; i < n; i++) {
+    const a = before[i]!;
+    const b = after[i]!;
+    for (const k of Object.keys(a) as (keyof ExtractedContractRow)[]) {
+      const va = a[k] ?? null;
+      const vb = b[k] ?? null;
+      if ((va ?? "").trim() === (vb ?? "").trim()) continue;
+      out.push({ scope: "row", field: k, row: i, before: va, after: vb, source: "user" });
+      if (out.length >= 400) return out;
     }
   }
   return out;
+}
+
+/** Parte del feedback que se conoce al salir del Paso 2 (el resto lo agrega el Paso 3). */
+type FeedbackBase = Pick<RunFeedback, "pre_scan" | "brief" | "comments_chars" | "agency_rules">;
+
+/* ----------------------------- QA (UI) ------------------------------------ */
+
+const QA_STYLE: Record<QaSeverity, { row: string; icon: string; label: string }> = {
+  error: { row: "text-red-100/90", icon: "text-red-400", label: "errores" },
+  warning: { row: "text-amber-100/90", icon: "text-amber-400", label: "advertencias" },
+  info: { row: "text-muted-foreground", icon: "text-sky-400", label: "informativos" },
+};
+
+function QaIcon({ severity, className }: { severity: QaSeverity; className: string }) {
+  return severity === "info" ? <Info className={className} /> : <AlertTriangle className={className} />;
+}
+
+/**
+ * Lista de hallazgos del revisor determinístico, agrupados por severidad.
+ * Sin hallazgos muestra un "todo en orden" explícito: el usuario debe saber
+ * que la verificación corrió y no encontró nada, no sólo que no hay avisos.
+ */
+function QaFindingsPanel({
+  findings,
+  title,
+  defaultOpen = true,
+}: {
+  findings: QaFinding[];
+  title: string;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  if (findings.length === 0) {
+    return (
+      <div className="flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-4 py-3 text-[12.5px] text-emerald-200">
+        <ShieldCheck className="h-4 w-4 shrink-0 text-emerald-400" />
+        <span>
+          <span className="font-semibold">{title}:</span> sin hallazgos.
+        </span>
+      </div>
+    );
+  }
+  const worst = worstSeverity(findings);
+  const border =
+    worst === "error"
+      ? "border-red-500/40 bg-red-500/5"
+      : worst === "warning"
+        ? "border-amber-500/40 bg-amber-500/5"
+        : "border-border bg-secondary/20";
+  const groups = (["error", "warning", "info"] as QaSeverity[])
+    .map((sev) => [sev, findings.filter((f) => f.severity === sev)] as const)
+    .filter(([, xs]) => xs.length > 0);
+  return (
+    <div className={`rounded-xl border ${border} px-4 py-3 space-y-2`}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center justify-between gap-2 text-left"
+      >
+        <span className="flex items-center gap-1.5 text-[12.5px] font-semibold text-foreground">
+          <ShieldCheck className="h-4 w-4 text-primary" />
+          {title}
+        </span>
+        <span className="flex items-center gap-2.5 text-[11.5px]">
+          {groups.map(([sev, xs]) => (
+            <span key={sev} className={QA_STYLE[sev].icon}>
+              {xs.length} {QA_STYLE[sev].label}
+            </span>
+          ))}
+          <ChevronDown
+            className={`h-4 w-4 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`}
+          />
+        </span>
+      </button>
+      {open &&
+        groups.map(([sev, xs]) => (
+          <div key={sev} className="space-y-1">
+            {xs.map((f) => (
+              <div key={f.id} className={`flex items-start gap-2 text-[12px] ${QA_STYLE[sev].row}`}>
+                <QaIcon severity={sev} className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${QA_STYLE[sev].icon}`} />
+                <span>
+                  <span className="font-medium">{f.title}.</span> {f.detail}
+                </span>
+              </div>
+            ))}
+          </div>
+        ))}
+    </div>
+  );
+}
+
+/**
+ * Paso 2 — preguntas que el revisor humano debe decidir antes de extraer.
+ * Cada opción (a) corrige el brief y (b) se envía a la extracción como
+ * instrucción del usuario (prioridad máxima). "Omitir" deja el brief como
+ * está y sólo desbloquea el botón.
+ */
+function BriefQaPanel({
+  qa,
+  answers,
+  resolutions,
+  onAnswer,
+  onSkip,
+  onUndo,
+}: {
+  qa: BriefQaResult;
+  answers: Record<string, string>;
+  resolutions: Record<string, { title: string; instruction: string }>;
+  onAnswer: (q: QaQuestion, o: QaOption) => void;
+  onSkip: (q: QaQuestion) => void;
+  onUndo: (id: string) => void;
+}) {
+  const open = qa.questions.filter((q) => answers[q.id] === undefined);
+  const skipped = qa.questions.filter((q) => answers[q.id] === "skip");
+  const resolved = Object.entries(resolutions);
+  return (
+    <div className="space-y-3">
+      <QaFindingsPanel findings={qa.findings} title="Revisión automática del brief (sin IA)" />
+      {(open.length > 0 || skipped.length > 0 || resolved.length > 0) && (
+        <div className="rounded-xl border border-primary/30 bg-primary/5 px-4 py-3 space-y-3">
+          <div>
+            <p className="flex items-center gap-1.5 text-[12.5px] font-semibold text-foreground">
+              <HelpCircle className="h-4 w-4 text-primary" />
+              Preguntas antes de extraer
+            </p>
+            <p className="mt-0.5 text-[11.5px] text-muted-foreground">
+              Tu respuesta corrige el brief y viaja a la extracción como instrucción tuya
+              (prioridad máxima, por encima del documento).
+            </p>
+          </div>
+          {open.map((q) => (
+            <div key={q.id} className="rounded-lg border border-border bg-card/60 px-3 py-2.5 space-y-2">
+              <div>
+                <p className="text-[12.5px] font-medium text-foreground">
+                  {q.title}
+                  {q.required && (
+                    <span className="ml-1.5 rounded bg-amber-500/15 px-1 py-px text-[10px] font-semibold uppercase tracking-wide text-amber-300">
+                      obligatoria
+                    </span>
+                  )}
+                </p>
+                <p className="text-[11.5px] text-muted-foreground">{q.detail}</p>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {q.options.map((o) => (
+                  <button
+                    key={o.id}
+                    type="button"
+                    onClick={() => onAnswer(q, o)}
+                    className="rounded-md border border-primary/40 bg-primary/10 px-2.5 py-1 text-[12px] text-foreground transition-colors hover:bg-primary/20"
+                  >
+                    {o.label}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => onSkip(q)}
+                  className="rounded-md border border-border px-2.5 py-1 text-[12px] text-muted-foreground transition-colors hover:bg-secondary/60"
+                >
+                  Omitir (dejar como está)
+                </button>
+              </div>
+            </div>
+          ))}
+          {(resolved.length > 0 || skipped.length > 0) && (
+            <div className="space-y-1 border-t border-border/60 pt-2">
+              {resolved.map(([id, r]) => (
+                <div key={id} className="flex items-start justify-between gap-2 text-[12px] text-emerald-200/90">
+                  <span className="flex items-start gap-2">
+                    <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-400" />
+                    <span>
+                      <span className="font-medium">{r.title}</span> — {r.instruction}
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => onUndo(id)}
+                    className="shrink-0 text-[11px] text-muted-foreground hover:text-foreground"
+                  >
+                    quitar
+                  </button>
+                </div>
+              ))}
+              {skipped.map((q) => (
+                <div key={q.id} className="flex items-start justify-between gap-2 text-[12px] text-muted-foreground">
+                  <span className="flex items-start gap-2">
+                    <Undo2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span>Omitida: {q.title}</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => onUndo(q.id)}
+                    className="shrink-0 text-[11px] hover:text-foreground"
+                  >
+                    reabrir
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const MEMORY_LABELS: Record<string, string> = {
+  cedula: "Cédula",
+  reservations_email: "Correo reservas",
+  telefono: "Teléfono",
+  pais: "País",
+  contract_starts: "Inicio vigencia",
+  contract_ends: "Fin vigencia",
+  tipo_unidad: "Tipo unidad",
+  tipo_moneda: "Moneda",
+  banco: "Banco",
+  numero_cuenta: "Cuenta",
+};
+
+/**
+ * Memoria explícita del proveedor: lo que el revisor aprobó la última vez vs.
+ * lo que dice el brief actual. Es referencia, no verdad: un contrato nuevo
+ * puede cambiar la cuenta o la vigencia. Por eso sólo marca diferencias.
+ */
+function SupplierMemoryPanel({
+  memory,
+  brief,
+}: {
+  memory: SupplierMemory | null;
+  brief: ContractConfigVariables | null;
+}) {
+  const [open, setOpen] = useState(false);
+  if (!memory) return null;
+  const sf = brief?.shared_fields;
+  const cur: Record<string, string | null> = {
+    cedula: sf?.cedula ?? null,
+    reservations_email: sf?.reservations_email ?? null,
+    telefono: sf?.telefono ?? null,
+    pais: sf?.pais ?? null,
+    contract_starts: sf?.contract_starts ?? null,
+    contract_ends: sf?.contract_ends ?? null,
+    tipo_unidad: brief?.tipo_unidad ?? null,
+    tipo_moneda: brief?.currency ?? null,
+    banco: brief?.bank_accounts?.[0]?.bank ?? null,
+    numero_cuenta: brief?.bank_accounts?.[0]?.account_number ?? null,
+  };
+  const norm = (v: string | null) => (v ?? "").replace(/[\s-]+/g, "").toLowerCase();
+  const rows = Object.keys(MEMORY_LABELS)
+    .map((k) => ({ k, label: MEMORY_LABELS[k]!, prev: memory.shared[k] ?? null, cur: cur[k] ?? null }))
+    .filter((r) => r.prev || r.cur)
+    .map((r) => ({ ...r, differs: !!r.prev && !!r.cur && norm(r.prev) !== norm(r.cur) }));
+  const diffs = rows.filter((r) => r.differs).length;
+  const prevSeasons = memory.seasons.map((x) => x.name).filter((x): x is string => !!x);
+  const curSeasons = (brief?.seasons_detail ?? []).map((x) => x.name).filter((x): x is string => !!x);
+  const curProducts = brief?.row_plan?.categories.length ?? brief?.product_categories.length ?? null;
+  const date = new Date(memory.processedAt);
+  const when = Number.isNaN(date.getTime())
+    ? memory.processedAt
+    : date.toLocaleDateString("es-CR", { year: "numeric", month: "short", day: "numeric" });
+
+  return (
+    <div className="rounded-xl border border-border bg-secondary/20 px-4 py-3 space-y-2">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center justify-between gap-2 text-left"
+      >
+        <span className="flex items-center gap-1.5 text-[12.5px] font-semibold text-foreground">
+          <History className="h-4 w-4 text-primary" />
+          Memoria del proveedor
+          <span className="font-normal text-muted-foreground">
+            · último contrato aprobado {when} ({memory.rowCount} filas)
+          </span>
+        </span>
+        <span className="flex items-center gap-2 text-[11.5px]">
+          <span className={diffs > 0 ? "text-amber-400" : "text-muted-foreground"}>
+            {diffs > 0 ? `${diffs} diferencia(s)` : "sin diferencias"}
+          </span>
+          <ChevronDown
+            className={`h-4 w-4 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`}
+          />
+        </span>
+      </button>
+      {open && (
+        <div className="space-y-2 text-[12px]">
+          <p className="text-[11.5px] text-muted-foreground">
+            Referencia, no verdad: el contrato actual manda. Las diferencias sólo indican qué
+            conviene mirar dos veces. Estos valores también viajan al modelo como contexto de
+            prioridad media.
+          </p>
+          <div className="grid grid-cols-1 gap-x-6 gap-y-1 sm:grid-cols-2">
+            {rows.map((r) => (
+              <div key={r.k} className="flex items-baseline justify-between gap-3 border-b border-border/40 py-1">
+                <span className="text-muted-foreground">{r.label}</span>
+                <span className={`text-right ${r.differs ? "text-amber-200" : "text-foreground"}`}>
+                  {r.differs ? (
+                    <>
+                      <span className="line-through opacity-60">{r.prev}</span> → {r.cur}
+                    </>
+                  ) : (
+                    (r.cur ?? r.prev)
+                  )}
+                </span>
+              </div>
+            ))}
+          </div>
+          <div className="flex flex-wrap gap-x-6 gap-y-1 text-muted-foreground">
+            <span>
+              Temporadas antes: <span className="text-foreground">{prevSeasons.join(", ") || "—"}</span>
+              {" · "}ahora: <span className="text-foreground">{curSeasons.join(", ") || "—"}</span>
+            </span>
+            <span>
+              Productos antes: <span className="text-foreground">{memory.products.length}</span>
+              {" · "}ahora: <span className="text-foreground">{curProducts ?? "—"}</span>
+            </span>
+            {memory.occupancies.length > 0 && (
+              <span>
+                Ocupaciones antes: <span className="text-foreground">{memory.occupancies.join(", ")}</span>
+              </span>
+            )}
+            {memory.codigosServicio.length > 0 && (
+              <span>
+                Códigos de servicio antes: <span className="text-foreground">{memory.codigosServicio.join(", ")}</span>
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 export type CatalogMatchInfo =
@@ -401,7 +714,7 @@ const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_FILES_PER_REQUEST = 10;
 
 const STEP2_ANALYSIS_FOOTER =
-  "Corre en dos fases: un pre-análisis rápido (Opus) que detecta las reglas " +
+  "Corre en dos fases: un pre-análisis rápido (Sonnet 5.5) que detecta las reglas " +
   "globales y luego la extracción completa que consolida todos los documentos. " +
   "Puede tardar varios minutos — mantené esta pestaña abierta.";
 
@@ -425,7 +738,7 @@ const ACCEPT_ATTR = [
   ".xlsx",
   "application/vnd.ms-excel",
   ".xls",
-  // Imágenes — Claude Opus 4.7 las lee nativamente con vision. Las
+  // Imágenes — Claude las lee nativamente con vision. Las
   // extensiones se incluyen además del MIME porque algunos sistemas
   // (notablemente Windows arrastrando desde el escritorio) suben con
   // MIME genérico application/octet-stream y nos quedamos sin señal.
@@ -532,9 +845,13 @@ export interface ApprovedPayload {
   rows: ExtractedContractRow[];
   catalogPrefill: GenerateXlsxCatalogPrefill | null;
   manualFields: GenerateXlsxManualFields | null;
+  /** Señal de aprendizaje del run (diffs IA → aprobado, QA, respuestas). */
+  feedback: RunFeedback | null;
 }
 
 export function SupplierWorkflow() {
+  const { session } = useAuth();
+  const isAdmin = session?.user.role === "admin";
   const [step, setStep] = useState<Step>(1);
   /**
    * Documentos del contrato, todos pares. Internamente el primero vive en
@@ -606,8 +923,72 @@ export function SupplierWorkflow() {
    */
   const [preScan, setPreScan] = useState<PreScanState>({ status: "idle" });
   const [autoDetectedId, setAutoDetectedId] = useState<string | null>(null);
-  /** Avisos del contraste brief IA vs pre-scan (Paso 2). */
-  const [briefAdvisories, setBriefAdvisories] = useState<string[]>([]);
+  /** Proveedor confirmado (con servicios) — ancla del QA y del prompt. */
+  const [confirmedSupplier, setConfirmedSupplier] = useState<CatalogSupplier | null>(null);
+  /** Memoria del proveedor: último run aprobado (Paso 2 + hints). */
+  const [supplierMemory, setSupplierMemory] = useState<SupplierMemory | null>(null);
+  /** Respuestas del revisor a las preguntas del QA (optionId o "skip"). */
+  const [qaAnswers, setQaAnswers] = useState<Record<string, string>>({});
+  /** Tema/obligatoriedad de cada pregunta respondida (la pregunta desaparece al responder). */
+  const [qaMeta, setQaMeta] = useState<Record<string, { topic: string; required: boolean }>>({});
+  /** Briefs tal como los devolvió la IA (antes del relleno del pre-scan y de ediciones). */
+  const [aiBriefs, setAiBriefs] = useState<ContractConfigVariables[]>([]);
+  /** Claves que el pre-scan rellenó porque la IA las dejó vacías. */
+  const [prescanFilled, setPrescanFilled] = useState<string[]>([]);
+  /** Cantidad de reglas permanentes activas (para el feedback). */
+  const [agencyRuleCount, setAgencyRuleCount] = useState(0);
+  /** Feedback parcial construido al confirmar el Paso 2. */
+  const [feedbackBase, setFeedbackBase] = useState<FeedbackBase | null>(null);
+  /** Instrucciones derivadas de las respuestas; viajan a la extracción. */
+  const [qaResolutions, setQaResolutions] = useState<
+    Record<string, { title: string; instruction: string }>
+  >({});
+
+  /**
+   * QA determinístico del brief (Paso 2). Se recalcula con cada edición: al
+   * responder una pregunta el brief cambia y la pregunta desaparece sola.
+   */
+  const briefQa = useMemo<BriefQaResult>(() => {
+    const b = editedBriefs[0] ?? briefs[0];
+    if (!b) return { findings: [], questions: [] };
+    return qaBrief({
+      brief: b,
+      scan: preScan.status === "done" ? preScan.result : null,
+      supplier: confirmedSupplier,
+      comments,
+    });
+  }, [editedBriefs, briefs, preScan, confirmedSupplier, comments]);
+  const pendingRequired = briefQa.questions.filter(
+    (q) => q.required && qaAnswers[q.id] === undefined,
+  );
+
+  const answerQuestion = (q: QaQuestion, o: QaOption) => {
+    const base = editedBriefs[0] ?? briefs[0];
+    if (base && o.patch) {
+      const patched =
+        typeof o.patch === "function" ? o.patch(base) : { ...base, ...o.patch };
+      handleDraftChange(0, patched);
+    }
+    setQaAnswers((prev) => ({ ...prev, [q.id]: o.id }));
+    setQaMeta((prev) => ({ ...prev, [q.id]: { topic: q.topic, required: q.required } }));
+    setQaResolutions((prev) => ({ ...prev, [q.id]: { title: q.title, instruction: o.instruction } }));
+  };
+  const skipQuestion = (q: QaQuestion) => {
+    setQaAnswers((prev) => ({ ...prev, [q.id]: "skip" }));
+    setQaMeta((prev) => ({ ...prev, [q.id]: { topic: q.topic, required: q.required } }));
+  };
+  const undoAnswer = (id: string) => {
+    setQaAnswers((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    setQaResolutions((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  };
   /** Hechos verificados que viajan a brief / refine / extract. */
   const [preScanHints, setPreScanHints] = useState<Record<string, unknown> | null>(null);
 
@@ -681,11 +1062,15 @@ export function SupplierWorkflow() {
 
   useEffect(() => {
     if (!preparingGrid) return;
-    setProgress(15);
+    // Primer tick inmediato (salto a 15%) y luego avance suave hasta 92%.
+    const kick = window.setTimeout(() => setProgress(15), 0);
     const id = window.setInterval(() => {
       setProgress((p) => (p >= 92 ? p : Math.min(92, p + 6)));
     }, 120);
-    return () => window.clearInterval(id);
+    return () => {
+      window.clearTimeout(kick);
+      window.clearInterval(id);
+    };
   }, [preparingGrid]);
 
   /**
@@ -858,6 +1243,7 @@ export function SupplierWorkflow() {
       // Proveedor confirmado con sus servicios (el dropdown trae el catálogo
       // resumido) — lo necesitamos ANTES del brief para que viaje como ancla.
       let confirmedSupplier: CatalogSupplier | null = null;
+      let memory: SupplierMemory | null = null;
       if (supplierChoice?.existing) {
         confirmedSupplier = supplierChoice.supplier;
         try {
@@ -865,10 +1251,25 @@ export function SupplierWorkflow() {
         } catch (err) {
           console.warn("[workflow] no se pudieron cargar los servicios del proveedor", err);
         }
+        // Memoria del proveedor: lo aprobado la última vez. Opcional — si
+        // falla seguimos sin ella.
+        try {
+          memory = (await api.supplierIntelligence.lastRun(confirmedSupplier.codigo)).memory;
+        } catch (err) {
+          console.warn("[workflow] no se pudo cargar la memoria del proveedor", err);
+        }
       }
+      setConfirmedSupplier(confirmedSupplier);
+      setSupplierMemory(memory);
+      // Sólo para el feedback (cuántas reglas estaban activas). No bloquea.
+      api.agentRules
+        .list()
+        .then(({ rules }) => setAgencyRuleCount(rules.filter((r) => r.enabled).length))
+        .catch(() => setAgencyRuleCount(0));
       const hints = buildPreScanHints(
         preScan.status === "done" ? preScan.result : null,
         confirmedSupplier,
+        memory,
       );
       setPreScanHints(hints);
 
@@ -971,13 +1372,14 @@ export function SupplierWorkflow() {
       // Pre-scan (sin IA) rellena huecos del brief primario y avisa si la
       // IA contradice lo que el documento dice literalmente.
       let newBriefs = merged;
+      let filled: string[] = [];
       if (preScan.status === "done" && merged[0]) {
-        const rec = reconcileBriefWithPreScan(merged[0], preScan.result, comments);
-        newBriefs = [rec.brief, ...merged.slice(1)];
-        setBriefAdvisories(rec.advisories);
-      } else {
-        setBriefAdvisories([]);
+        const rec = reconcileBriefWithPreScan(merged[0], preScan.result);
+        filled = diffFlat(flattenBrief(merged[0]), flattenBrief(rec), "brief").map((c) => c.field);
+        newBriefs = [rec, ...merged.slice(1)];
       }
+      setAiBriefs(merged);
+      setPrescanFilled(filled);
       setBriefs(newBriefs);
       setEditedBriefs(newBriefs.map((b) => b));
       setMetas(responses.map((r) => r.meta));
@@ -1130,9 +1532,63 @@ export function SupplierWorkflow() {
       );
       return;
     }
+    if (pendingRequired.length > 0) {
+      setServerError(
+        `Responde u omite las ${pendingRequired.length} pregunta(s) obligatoria(s) antes de extraer.`,
+      );
+      return;
+    }
     const source = briefs.map((b, i) => editedBriefs[i] ?? b);
     const finalBriefs = source.map(normalizeBrief);
     setEditedBriefs(finalBriefs);
+    // Señal de aprendizaje del Paso 1 + 2: qué detectó el pre-scan, qué
+    // corrigió la persona sobre el brief de la IA, qué preguntó el QA.
+    {
+      const scan = preScan.status === "done" ? preScan.result : null;
+      const detectedTop = scan?.supplier.candidates[0] ?? null;
+      const chosen = supplierChoice?.existing ? supplierChoice.supplier.codigo : null;
+      const ai0 = aiBriefs[0];
+      const fin0 = finalBriefs[0];
+      setFeedbackBase({
+        pre_scan: {
+          ran: !!scan,
+          text_available: !!scan && scan.documents.some((d) => d.textAvailable),
+          documents: scan?.documents.length ?? selectedFiles.length,
+          detected: detectedTop ? { codigo: detectedTop.codigo, confidence: scan!.supplier.confidence } : null,
+          chosen,
+          supplier_hit: detectedTop && chosen ? detectedTop.codigo === chosen : null,
+        },
+        brief:
+          ai0 && fin0
+            ? {
+                corrections: diffFlat(flattenBrief(ai0), flattenBrief(fin0), "brief", new Set(prescanFilled)),
+                prescan_filled: prescanFilled,
+                qa_findings: briefQa.findings.map((f) => ({ id: f.id, severity: f.severity, topic: f.topic })),
+                questions: Object.entries(qaAnswers).map(([id, answer]) => ({
+                  id,
+                  topic: qaMeta[id]?.topic ?? "other",
+                  required: qaMeta[id]?.required ?? false,
+                  answer,
+                })),
+                chat_messages: chatHistories.reduce((n, h) => n + h.filter((m) => m.role === "user").length, 0),
+              }
+            : null,
+        comments_chars: comments.trim().length,
+        agency_rules: agencyRuleCount,
+      });
+    }
+    // Las respuestas del revisor viajan como instrucciones del usuario: en el
+    // prompt tienen la misma prioridad que los comentarios del Paso 1.
+    const resolutionTexts = Object.values(qaResolutions).map((r) => r.instruction);
+    const extractComments = [
+      comments.trim(),
+      resolutionTexts.length > 0
+        ? "RESOLUCIONES DEL REVISOR (Paso 2 — aplicar tal cual):\n" +
+          resolutionTexts.map((t) => `- ${t}`).join("\n")
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
     setExtracting(true);
     setPreparingGrid(false);
     setServerError(null);
@@ -1142,7 +1598,7 @@ export function SupplierWorkflow() {
     try {
       const filesToExtract = await materializeUploadFiles(selectedFiles);
       const response = await api.supplierIntelligence.extract(filesToExtract, {
-        comments,
+        comments: extractComments,
         isExistingSupplier,
         preScanHints,
         confirmedConfigs: finalBriefs,
@@ -1179,6 +1635,12 @@ export function SupplierWorkflow() {
     setFileLabels([]);
     setActiveTab(0);
     setRefiningTab(null);
+    setQaAnswers({});
+    setQaMeta({});
+    setQaResolutions({});
+    setAiBriefs([]);
+    setPrescanFilled([]);
+    setFeedbackBase(null);
   };
 
   const reset = () => {
@@ -1194,7 +1656,8 @@ export function SupplierWorkflow() {
     setPreScan({ status: "idle" });
     setAutoDetectedId(null);
     setPreScanHints(null);
-    setBriefAdvisories([]);
+    setConfirmedSupplier(null);
+    setSupplierMemory(null);
     setCatalogPrefill(null);
     setCatalogMatchInfo(null);
     setMatchingPhase(null);
@@ -1370,6 +1833,24 @@ export function SupplierWorkflow() {
               </div>
             )}
 
+            {/* Revisor determinístico + memoria, ANTES del resumen de la IA:
+                es lo que la persona debe decidir primero. Mismo padding que
+                el contenido de ConfigVariablesStep para alinear anchos. */}
+            <div className="px-5 sm:px-8 pt-7 space-y-4">
+              <BriefQaPanel
+                qa={briefQa}
+                answers={qaAnswers}
+                resolutions={qaResolutions}
+                onAnswer={answerQuestion}
+                onSkip={skipQuestion}
+                onUndo={undoAnswer}
+              />
+              <SupplierMemoryPanel
+                memory={supplierMemory}
+                brief={editedBriefs[0] ?? briefs[0] ?? null}
+              />
+            </div>
+
             {/* Editores: TODOS montados, el inactivo oculto, para no perder
                 ediciones al cambiar de tab. */}
             {briefs.map((b, i) => (
@@ -1400,23 +1881,8 @@ export function SupplierWorkflow() {
               </div>
             ))}
 
-            {briefAdvisories.length > 0 && (
-              <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 px-4 py-3 space-y-1.5">
-                <p className="flex items-center gap-1.5 text-[12.5px] font-semibold text-amber-200">
-                  <ScanSearch className="h-4 w-4 text-amber-400" />
-                  Contraste con el documento (sin IA)
-                </p>
-                {briefAdvisories.map((a) => (
-                  <p key={a} className="flex items-start gap-2 text-[12px] text-amber-100/90">
-                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />
-                    <span>{a}</span>
-                  </p>
-                ))}
-              </div>
-            )}
-
             {/* Acciones GLOBALES (una sola extracción para todos los docs) */}
-            <div className="pb-7 space-y-4">
+            <div className="px-5 sm:px-8 pb-7 space-y-4">
               {serverError && (
                 <div
                   role="alert"
@@ -1436,11 +1902,17 @@ export function SupplierWorkflow() {
                   <ArrowLeft className="w-4 h-4" />
                   Volver
                 </button>
+                <div className="flex flex-col items-end gap-1">
+                {pendingRequired.length > 0 && (
+                  <span className="text-[11.5px] text-amber-300">
+                    {pendingRequired.length} pregunta(s) obligatoria(s) sin responder
+                  </span>
+                )}
                 <button
                   type="button"
                   onClick={() => confirmConfig()}
-                  disabled={extracting || refiningTab !== null}
-                  className="btn-premium inline-flex items-center justify-center gap-2 h-11 px-5 rounded-lg text-[13.5px]"
+                  disabled={extracting || refiningTab !== null || pendingRequired.length > 0}
+                  className="btn-premium inline-flex items-center justify-center gap-2 h-11 px-5 rounded-lg text-[13.5px] disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {extracting ? (
                     <>
@@ -1456,6 +1928,7 @@ export function SupplierWorkflow() {
                     </>
                   )}
                 </button>
+                </div>
               </div>
             </div>
           </div>
@@ -1529,6 +2002,9 @@ export function SupplierWorkflow() {
             <ReviewStep
               result={result}
               preScanResult={preScan.status === "done" ? preScan.result : null}
+              confirmedBrief={editedBriefs[0] ?? briefs[0] ?? null}
+              supplier={confirmedSupplier}
+              feedbackBase={feedbackBase}
               catalogPrefill={catalogPrefill}
               briefMetas={metas}
               comments={comments}
@@ -1540,12 +2016,25 @@ export function SupplierWorkflow() {
         )}
 
         {step === 4 && result && approvedPayload && (
-          <DownloadStep
-            payload={approvedPayload}
-            meta={result.meta}
-            briefMetas={metas}
-            onReset={reset}
-          />
+          <>
+            <DownloadStep
+              payload={approvedPayload}
+              meta={result.meta}
+              briefMetas={metas}
+              onReset={reset}
+            />
+            {isAdmin && (
+              <div className="px-5 sm:px-8 pb-7">
+                <SaveEvalCaseCard
+                  files={selectedFiles}
+                  payload={approvedPayload}
+                  brief={editedBriefs[0] ?? briefs[0] ?? null}
+                  preScan={preScan.status === "done" ? preScan.result : null}
+                  supplierCodigo={supplierChoice?.existing ? supplierChoice.supplier.codigo : null}
+                />
+              </div>
+            )}
+          </>
         )}
       </div>
     </section>
@@ -2660,7 +3149,7 @@ function Badge({ label }: { label: string }) {
  * Fases mostradas durante el análisis. El % es una estimación temporal (no
  * hay streaming del backend), pero los tramos reflejan el flujo real de dos
  * pasadas: pre-análisis rápido (Sonnet 4.6) que detecta las reglas globales,
- * y luego la extracción completa (Opus 4.7) que genera todas las filas — esta
+ * y luego la extracción completa (Opus 5.5) que genera todas las filas — esta
  * última es la que se lleva la mayor parte del tiempo, de ahí el tramo ancho.
  */
 function extractionPhase(progress: number): string {
@@ -2766,7 +3255,7 @@ function AnalysisProgressCard({
         <p className="text-[11px] text-muted-foreground">
           {footerDescription ??
             (matchingPhase === "ai"
-              ? "Pidiéndole a Claude que elija el proveedor del catálogo. Opus 4.7 puede tardar 30-60s para contratos con muchas combinaciones."
+              ? "Pidiéndole a Claude que elija el proveedor del catálogo. Puede tardar 30-60s para contratos con muchas combinaciones."
               : files.length > 1
                 ? `Corre en dos fases: un pre-análisis rápido (Opus) que ` +
                   `detecta las reglas globales y luego la extracción completa ` +
@@ -3378,6 +3867,9 @@ function TableChat({
 function ReviewStep({
   result,
   preScanResult,
+  confirmedBrief,
+  supplier,
+  feedbackBase,
   catalogPrefill,
   briefMetas,
   comments,
@@ -3388,6 +3880,12 @@ function ReviewStep({
   result: ExtractContractResponse;
   /** Lectura sin IA del documento (Paso 1) para contrastar la tabla. */
   preScanResult: PreScanResult | null;
+  /** Brief confirmado en el Paso 2 (aritmética neto/rack/comisión). */
+  confirmedBrief: ContractConfigVariables | null;
+  /** Proveedor del maestro (códigos de servicio válidos). */
+  supplier: CatalogSupplier | null;
+  /** Feedback del Paso 1-2; el Paso 3 agrega sus diffs y lo manda con el run. */
+  feedbackBase: FeedbackBase | null;
   catalogPrefill: CatalogPrefill | null;
   briefMetas: AnalyzeBriefMeta[];
   /** Contexto libre que el operador escribió en el Paso 1. Alimenta el chat. */
@@ -3439,6 +3937,14 @@ function ReviewStep({
   // con null — así cada celda muestra su valor efectivo. El override
   // se preserva si la IA lo envió diferente al shared (mixed bundles).
   const [rows, setRows] = useState<ExtractedContractRow[]>(() =>
+    data.rows.map((r) => ({
+      ...r,
+      tipo_unidad: r.tipo_unidad ?? data.shared_fields.tipo_unidad,
+      tipo_servicio: r.tipo_servicio ?? data.shared_fields.tipo_servicio,
+    })),
+  );
+  /** Filas tal como llegaron de la IA (hidratadas igual), para el diff del feedback. */
+  const [aiRows] = useState<ExtractedContractRow[]>(() =>
     data.rows.map((r) => ({
       ...r,
       tipo_unidad: r.tipo_unidad ?? data.shared_fields.tipo_unidad,
@@ -3549,6 +4055,32 @@ function ReviewStep({
       const v = sharedValues[k];
       return typeof v === "string" && v.trim() !== "";
     });
+    const sharedBefore: Record<string, string | null> = {};
+    const sharedAfter: Record<string, string | null> = {};
+    for (const k of Object.keys(sharedFields) as ExtractedSharedFieldKey[]) {
+      sharedBefore[k] = data.shared_fields[k] ?? null;
+      sharedAfter[k] = sharedFields[k] ?? null;
+    }
+    const feedback: RunFeedback = {
+      version: 1,
+      pre_scan: feedbackBase?.pre_scan ?? null,
+      brief: feedbackBase?.brief ?? null,
+      rows: {
+        total: rows.length,
+        added: Math.max(0, rows.length - aiRows.length),
+        removed: Math.max(0, aiRows.length - rows.length),
+        corrections: [
+          ...diffFlat(sharedBefore, sharedAfter, "shared"),
+          ...diffRows(aiRows, rows),
+        ],
+        qa_findings: rowFindings.map((f) => ({ id: f.id, severity: f.severity, topic: f.topic })),
+        acknowledged_errors: hasQaErrors && ackQaErrors,
+        chat_messages: chatMessages.filter((m) => m.role === "user").length,
+      },
+      comments_chars: feedbackBase?.comments_chars ?? comments.trim().length,
+      agency_rules: feedbackBase?.agency_rules ?? 0,
+    };
+
     const finalManualFields: GenerateXlsxManualFields | null = hasAnyManual
       ? {
           tipo_tarifa_neta: sharedValues.tipo_tarifa_neta,
@@ -3572,6 +4104,7 @@ function ReviewStep({
       rows,
       catalogPrefill: finalCatalogPrefill,
       manualFields: finalManualFields,
+      feedback,
     };
   };
 
@@ -3614,6 +4147,7 @@ function ReviewStep({
             output_tokens: pipelineUsage.output_tokens,
             cost_usd: pipelineUsage.cost_usd,
             extraction_id: meta.extraction_id,
+            feedback: payload.feedback,
           })
           .catch((err) => console.warn("saveRun failed (non-blocking):", err));
       }
@@ -3744,26 +4278,34 @@ function ReviewStep({
   const completionPct =
     totalRowCells === 0 ? 0 : Math.round((filledRowCells / totalRowCells) * 100);
 
-  const extractionChecks = useMemo(
-    () => buildExtractionChecks(rows, preScanResult),
-    [rows, preScanResult],
-  );
+  // Sin useMemo manual: el React Compiler lo memoiza y la regla
+  // preserve-manual-memoization no puede garantizar el memo a mano aquí.
+  const rowFindings = qaRows({ rows, scan: preScanResult, brief: confirmedBrief, supplier });
+  const hasQaErrors = worstSeverity(rowFindings) === "error";
+  /** El usuario puede seguir con errores, pero tiene que decirlo. */
+  const [ackQaErrors, setAckQaErrors] = useState(false);
+  const qaBlocked = hasQaErrors && !ackQaErrors;
 
   return (
     <div className="px-5 sm:px-8 py-7 space-y-5">
-      {extractionChecks.length > 0 && (
-        <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 px-4 py-3 space-y-1.5">
-          <p className="flex items-center gap-1.5 text-[12.5px] font-semibold text-amber-200">
-            <ScanSearch className="h-4 w-4 text-amber-400" />
-            Verificación automática contra el documento (sin IA)
-          </p>
-          {extractionChecks.map((c) => (
-            <p key={c} className="flex items-start gap-2 text-[12px] text-amber-100/90">
-              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />
-              <span>{c}</span>
-            </p>
-          ))}
-        </div>
+      <QaFindingsPanel
+        findings={rowFindings}
+        title="Verificación automática de la tabla (sin IA)"
+      />
+      {hasQaErrors && (
+        <label className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/5 px-3 py-2 text-[12.5px] text-red-100/90">
+          <input
+            type="checkbox"
+            checked={ackQaErrors}
+            onChange={(e) => setAckQaErrors(e.target.checked)}
+            className="mt-0.5 h-4 w-4 accent-red-400"
+          />
+          <span>
+            Revisé los errores de arriba y quiero continuar de todos modos. (Lo normal es
+            corregirlos en la tabla o con el chat: cada error suele ser una celda que Utopía
+            rechazará o una tarifa que falta.)
+          </span>
+        </label>
       )}
 
       {/* Summary banner */}
@@ -3871,15 +4413,15 @@ function ReviewStep({
           <button
             type="button"
             onClick={handleApprove}
-            disabled={downloading}
-            className="inline-flex items-center justify-center gap-2 h-11 px-4 rounded-lg text-[13.5px] border border-border text-muted-foreground hover:bg-secondary/50 disabled:opacity-50"
+            disabled={downloading || qaBlocked}
+            className="inline-flex items-center justify-center gap-2 h-11 px-4 rounded-lg text-[13.5px] border border-border text-muted-foreground hover:bg-secondary/50 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Continuar al resumen
           </button>
           <button
             type="button"
             onClick={() => void handleDownloadHere()}
-            disabled={downloading}
+            disabled={downloading || qaBlocked}
             className="btn-premium inline-flex items-center justify-center gap-2 h-11 px-5 rounded-lg text-[13.5px] disabled:opacity-60"
           >
             <Download className="w-4 h-4" />
@@ -4423,11 +4965,12 @@ function DownloadStep({
               rows: payload.rows,
               catalog_prefill: payload.catalogPrefill,
               manual_fields: payload.manualFields,
-              // Pre-análisis (Paso 2) + extracción (Paso 3), tarifa Opus 4.8.
+              // Pre-análisis (Paso 2, Sonnet 5.5) + extracción (Paso 3, Opus 5.5), cada pasada a su tarifa.
               input_tokens: pipelineUsage.input_tokens,
               output_tokens: pipelineUsage.output_tokens,
               cost_usd: pipelineUsage.cost_usd,
               extraction_id: meta.extraction_id,
+              feedback: payload.feedback,
             })
             .catch((err) => {
               // Logueamos a console para que sea visible en dev / Sentry,

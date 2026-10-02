@@ -767,7 +767,22 @@ export interface PreScanDocument {
   chars: number;
   /** "72 precios", "2 temporadas", "cancelación", "IBAN"… */
   contributes: string[];
+  /** Temporadas leídas en ESTE documento (para resolver conflictos entre documentos). */
+  seasons: PreScanSeason[];
+  /**
+   * Mapa de páginas: dónde están tarifas, políticas, bancos… Se envía al
+   * modelo (lectura dirigida) y lo usa el revisor.
+   */
+  pageMap: PreScanPage[];
   supplierHint: { codigo: string; nombre: string | null; confidence: PreScanConfidence } | null;
+}
+
+export interface PreScanPage {
+  page: number;
+  /** Montos con símbolo de moneda en la página. */
+  prices: number;
+  /** tarifas, temporadas, cancelación, pago, banco, niños, contacto, check-in/out, legal, políticas. */
+  topics: string[];
 }
 
 export interface PreScanResult {
@@ -785,6 +800,202 @@ export interface PreScanResult {
   inferences: PreScanInferences;
   previous: { runs: PreScanPreviousRun[]; warnings: string[] } | null;
   durationMs: number;
+}
+
+/* ---------------------------- supplier memory ----------------------------- */
+
+/**
+ * Memoria explícita del proveedor: lo que el revisor humano APROBÓ la última
+ * vez que se procesó un contrato de este proveedor (Paso 3 → `POST
+ * /contracts`). No es "lo que dijo el pre-scan" ni "lo que dijo la IA": son
+ * valores confirmados. Se muestra en el Paso 2 como referencia y viaja al
+ * modelo como contexto de PRIORIDAD MEDIA (el documento actual manda).
+ */
+export interface SupplierMemory {
+  runId: string;
+  processedAt: string;
+  filename: string;
+  shared: Record<string, string | null>;
+  manual: Record<string, unknown> | null;
+  products: string[];
+  seasons: { name: string | null; starts: string | null; ends: string | null }[];
+  occupancies: string[];
+  codigosServicio: string[];
+  rowCount: number;
+}
+
+/* ------------------------------ agent rules ------------------------------- */
+
+/**
+ * Reglas permanentes de la agencia ("memoria curada"). Texto libre que se
+ * inyecta en CADA extracción con PRIORIDAD ALTA (debajo de los comentarios
+ * del run, encima del documento). Las administran los admins en /agent-rules.
+ */
+export interface AgentRule {
+  id: string;
+  text: string;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Sugerencia de regla derivada de correcciones recurrentes (misma
+ * corrección en ≥2 contratos de proveedores distintos). El sistema propone;
+ * un admin acepta (crea la regla) o descarta.
+ */
+export interface AgentRuleSuggestion {
+  id: string;
+  field: string;
+  before: string | null;
+  after: string | null;
+  occurrences: number;
+  evidence: { suppliers: string[]; runs: number };
+  proposedText: string;
+  status: "pending" | "accepted" | "dismissed" | string;
+  ruleId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/* ------------------------------ run feedback ------------------------------ */
+
+/**
+ * Señal de aprendizaje del run — mirrors backend `feedback.ts`. La construye
+ * el frontend al aprobar: diferencia entre lo propuesto (pre-scan, IA) y lo
+ * aprobado por la persona, más los hallazgos del QA y las respuestas.
+ */
+export interface RunCorrection {
+  scope: "brief" | "shared" | "row";
+  field: string;
+  row?: number;
+  before: string | null;
+  after: string | null;
+  source: "user" | "prescan";
+}
+
+export interface RunFeedback {
+  version: 1;
+  pre_scan: {
+    ran: boolean;
+    text_available: boolean;
+    documents: number;
+    detected: { codigo: string; confidence: PreScanConfidence } | null;
+    chosen: string | null;
+    supplier_hit: boolean | null;
+  } | null;
+  brief: {
+    corrections: RunCorrection[];
+    prescan_filled: string[];
+    qa_findings: { id: string; severity: "error" | "warning" | "info"; topic: string }[];
+    questions: { id: string; topic: string; required: boolean; answer: string }[];
+    chat_messages: number;
+  } | null;
+  rows: {
+    total: number;
+    added: number;
+    removed: number;
+    corrections: RunCorrection[];
+    qa_findings: { id: string; severity: "error" | "warning" | "info"; topic: string }[];
+    acknowledged_errors: boolean;
+    chat_messages: number;
+  };
+  comments_chars: number;
+  agency_rules: number;
+}
+
+/** Agregado del panel de calidad — mirrors backend `QualityReport`. */
+export interface QualityReport {
+  range: string;
+  runs: number;
+  runs_with_feedback: number;
+  pre_scan: {
+    with_text: number;
+    comparable: number;
+    supplier_hits: number;
+    by_confidence: Record<string, { hits: number; total: number }>;
+  };
+  brief: {
+    runs: number;
+    user_corrections: number;
+    prescan_fills: number;
+    questions_asked: number;
+    answered_doc: number;
+    answered_ai: number;
+    answered_other: number;
+    skipped: number;
+    chat_messages: number;
+    top_fields: { field: string; count: number }[];
+    top_findings: { id: string; severity: string; count: number }[];
+  };
+  rows: {
+    runs: number;
+    total_rows: number;
+    corrected_cells: number;
+    rows_added: number;
+    rows_removed: number;
+    runs_with_errors_acknowledged: number;
+    chat_messages: number;
+    top_fields: { field: string; count: number }[];
+    top_findings: { id: string; severity: string; count: number }[];
+  };
+  recurring: {
+    scope: "brief" | "shared" | "row";
+    field: string;
+    before: string | null;
+    after: string | null;
+    runs: number;
+    suppliers: string[];
+  }[];
+}
+
+/* ------------------------------- eval cases ------------------------------- */
+
+export interface EvalCheck {
+  name: string;
+  ok: boolean;
+  expected: unknown;
+  actual: unknown;
+}
+
+export interface EvalCaseResult {
+  slug: string;
+  title: string;
+  source: "repo" | "db";
+  checks: EvalCheck[];
+  ms: number;
+  error?: string;
+}
+
+export interface EvalCase {
+  id: string | null;
+  slug: string;
+  title: string;
+  source: "repo" | "db";
+  supplierCodigo: string | null;
+  layoutFamily: string | null;
+  notes: string | null;
+  files: { filename: string; kind: string; size: number }[];
+  expected: Record<string, unknown>;
+  createdAt: string | null;
+  lastResult: { ok: boolean; passed: number; failed: number; ranAt: string; error?: string } | null;
+}
+
+export interface EvalRunSummary {
+  id: string;
+  ranAt: string;
+  totalCases: number;
+  totalChecks: number;
+  failedChecks: number;
+  ms?: number;
+}
+
+export interface CreateEvalCaseInput {
+  title: string;
+  supplierCodigo?: string | null;
+  layoutFamily?: string | null;
+  notes?: string | null;
+  expected: Record<string, unknown>;
 }
 
 /* --------------------- supplier-intelligence endpoints -------------------- */
@@ -1314,6 +1525,8 @@ export interface SaveContractRunInput {
   cost_usd?: number;
   /** See `ExtractionMeta.extraction_id`. Makes the save an upsert. */
   extraction_id?: string;
+  /** Señal de aprendizaje (ver `RunFeedback`). Opcional; nunca bloquea el save. */
+  feedback?: RunFeedback | null;
 }
 
 export interface ContractRunUserRef {
@@ -1482,6 +1695,83 @@ export const api = {
         method: "DELETE",
         auth: true,
       });
+    },
+  },
+  agentRules: {
+    list() {
+      return request<{ rules: AgentRule[] }>("/agent-rules", { method: "GET", auth: true });
+    },
+    create(text: string) {
+      return request<{ rule: AgentRule }>("/agent-rules", {
+        method: "POST",
+        body: { text },
+        auth: true,
+      });
+    },
+    update(id: string, patch: { text?: string; enabled?: boolean }) {
+      return request<{ rule: AgentRule }>(`/agent-rules/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        body: patch,
+        auth: true,
+      });
+    },
+    remove(id: string) {
+      return request<void>(`/agent-rules/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        auth: true,
+      });
+    },
+    suggestions() {
+      return request<{ suggestions: AgentRuleSuggestion[]; thresholds: { runs: number; suppliers: number } }>(
+        "/agent-rules/suggestions",
+        { method: "GET", auth: true },
+      );
+    },
+    acceptSuggestion(id: string, text?: string) {
+      return request<{ suggestion: AgentRuleSuggestion; rule: AgentRule }>(
+        `/agent-rules/suggestions/${encodeURIComponent(id)}/accept`,
+        { method: "POST", body: text ? { text } : {}, auth: true },
+      );
+    },
+    dismissSuggestion(id: string) {
+      return request<{ suggestion: AgentRuleSuggestion }>(
+        `/agent-rules/suggestions/${encodeURIComponent(id)}/dismiss`,
+        { method: "POST", body: {}, auth: true },
+      );
+    },
+  },
+  evals: {
+    list() {
+      return request<{ cases: EvalCase[]; runs: EvalRunSummary[]; limits: { maxDbCases: number; maxFiles: number; maxFileBytes: number } }>(
+        "/api/supplier-intelligence/evals",
+        { method: "GET", auth: true },
+      );
+    },
+    create(files: File[], input: CreateEvalCaseInput) {
+      const form = new FormData();
+      for (const f of files) form.append("files", f);
+      form.append("title", input.title);
+      if (input.supplierCodigo) form.append("supplier_codigo", input.supplierCodigo);
+      if (input.layoutFamily) form.append("layout_family", input.layoutFamily);
+      if (input.notes) form.append("notes", input.notes);
+      form.append("expected", JSON.stringify(input.expected));
+      return requestForm<{ case: EvalCase }>("/api/supplier-intelligence/evals", form, {
+        auth: true,
+        timeoutMs: 2 * 60 * 1000,
+      });
+    },
+    remove(id: string) {
+      return request<void>(`/api/supplier-intelligence/evals/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        auth: true,
+      });
+    },
+    /** Corre todos los casos (sin IA). Puede tardar ~1-2 s por caso. */
+    run() {
+      return request<{ run: EvalRunSummary; results: EvalCaseResult[] }>(
+        "/api/supplier-intelligence/evals/run",
+        { method: "POST", body: {}, auth: true, timeoutMs: 5 * 60 * 1000 },
+      );
     },
   },
   supplierIntelligence: {
@@ -1726,6 +2016,25 @@ export const api = {
       const qs = new URLSearchParams({ tz: browserTimeZone() });
       return request<{ stats: ContractStats; tz: string }>(
         `/api/supplier-intelligence/contracts/stats?${qs.toString()}`,
+        { method: "GET", auth: true },
+      );
+    },
+    /** Panel de calidad: agregado del feedback de los runs del rango. */
+    quality(range: ContractRangeKey = "quarter") {
+      const qs = new URLSearchParams({ tz: browserTimeZone(), range });
+      return request<{ quality: QualityReport; tz: string }>(
+        `/api/supplier-intelligence/contracts/quality?${qs.toString()}`,
+        { method: "GET", auth: true },
+      );
+    },
+    /**
+     * Último run APROBADO de un proveedor del maestro (memoria del
+     * proveedor). `null` cuando nunca se procesó un contrato suyo.
+     */
+    lastRun(supplierCodigo: string) {
+      const qs = new URLSearchParams({ supplier: supplierCodigo });
+      return request<{ memory: SupplierMemory | null }>(
+        `/api/supplier-intelligence/contracts/last?${qs.toString()}`,
         { method: "GET", auth: true },
       );
     },

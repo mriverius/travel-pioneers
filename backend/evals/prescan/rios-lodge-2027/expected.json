@@ -1,0 +1,40 @@
+{
+  "suppliers": [
+    { "codigo": "RIOSLODGE", "nombre": "RIOS LODGE", "actividad": "HO", "zona": "TUR" },
+    { "codigo": "LAPARIOS", "nombre": "LAPA RIOS ECO LODGE", "actividad": "HO", "zona": "OSA" },
+    { "codigo": "PACUARE", "nombre": "PACUARE LODGE", "actividad": "HO", "zona": "TUR" }
+  ],
+  "supplier": { "codigo": "RIOSLODGE", "confidence": "alta" },
+  "taxes": { "included": false, "percent": 13 },
+  "commission": { "net": true },
+  "currencies": ["USD"],
+  "cedulas": ["3-102-845791"],
+  "legalName": "Pacuare Canyon Lodge LLC. Limited",
+  "validity": { "start": "2027-01-01", "end": "2027-12-31" },
+  "seasons": [
+    { "name": "High Season", "ranges": ["01-01>03-31", "06-01>08-31", "11-01>12-31"] },
+    { "name": "Low Season", "ranges": ["04-01>05-31", "09-01>10-31"] }
+  ],
+  "priceMentions": 76,
+  "estimatedProducts": 9,
+  "minNights": 2,
+  "checkIn": "12:00 p.m.",
+  "checkOut": "10:00 a.m.",
+  "bankAccounts": [
+    { "iban": "CR30010710302104675229", "currency": "CRC", "accountNumber": "71030210467522", "bank": "BCT BANK" },
+    { "iban": "CR53010710302204675316", "currency": "USD", "accountNumber": "71030220467531", "bank": "BCT BANK" }
+  ],
+  "paymentTerms": [
+    { "daysBefore": 45, "percent": 100, "season": "high" },
+    { "daysBefore": 30, "percent": 100, "season": "low" }
+  ],
+  "cancellationTerms": [
+    { "daysBefore": 45, "percent": 0, "season": "high" },
+    { "daysBefore": 30, "percent": 0, "season": "low" },
+    { "daysBefore": 45, "percent": 100, "season": "high" },
+    { "daysBefore": 30, "percent": 100, "season": "low" }
+  ],
+  "phones": ["+506 8448-9502", "+506 6204-8983"],
+  "emails": ["reservations@rioslodge.com", "conta@rioslodge.com"],
+  "crossDocumentWarnings": 1
+}

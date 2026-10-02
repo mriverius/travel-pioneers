@@ -15,13 +15,22 @@ import {
 import { generateXlsxHandler } from "../agents/supplier-intelligence/generateController.js";
 import { refineTableHandler } from "../agents/supplier-intelligence/tableChatController.js";
 import {
+  contractRunQualityHandler,
   contractRunStatsHandler,
+  lastContractRunForSupplierHandler,
   listContractRunsHandler,
   saveContractRunHandler,
 } from "../agents/supplier-intelligence/contractsController.js";
 import { supplierIntelligenceErrorHandler } from "../agents/supplier-intelligence/errorHandler.js";
 import { handleContractUpload } from "../agents/supplier-intelligence/uploadMiddleware.js";
 import { preScanHandler } from "../agents/supplier-intelligence/preScanController.js";
+import {
+  createEvalCaseHandler,
+  deleteEvalCaseHandler,
+  listEvalCasesHandler,
+  runEvalsHandler,
+} from "../agents/supplier-intelligence/evalController.js";
+import { requireAdmin } from "../middleware/auth.js";
 
 const router = Router();
 
@@ -347,11 +356,34 @@ router.get(
 );
 
 router.get(
+  "/contracts/last",
+  requireAuth,
+  contractsReadLimiter,
+  asyncHandler(lastContractRunForSupplierHandler),
+);
+
+router.get(
   "/contracts/stats",
   requireAuth,
   contractsReadLimiter,
   asyncHandler(contractRunStatsHandler),
 );
+
+router.get(
+  "/contracts/quality",
+  requireAuth,
+  contractsReadLimiter,
+  asyncHandler(contractRunQualityHandler),
+);
+
+/**
+ * Casos de prueba del pre-scan (regresión determinística, sin IA).
+ * Lectura para cualquier usuario autenticado; alta/baja/correr sólo admins.
+ */
+router.get("/evals", requireAuth, contractsReadLimiter, asyncHandler(listEvalCasesHandler));
+router.post("/evals", requireAuth, requireAdmin, contractsWriteLimiter, handleContractUpload, asyncHandler(createEvalCaseHandler));
+router.delete("/evals/:id", requireAuth, requireAdmin, contractsWriteLimiter, asyncHandler(deleteEvalCaseHandler));
+router.post("/evals/run", requireAuth, requireAdmin, contractsWriteLimiter, contractsJsonParser, asyncHandler(runEvalsHandler));
 
 // Scoped error middleware — emits the `{ success: false, error: { code, message } }`
 // envelope the product spec pins, without affecting the other routers.

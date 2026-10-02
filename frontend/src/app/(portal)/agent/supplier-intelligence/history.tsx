@@ -907,7 +907,7 @@ function HistoryDetailModal({
                     </span>
                   </span>
                   <span
-                    title={`Costo estimado pipeline completo (Opus 4.8: $5/M input + $25/M output, incluye pre-análisis)`}
+                    title={`Costo del pipeline completo: pre-análisis (Sonnet 5.5) + extracción (Opus 5.5), cada pasada a la tarifa de su modelo`}
                     className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-amber-500/30 bg-amber-500/10 text-[10.5px] font-semibold uppercase tracking-wider text-amber-300"
                   >
                     <span className="text-amber-400/70">Costo</span>

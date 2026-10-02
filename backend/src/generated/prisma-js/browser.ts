@@ -55,3 +55,42 @@ export type Supplier = Prisma.SupplierModel
  * 
  */
 export type SupplierService = Prisma.SupplierServiceModel
+/**
+ * Model AgentRule
+ * *
+ *  * Reglas permanentes de la agencia para el agente ("siempre usar ocupación
+ *  * doble como base", "ignorar tarifas en colones"). Memoria EXPLÍCITA: la
+ *  * escriben y activan los admins, se inyecta en cada análisis con prioridad
+ *  * alta (debajo de los comentarios del contrato en curso) y queda visible.
+ *  * Nada se aprende solo.
+ */
+export type AgentRule = Prisma.AgentRuleModel
+/**
+ * Model AgentRuleSuggestion
+ * *
+ *  * Sugerencias de reglas derivadas de correcciones recurrentes (misma
+ *  * corrección en ≥ N contratos de proveedores distintos). El sistema las
+ *  * PROPONE; sólo un admin las convierte en `AgentRule` o las descarta.
+ *  * `key` es determinística (campo + antes + después) para no re-proponer
+ *  * lo ya decidido.
+ */
+export type AgentRuleSuggestion = Prisma.AgentRuleSuggestionModel
+/**
+ * Model EvalCase
+ * *
+ *  * Casos de prueba del pre-scan creados desde la UI (los del repo viven en
+ *  * `backend/evals/prescan/`). Guardan los documentos (bytea) y el
+ *  * `expected.json` derivado de lo que el revisor APROBÓ, no de lo que el
+ *  * pre-scan dijo — así el caso verifica, no se verifica a sí mismo.
+ */
+export type EvalCase = Prisma.EvalCaseModel
+/**
+ * Model EvalCaseFile
+ * 
+ */
+export type EvalCaseFile = Prisma.EvalCaseFileModel
+/**
+ * Model EvalRun
+ * * Resultado de cada corrida de la verificación del pre-scan.
+ */
+export type EvalRun = Prisma.EvalRunModel

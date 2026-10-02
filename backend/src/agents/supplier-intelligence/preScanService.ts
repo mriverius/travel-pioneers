@@ -154,8 +154,24 @@ export interface PreScanDocument {
   chars: number;
   /** Etiquetas cortas: "72 precios", "2 temporadas", "cancelación", "IBAN"… */
   contributes: string[];
+  /** Temporadas leídas en ESTE documento (para resolver conflictos entre documentos). */
+  seasons: PreScanSeason[];
+  /**
+   * Mapa de páginas: dónde están las tarifas, políticas, bancos… Permite
+   * que el modelo (y el revisor) vayan directo a la página relevante en
+   * lugar de leer 25 páginas de cláusulas legales.
+   */
+  pageMap: PreScanPage[];
   /** Mejor candidato de proveedor leído en ESTE documento (para detectar mezclas). */
   supplierHint: { codigo: string; nombre: string | null; confidence: PreScanConfidence } | null;
+}
+
+export interface PreScanPage {
+  page: number;
+  /** Montos con símbolo de moneda en la página. */
+  prices: number;
+  /** Temas detectados: tarifas, temporadas, políticas, cancelación, pago, banco, niños, contacto, legal. */
+  topics: string[];
 }
 
 export interface PreScanResult {
@@ -267,7 +283,7 @@ function significantTokens(key: string): string[] {
 /*                           Detección de proveedor                           */
 /* -------------------------------------------------------------------------- */
 
-interface SupplierLite {
+export interface SupplierLite {
   id: string;
   codigo: string;
   nombre: string | null;
@@ -1454,7 +1470,7 @@ export function buildWarnings(prev: PreScanPreviousRun, facts: PreScanFacts, tex
 const SUPPLIER_CACHE_TTL_MS = 30_000;
 let supplierCache: { at: number; data: SupplierLite[] } | null = null;
 
-async function loadSuppliersCached(): Promise<SupplierLite[]> {
+export async function loadSuppliersCached(): Promise<SupplierLite[]> {
   if (supplierCache && Date.now() - supplierCache.at < SUPPLIER_CACHE_TTL_MS) {
     return supplierCache.data;
   }
@@ -1508,6 +1524,7 @@ interface ScannedDoc {
   text: string;
   textAvailable: boolean;
   pages: { scanned: number; total: number } | null;
+  pageTexts: string[] | null;
   facts: PreScanFacts;
   inferences: PreScanInferences;
 }
@@ -1540,7 +1557,7 @@ async function scanOne(input: PreScanInputFile, role: "primary" | "secondary"): 
   // Un documento sin precios (hoja de cuentas bancarias, políticas) no
   // define la moneda de las tarifas: "Cuenta en Colones" no vota.
   const factsOut = inferences.priceMentions === 0 ? { ...facts, currencies: [] } : facts;
-  return { input, role, text, textAvailable, pages: layer?.pages ?? null, facts: factsOut, inferences };
+  return { input, role, text, textAvailable, pages: layer?.pages ?? null, pageTexts: layer?.pageTexts ?? null, facts: factsOut, inferences };
 }
 
 const unionStr = (lists: string[][], cap: number): string[] => uniq(lists.flat(), cap);
@@ -1745,13 +1762,40 @@ function contributionsOf(d: ScannedDoc): string[] {
   return out.length > 0 ? out : ["texto sin datos reconocibles"];
 }
 
+/** Clasifica cada página por lo que contiene (barato: sólo regex). */
+function buildPageMap(pageTexts: string[] | null): PreScanPage[] {
+  if (!pageTexts) return [];
+  const out: PreScanPage[] = [];
+  pageTexts.forEach((pt, i) => {
+    const t = pt ?? "";
+    if (t.trim().length < 20) return;
+    const prices = (t.match(/(?:US\$|USD|\$|₡|CRC|€)[ \t]{0,6}\d/g) ?? []).length;
+    const topics: string[] = [];
+    if (prices >= 4) topics.push("tarifas");
+    if (/\b(season|temporada|high|low|peak|holiday)\b/i.test(t) && /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\b/i.test(t)) topics.push("temporadas");
+    if (/\bcancel|cancelaci/i.test(t)) topics.push("cancelación");
+    if (/\b(payment|deposit|prepay|pago|dep[oó]sito|prepago)\b/i.test(t)) topics.push("pago");
+    if (/\b(iban|swift|cuenta\s+(?:en|corriente|bancaria)|account\s+(?:number|#)|bank\s+name|banco)\b/i.test(t)) topics.push("banco");
+    if (/\b(child(?:ren)?|kids?|ni[ñn][oa]s?|menores)\b/i.test(t)) topics.push("niños");
+    if (/\b(reservations?|reservas?|e-?mail|tel[eé]fono|phone)\b/i.test(t) && /@/.test(t)) topics.push("contacto");
+    if (/\b(check[\s-]?in|check[\s-]?out)\b/i.test(t)) topics.push("check-in/out");
+    if (/\b(indemnif|liabilit|confidential|governing\s+law|arbitra|intellectual\s+property|force\s+majeure)\b/i.test(t)) topics.push("legal");
+    if (/\b(polic(?:y|ies)|pol[ií]ticas?|terms\s+and\s+conditions|t[eé]rminos)\b/i.test(t) && !topics.includes("cancelación") && !topics.includes("pago")) topics.push("políticas");
+    out.push({ page: i + 1, prices, topics });
+  });
+  return out;
+}
+
 /**
  * Pre-scan de todos los documentos adjuntos, tratados como PARES: el
  * proveedor se vota entre todos, los campos se fusionan por acuerdo y las
  * discrepancias entre documentos se reportan como avisos. El primer archivo
  * sólo da nombre al run en el historial.
  */
-export async function preScan(files: PreScanInputFile[]): Promise<PreScanResult> {
+export async function preScan(
+  files: PreScanInputFile[],
+  opts: { suppliers?: SupplierLite[] } = {},
+): Promise<PreScanResult> {
   const started = Date.now();
   if (files.length === 0) throw new Error("preScan: no files");
 
@@ -1760,7 +1804,8 @@ export async function preScan(files: PreScanInputFile[]): Promise<PreScanResult>
     docs.push(await scanOne(files[i]!, i === 0 ? "primary" : "secondary"));
   }
   const primary = docs[0]!;
-  const suppliers = await loadSuppliersCached();
+  // `opts.suppliers` permite correr sin DB (eval / tests).
+  const suppliers = opts.suppliers ?? (await loadSuppliersCached());
 
   // Proveedor: cada documento vota. Sumamos el puntaje de cada candidato en
   // todos los documentos (los documentos son pares, ninguno manda) y la
@@ -1812,6 +1857,8 @@ export async function preScan(files: PreScanInputFile[]): Promise<PreScanResult>
       pages: d.pages,
       chars: d.text.length,
       contributes: contributionsOf(d),
+      seasons: d.inferences.seasons,
+      pageMap: buildPageMap(d.pageTexts),
       supplierHint: hint,
     };
   });

@@ -54,7 +54,12 @@ export const ModelName = {
   User: 'User',
   ContractRun: 'ContractRun',
   Supplier: 'Supplier',
-  SupplierService: 'SupplierService'
+  SupplierService: 'SupplierService',
+  AgentRule: 'AgentRule',
+  AgentRuleSuggestion: 'AgentRuleSuggestion',
+  EvalCase: 'EvalCase',
+  EvalCaseFile: 'EvalCaseFile',
+  EvalRun: 'EvalRun'
 } as const
 
 export type ModelName = (typeof ModelName)[keyof typeof ModelName]
@@ -103,7 +108,8 @@ export const ContractRunScalarFieldEnum = {
   aiModel: 'aiModel',
   inputTokens: 'inputTokens',
   outputTokens: 'outputTokens',
-  costUsd: 'costUsd'
+  costUsd: 'costUsd',
+  feedback: 'feedback'
 } as const
 
 export type ContractRunScalarFieldEnum = (typeof ContractRunScalarFieldEnum)[keyof typeof ContractRunScalarFieldEnum]
@@ -133,6 +139,76 @@ export const SupplierServiceScalarFieldEnum = {
 } as const
 
 export type SupplierServiceScalarFieldEnum = (typeof SupplierServiceScalarFieldEnum)[keyof typeof SupplierServiceScalarFieldEnum]
+
+
+export const AgentRuleScalarFieldEnum = {
+  id: 'id',
+  text: 'text',
+  enabled: 'enabled',
+  createdBy: 'createdBy',
+  createdAt: 'createdAt',
+  updatedAt: 'updatedAt'
+} as const
+
+export type AgentRuleScalarFieldEnum = (typeof AgentRuleScalarFieldEnum)[keyof typeof AgentRuleScalarFieldEnum]
+
+
+export const AgentRuleSuggestionScalarFieldEnum = {
+  id: 'id',
+  key: 'key',
+  field: 'field',
+  before: 'before',
+  after: 'after',
+  occurrences: 'occurrences',
+  evidence: 'evidence',
+  proposedText: 'proposedText',
+  status: 'status',
+  ruleId: 'ruleId',
+  createdAt: 'createdAt',
+  updatedAt: 'updatedAt'
+} as const
+
+export type AgentRuleSuggestionScalarFieldEnum = (typeof AgentRuleSuggestionScalarFieldEnum)[keyof typeof AgentRuleSuggestionScalarFieldEnum]
+
+
+export const EvalCaseScalarFieldEnum = {
+  id: 'id',
+  slug: 'slug',
+  title: 'title',
+  supplierCodigo: 'supplierCodigo',
+  layoutFamily: 'layoutFamily',
+  notes: 'notes',
+  expected: 'expected',
+  createdBy: 'createdBy',
+  createdAt: 'createdAt'
+} as const
+
+export type EvalCaseScalarFieldEnum = (typeof EvalCaseScalarFieldEnum)[keyof typeof EvalCaseScalarFieldEnum]
+
+
+export const EvalCaseFileScalarFieldEnum = {
+  id: 'id',
+  caseId: 'caseId',
+  filename: 'filename',
+  kind: 'kind',
+  size: 'size',
+  data: 'data'
+} as const
+
+export type EvalCaseFileScalarFieldEnum = (typeof EvalCaseFileScalarFieldEnum)[keyof typeof EvalCaseFileScalarFieldEnum]
+
+
+export const EvalRunScalarFieldEnum = {
+  id: 'id',
+  ranAt: 'ranAt',
+  ranBy: 'ranBy',
+  totalCases: 'totalCases',
+  totalChecks: 'totalChecks',
+  failedChecks: 'failedChecks',
+  results: 'results'
+} as const
+
+export type EvalRunScalarFieldEnum = (typeof EvalRunScalarFieldEnum)[keyof typeof EvalRunScalarFieldEnum]
 
 
 export const SortOrder = {

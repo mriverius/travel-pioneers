@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import logger from "../../config/logger.js";
 import ApiError from "../../utils/ApiError.js";
+import { loadEnabledRuleTexts } from "../../controllers/agentRuleController.js";
 import { detectDocKind, prepareDocument } from "./extractors/index.js";
 import {
   analyzeContractBrief,
@@ -224,6 +225,14 @@ async function prepareUploadedDocs(req: Request): Promise<{
   );
   const comments = parseComments(req.body?.comments);
   const preScanHints = parsePreScanHints(req.body?.pre_scan_hints);
+  // Memoria explícita de la agencia. Si la DB falla, seguimos sin reglas:
+  // un run sin reglas es mejor que ningún run.
+  let agencyRules: string[] = [];
+  try {
+    agencyRules = await loadEnabledRuleTexts();
+  } catch (err) {
+    logger.warn("agent rules unavailable", { error: err instanceof Error ? err.message : String(err) });
+  }
 
   const prepared: PreparedDocumentInput[] = [];
   let totalBytes = 0;
@@ -249,7 +258,7 @@ async function prepareUploadedDocs(req: Request): Promise<{
     prepared,
     files,
     totalBytes,
-    context: { comments, isExistingSupplier, preScanHints },
+    context: { comments, isExistingSupplier, preScanHints, agencyRules },
   };
 }
 

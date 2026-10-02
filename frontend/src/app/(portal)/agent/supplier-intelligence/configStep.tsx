@@ -4,17 +4,22 @@ import {
   AlertTriangle,
   ArrowLeft,
   Banknote,
+  BedDouble,
   Brain,
   Building2,
   CalendarRange,
   Calculator,
   Check,
   ChevronDown,
+  Coins,
+  FileWarning,
+  Gift,
   Info,
   Loader2,
   Percent,
   Plus,
   Receipt,
+  Rows3,
   Send,
   Sparkles,
   Tags,
@@ -183,28 +188,157 @@ function renderInlineBold(text: string, keyPrefix: string): ReactNode[] {
   });
 }
 
+/**
+ * Secciones estándar del `logic_summary` (ver backend `LOGIC_SUMMARY_FORMAT`).
+ * El icono y el tono se eligen por el título; cualquier título desconocido
+ * se renderiza igual con un icono genérico.
+ */
+const SUMMARY_SECTION_META: { match: RegExp; icon: ReactNode; tone?: "warn" | "accent" }[] = [
+  { match: /^proveedor/i, icon: <Building2 className="h-3.5 w-3.5" /> },
+  { match: /^tarifas/i, icon: <Coins className="h-3.5 w-3.5" /> },
+  { match: /^comisi/i, icon: <Percent className="h-3.5 w-3.5" /> },
+  { match: /^temporadas/i, icon: <CalendarRange className="h-3.5 w-3.5" /> },
+  { match: /^habitaciones|^servicios$/i, icon: <BedDouble className="h-3.5 w-3.5" /> },
+  { match: /^tipo de tarifa/i, icon: <Tags className="h-3.5 w-3.5" /> },
+  { match: /^plan de filas/i, icon: <Rows3 className="h-3.5 w-3.5" />, tone: "accent" },
+  { match: /^servicios incluidos/i, icon: <Gift className="h-3.5 w-3.5" /> },
+  { match: /^pol[ií]ticas/i, icon: <Receipt className="h-3.5 w-3.5" /> },
+  { match: /^cuentas/i, icon: <Banknote className="h-3.5 w-3.5" /> },
+  { match: /^notas cr[ií]ticas/i, icon: <FileWarning className="h-3.5 w-3.5" />, tone: "warn" },
+];
+
+interface SummarySection {
+  title: string | null;
+  /** Párrafos o ítems (si `bullet` es true se dibuja como lista). */
+  items: { text: string; bullet: boolean }[];
+}
+
+const EMPTY_SECTION_RE = /^(no se detect(ó|aron|a)|no aplica|n\/a|ninguna?|sin (datos|informaci[oó]n))\b/i;
+
+/**
+ * Parte el resumen en secciones por los títulos en negrita (**Título**),
+ * estén en su propia línea o pegados en medio de un párrafo (algunos
+ * modelos devuelven todo en un bloque). Dentro de cada sección, separa
+ * viñetas y, si un párrafo es muy largo, lo corta por oraciones para que se
+ * pueda escanear.
+ */
+function parseLogicSummary(summary: string): SummarySection[] {
+  const tokens = summary.split(/(\*\*[^*\n]{2,80}\*\*)/g);
+  const sections: SummarySection[] = [];
+  let current: SummarySection = { title: null, items: [] };
+  const flush = () => {
+    if (current.title !== null || current.items.length > 0) sections.push(current);
+  };
+  for (const tok of tokens) {
+    const heading = tok.match(/^\*\*([^*]+)\*\*$/);
+    if (heading) {
+      flush();
+      current = { title: stripSectionEmojis(heading[1]!).replace(/:$/, ""), items: [] };
+      continue;
+    }
+    // Sólo quitamos ":" o "–" pegados al título en la misma línea; un "\n- "
+    // siguiente es una viñeta y debe conservar su marcador.
+    const body = tok.replace(/^[ \t]*[:–—-]?[ \t]*/, "");
+    if (!body.trim()) continue;
+    for (const rawLine of body.split(/\n+/)) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      const bulletMatch = line.match(/^(?:[-•*·]|\d+[.)])\s+(.*)$/);
+      if (bulletMatch) {
+        current.items.push({ text: bulletMatch[1]!, bullet: true });
+        continue;
+      }
+      // Párrafo largo → una oración por línea (más fácil de escanear).
+      if (line.length > 220) {
+        const sentences = line.split(/(?<=[.;])\s+(?=[A-ZÁÉÍÓÚÑ¿¡"“(])/).map((x) => x.trim()).filter(Boolean);
+        if (sentences.length > 1) {
+          for (const sent of sentences) current.items.push({ text: sent, bullet: true });
+          continue;
+        }
+      }
+      current.items.push({ text: line, bullet: false });
+    }
+  }
+  flush();
+  return sections;
+}
+
 function LogicSummaryView({ summary }: { summary: string }) {
-  const lines = summary.split("\n");
+  const sections = parseLogicSummary(summary);
+  const intro = sections.find((x) => x.title === null);
+  const titled = sections.filter((x) => x.title !== null);
+
+  // Sin títulos reconocibles → texto plano con saltos de línea (fallback).
+  if (titled.length === 0) {
+    return (
+      <div className="space-y-1.5">
+        {summary.split("\n").map((line, i) =>
+          line.trim() === "" ? (
+            <div key={i} className="h-1.5" />
+          ) : (
+            <p key={i} className="text-[13px] leading-relaxed text-foreground/90">
+              {renderInlineBold(line, `l${i}`)}
+            </p>
+          ),
+        )}
+      </div>
+    );
+  }
+
   return (
-    <div className="space-y-1.5">
-      {lines.map((line, i) => {
-        const trimmed = line.trim();
-        if (trimmed === "") return <div key={i} className="h-1.5" />;
-        // Línea que es solo un título de sección en negrita → encabezado.
-        const isHeading = /^\*\*[^*]+\*\*$/.test(trimmed);
-        return (
-          <p
-            key={i}
-            className={
-              isHeading
-                ? "text-[13px] font-semibold text-foreground mt-2 first:mt-0"
-                : "text-[13px] leading-relaxed text-foreground/90"
-            }
-          >
-            {renderInlineBold(line, `l${i}`)}
-          </p>
-        );
-      })}
+    <div className="space-y-3">
+      {intro && intro.items.length > 0 && (
+        <p className="text-[13px] leading-relaxed text-foreground/90">
+          {intro.items.map((it) => it.text).join(" ")}
+        </p>
+      )}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {titled.map((sec, idx) => {
+          const meta = SUMMARY_SECTION_META.find((m) => m.match.test(sec.title!));
+          const isEmpty =
+            sec.items.length === 0 ||
+            (sec.items.length === 1 && EMPTY_SECTION_RE.test(sec.items[0]!.text));
+          const tone = meta?.tone;
+          const frame =
+            tone === "warn"
+              ? "border-amber-500/35 bg-amber-500/5"
+              : tone === "accent"
+                ? "border-primary/35 bg-primary/5"
+                : "border-border/70 bg-card/50";
+          const wide = tone === "warn" || tone === "accent";
+          return (
+            <section
+              key={`${sec.title}-${idx}`}
+              className={`rounded-lg border px-3.5 py-3 ${frame} ${wide ? "md:col-span-2" : ""} ${isEmpty ? "opacity-70" : ""}`}
+            >
+              <h4 className="flex items-center gap-1.5 text-[12px] font-semibold uppercase tracking-wide text-foreground/90">
+                <span className={tone === "warn" ? "text-amber-400" : "text-primary"}>
+                  {meta?.icon ?? <Info className="h-3.5 w-3.5" />}
+                </span>
+                {sec.title}
+              </h4>
+              {sec.items.length === 0 ? (
+                <p className="mt-1.5 text-[12.5px] italic text-muted-foreground">Sin información.</p>
+              ) : (
+                <div className="mt-1.5 space-y-1">
+                  {sec.items.map((it, i) =>
+                    it.bullet ? (
+                      <p key={i} className="flex items-start gap-2 text-[13px] leading-relaxed text-foreground/90">
+                        <span className="mt-[9px] h-1 w-1 shrink-0 rounded-full bg-foreground/50" />
+                        <span>{renderInlineBold(it.text, `${idx}-${i}`)}</span>
+                      </p>
+                    ) : (
+                      <p key={i} className="text-[13px] leading-relaxed text-foreground/90">
+                        {renderInlineBold(it.text, `${idx}-${i}`)}
+                      </p>
+                    ),
+                  )}
+                </div>
+              )}
+            </section>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -566,7 +700,7 @@ export function ConfigVariablesStep({
           {/* Contenedor de alto FIJO/consistente: el análisis inicial y cada
               corrección se muestran en el mismo bloque, mismo tamaño, con
               scroll interno si el contenido es largo. */}
-          <div className="min-h-[280px] max-h-[480px] overflow-y-auto pr-1">
+          <div className="min-h-[200px]">
             {isRefining ? (
               <div className="flex h-[280px] items-center justify-center gap-2 text-[13px] text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin text-primary" />
@@ -615,7 +749,7 @@ export function ConfigVariablesStep({
                       </p>
                     </header>
                     <div className="px-4 py-4">
-                      <div className="min-h-[280px] max-h-[480px] overflow-y-auto pr-1">
+                      <div>
                         <LogicSummaryView summary={msg.content} />
                       </div>
                     </div>

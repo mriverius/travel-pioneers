@@ -109,6 +109,16 @@ model ContractRun {
    */
   costUsd         Float?   @map("cost_usd")
 
+  /**
+   * Señal de aprendizaje del run (`RunFeedback` en contractsController):
+   * qué detectó el pre-scan vs. qué eligió el usuario, qué corrigió el
+   * revisor humano sobre lo que propuso la IA (Paso 2 brief, Paso 3 filas),
+   * qué hallazgos del QA aparecieron y cómo se respondieron las preguntas.
+   * Es lo que alimenta el panel de calidad y las sugerencias de reglas.
+   * Nullable: runs anteriores y clientes viejos no lo envían.
+   */
+  feedback        Json?
+
   @@index([processedAt(sort: Desc)])
   @@index([processedById])
   @@map("contract_runs")
@@ -161,4 +171,100 @@ model SupplierService {
 
   @@unique([supplierId, codigo])
   @@map("supplier_services")
+}
+
+/**
+ * Reglas permanentes de la agencia para el agente ("siempre usar ocupación
+ * doble como base", "ignorar tarifas en colones"). Memoria EXPLÍCITA: la
+ * escriben y activan los admins, se inyecta en cada análisis con prioridad
+ * alta (debajo de los comentarios del contrato en curso) y queda visible.
+ * Nada se aprende solo.
+ */
+model AgentRule {
+  id        String   @id @default(uuid()) @db.Uuid
+  text      String
+  enabled   Boolean  @default(true)
+  createdBy String?  @map("created_by") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt      @map("updated_at") @db.Timestamptz(6)
+
+  @@map("agent_rules")
+}
+
+/**
+ * Sugerencias de reglas derivadas de correcciones recurrentes (misma
+ * corrección en ≥ N contratos de proveedores distintos). El sistema las
+ * PROPONE; sólo un admin las convierte en `AgentRule` o las descarta.
+ * `key` es determinística (campo + antes + después) para no re-proponer
+ * lo ya decidido.
+ */
+model AgentRuleSuggestion {
+  id           String   @id @default(uuid()) @db.Uuid
+  key          String   @unique
+  field        String
+  before       String?
+  after        String?
+  occurrences  Int      @default(0)
+  /** Códigos de proveedor (o filenames) donde se observó. */
+  evidence     Json
+  proposedText String   @map("proposed_text")
+  /** pending | accepted | dismissed */
+  status       String   @default("pending")
+  ruleId       String?  @map("rule_id") @db.Uuid
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt      @map("updated_at") @db.Timestamptz(6)
+
+  @@index([status])
+  @@map("agent_rule_suggestions")
+}
+
+/**
+ * Casos de prueba del pre-scan creados desde la UI (los del repo viven en
+ * `backend/evals/prescan/`). Guardan los documentos (bytea) y el
+ * `expected.json` derivado de lo que el revisor APROBÓ, no de lo que el
+ * pre-scan dijo — así el caso verifica, no se verifica a sí mismo.
+ */
+model EvalCase {
+  id             String   @id @default(uuid()) @db.Uuid
+  slug           String   @unique
+  title          String
+  supplierCodigo String?  @map("supplier_codigo")
+  /** Familia de formato ("hotel tabla por temporada", "tour por persona"…). */
+  layoutFamily   String?  @map("layout_family")
+  notes          String?
+  expected       Json
+  createdBy      String?  @map("created_by") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  files EvalCaseFile[]
+
+  @@map("eval_cases")
+}
+
+model EvalCaseFile {
+  id       String   @id @default(uuid()) @db.Uuid
+  caseId   String   @map("case_id") @db.Uuid
+  case     EvalCase @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  filename String
+  kind     String
+  size     Int
+  data     Bytes
+
+  @@index([caseId])
+  @@map("eval_case_files")
+}
+
+/** Resultado de cada corrida de la verificación del pre-scan. */
+model EvalRun {
+  id           String   @id @default(uuid()) @db.Uuid
+  ranAt        DateTime @default(now()) @map("ran_at") @db.Timestamptz(6)
+  ranBy        String?  @map("ran_by") @db.Uuid
+  totalCases   Int      @map("total_cases")
+  totalChecks  Int      @map("total_checks")
+  failedChecks Int      @map("failed_checks")
+  /** Por caso: slug, source, checks (name, ok, expected, actual), ms. */
+  results      Json
+
+  @@index([ranAt(sort: Desc)])
+  @@map("eval_runs")
 }

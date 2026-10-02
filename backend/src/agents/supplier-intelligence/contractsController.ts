@@ -9,6 +9,7 @@ import type {
   TipoUnidad,
 } from "./types.js";
 import { normalizeDate, normalizeSeasonDateField } from "./validators.js";
+import { buildQualityReport, coerceFeedback, type RunFeedback } from "./feedback.js";
 
 /**
  * Persistence + read endpoints for Supplier Intelligence runs.
@@ -329,6 +330,8 @@ interface SaveBody {
    * instead of inserting a duplicate. Optional for backwards compat.
    */
   extraction_id?: unknown;
+  /** Señal de aprendizaje (ver `feedback.ts`). Opcional; nunca bloquea el save. */
+  feedback?: unknown;
 }
 
 const UUID_RE =
@@ -408,6 +411,10 @@ export async function saveContractRunHandler(
   );
   const costUsd = coerceOptionalNonNegativeFloat(body.cost_usd, "cost_usd");
   const extractionId = coerceOptionalUuid(body.extraction_id, "extraction_id");
+  const fb = coerceFeedback(body.feedback);
+  if (fb.reason) {
+    logger.warn("ContractRun feedback dropped", { requestId: req.id, reason: fb.reason });
+  }
 
   const data = {
     filename,
@@ -423,6 +430,7 @@ export async function saveContractRunHandler(
     inputTokens: inputTokens ?? undefined,
     outputTokens: outputTokens ?? undefined,
     costUsd: costUsd ?? undefined,
+    feedback: (fb.feedback ?? undefined) as unknown as object | undefined,
   };
   const include = {
     processedBy: { select: { id: true, name: true, email: true } },
@@ -714,4 +722,119 @@ export async function contractRunStatsHandler(
   };
 
   res.json({ stats, tz: timeZone });
+}
+
+
+/* -------------------------------------------------------------------------- */
+/*                   GET /contracts/last?supplier=CODIGO (memoria)            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Memoria por proveedor: la última configuración CONFIRMADA por un humano
+ * para este proveedor (lo que quedó en el xlsx), resumida. Se inyecta al
+ * modelo como "interpretación confirmada anterior" y se muestra en el Paso 2
+ * para que el revisor vea qué cambió respecto a la vez pasada.
+ *
+ * Es memoria explícita y visible, no aprendizaje opaco: siempre se muestra
+ * de dónde viene (archivo, fecha) y el documento actual manda.
+ */
+export interface SupplierMemory {
+  runId: string;
+  processedAt: string;
+  filename: string;
+  shared: Record<string, string | null>;
+  manual: Record<string, unknown> | null;
+  products: string[];
+  seasons: { name: string | null; starts: string | null; ends: string | null }[];
+  occupancies: string[];
+  codigosServicio: string[];
+  rowCount: number;
+}
+
+export async function lastContractRunForSupplierHandler(
+  req: Request,
+  res: Response,
+): Promise<void> {
+  const codigo = typeof req.query.supplier === "string" ? req.query.supplier.trim() : "";
+  if (!codigo) throw ApiError.badRequest("`supplier` (código del maestro) es requerido.");
+
+  const rows = await prisma.$queryRaw<
+    { id: string; processed_at: Date; filename: string; shared_fields: Record<string, unknown>; manual_fields: Record<string, unknown> | null; rows: Record<string, unknown>[] }[]
+  >`
+    SELECT id, processed_at, filename, shared_fields, manual_fields, rows
+    FROM contract_runs
+    WHERE catalog_prefill ->> 'proveedor_codigo' = ${codigo}
+    ORDER BY processed_at DESC
+    LIMIT 1
+  `;
+  const r = rows[0];
+  if (!r) {
+    res.json({ memory: null });
+    return;
+  }
+  const str = (v: unknown): string | null => (typeof v === "string" && v.trim() !== "" ? v.trim() : null);
+  const sf = r.shared_fields ?? {};
+  const keep = [
+    "proveedor", "nombre_comercial", "cedula", "pais", "state_province", "type_of_business",
+    "reservations_email", "telefono", "contract_starts", "contract_ends", "tipo_unidad",
+    "tipo_servicio", "tipo_moneda", "numero_cuenta", "banco", "others_payment_cancel",
+  ] as const;
+  const shared: Record<string, string | null> = {};
+  for (const k of keep) shared[k] = str(sf[k]);
+
+  const uniq = (xs: (string | null)[]) => Array.from(new Set(xs.filter((x): x is string => !!x))).slice(0, 40);
+  const rowsArr = Array.isArray(r.rows) ? r.rows : [];
+  const seasonsSeen = new Map<string, { name: string | null; starts: string | null; ends: string | null }>();
+  for (const row of rowsArr) {
+    const k = `${str(row.season_name) ?? ""}|${str(row.season_starts) ?? ""}|${str(row.season_ends) ?? ""}`;
+    if (!seasonsSeen.has(k)) seasonsSeen.set(k, { name: str(row.season_name), starts: str(row.season_starts), ends: str(row.season_ends) });
+  }
+
+  const memory: SupplierMemory = {
+    runId: r.id,
+    processedAt: r.processed_at.toISOString(),
+    filename: r.filename,
+    shared,
+    manual: r.manual_fields ?? null,
+    products: uniq(rowsArr.map((row) => str(row.product_name))),
+    seasons: [...seasonsSeen.values()].slice(0, 12),
+    occupancies: uniq(rowsArr.map((row) => str(row.ocupacion))),
+    codigosServicio: uniq(rowsArr.map((row) => str(row.codigo_servicio))),
+    rowCount: rowsArr.length,
+  };
+  res.json({ memory });
+}
+
+/* -------------------------------------------------------------------------- */
+/*                          GET /contracts/quality                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Panel de calidad: agrega el `feedback` de los runs del rango. Es la
+ * versión "gratis" de un fixture por contrato: cada run real mide dónde
+ * acertó el pre-scan, cuánto corrigió la persona a la IA y qué hallazgos
+ * del QA se repiten. Sin IA, sólo lectura.
+ */
+export async function contractRunQualityHandler(req: Request, res: Response): Promise<void> {
+  const range: RangeKey = isRangeKey(req.query.range) ? req.query.range : "quarter";
+  const timeZone = resolveTimeZone(req.query.tz);
+  const since = rangeStart(range, timeZone);
+  const rows = await prisma.contractRun.findMany({
+    where: since ? { processedAt: { gte: since } } : {},
+    orderBy: { processedAt: "desc" },
+    take: 2000,
+    select: { feedback: true, catalogPrefill: true, filename: true },
+  });
+  const report = buildQualityReport(
+    range,
+    rows.map((r) => ({
+      feedback: (r.feedback as RunFeedback | null) ?? null,
+      supplier:
+        r.catalogPrefill && typeof r.catalogPrefill === "object"
+          ? ((r.catalogPrefill as { proveedor_codigo?: unknown }).proveedor_codigo as string | undefined) ?? null
+          : null,
+      filename: r.filename,
+    })),
+  );
+  res.json({ quality: report, tz: timeZone });
 }

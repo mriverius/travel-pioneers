@@ -1,5 +1,9 @@
 import { APIError } from "@anthropic-ai/sdk";
-import type { Tool, ToolUseBlock } from "@anthropic-ai/sdk/resources/messages.js";
+import type {
+  MessageParam,
+  Tool,
+  ToolUseBlock,
+} from "@anthropic-ai/sdk/resources/messages.js";
 import ApiError from "../../utils/ApiError.js";
 import logger from "../../config/logger.js";
 import { getAnthropicClient } from "./anthropicClient.js";
@@ -43,16 +47,18 @@ import type {
  */
 
 /**
- * Modelo del chat de tabla. Opus: la tarea parece simple pero requiere
- * razonamiento numérico fino (¿qué columnas llevan IVA?, ¿el rack también?)
- * y un error acá se propaga al xlsx que el operador descarga. El payload es
- * chico (sin documentos, solo el JSON), así que el costo por mensaje es
- * bajo aunque el modelo sea el caro.
+ * Modelo del chat de tabla. Sonnet 5.5: son correcciones acotadas sobre un
+ * JSON que ya existe, con instrucción humana explícita, y el resultado pasa
+ * por el QA determinístico del Paso 3 (aritmética neto/rack/comisión,
+ * cobertura de precios) antes de llegar al xlsx. El payload incluye la
+ * grilla completa, así que aquí el modelo barato sí mueve la factura. Si en
+ * «Calidad del agente» las correcciones por chat empeoran, volver a Opus es
+ * cambiar esta constante.
  */
-export const SUPPLIER_TABLE_CHAT_MODEL = "claude-opus-5";
+export const SUPPLIER_TABLE_CHAT_MODEL = "claude-sonnet-5-5";
 
-/** USD por millón de tokens para el modelo del chat (ago 2026). */
-const TABLE_CHAT_PRICES = { input: 5, output: 25 };
+/** USD por millón de tokens para el modelo del chat (oct 2026). */
+const TABLE_CHAT_PRICES = { input: 2, output: 10 };
 
 /**
  * Cap de tokens de salida. Las operaciones son compactas, pero un
@@ -938,14 +944,34 @@ export async function refineContractTable(
   const client = getAnthropicClient();
   let response;
   try {
-    response = await client.messages.create({
-      model: SUPPLIER_TABLE_CHAT_MODEL,
-      max_tokens: MAX_TOKENS,
-      system: buildSystemPrompt(),
-      tools: [CORREGIR_TABLA_TOOL],
-      tool_choice: { type: "tool", name: TOOL_NAME },
-      messages: [{ role: "user", content: userMessage }],
-    });
+    // Los modelos 5.5 no aceptan tool_choice "tool": usamos "auto" con
+    // instrucción explícita y un reintento si contesta en texto.
+    const system =
+      buildSystemPrompt() +
+      `\n\nFORMATO DE RESPUESTA (obligatorio): respondé ÚNICAMENTE llamando a la herramienta "${TOOL_NAME}". Sin texto fuera de la herramienta.`;
+    const baseMessages: MessageParam[] = [{ role: "user", content: userMessage }];
+    const call = (messages: MessageParam[]) =>
+      client.messages.create({
+        model: SUPPLIER_TABLE_CHAT_MODEL,
+        max_tokens: MAX_TOKENS,
+        system,
+        tools: [CORREGIR_TABLA_TOOL],
+        tool_choice: { type: "auto" },
+        messages,
+      });
+    response = await call(baseMessages);
+    if (!response.content.some((b) => b.type === "tool_use" && b.name === TOOL_NAME) && response.stop_reason !== "max_tokens") {
+      logger.warn("Table refine answered in text — nudging to tool", { requestId });
+      const text = response.content
+        .filter((b): b is Extract<typeof b, { type: "text" }> => b.type === "text")
+        .map((b) => b.text)
+        .join("\n");
+      response = await call([
+        ...baseMessages,
+        { role: "assistant", content: text || "(sin respuesta)" },
+        { role: "user", content: `Llamá AHORA a la herramienta "${TOOL_NAME}" con las operaciones. No respondas con texto.` },
+      ]);
+    }
   } catch (err) {
     if (err instanceof APIError) {
       logger.error("Anthropic API error during table refine", {

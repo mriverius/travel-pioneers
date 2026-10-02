@@ -5,7 +5,10 @@ import { usePathname, useRouter } from "next/navigation";
 import {
   FileSearch,
   History,
+  Activity,
+  BookMarked,
   BookOpen,
+  FlaskConical,
   Building2,
   Users as UsersIcon,
   Menu,
@@ -50,6 +53,24 @@ const configItems: NavItem[] = [
     label: "Proveedores",
     href: "/suppliers",
     icon: Building2,
+    adminOnly: true,
+  },
+  {
+    label: "Reglas del agente",
+    href: "/agent-rules",
+    icon: BookMarked,
+    adminOnly: true,
+  },
+  {
+    label: "Calidad del agente",
+    href: "/quality",
+    icon: Activity,
+    adminOnly: true,
+  },
+  {
+    label: "Casos de prueba",
+    href: "/eval-cases",
+    icon: FlaskConical,
     adminOnly: true,
   },
   {

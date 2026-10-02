@@ -1,0 +1,31 @@
+{
+  "suppliers": [
+    { "codigo": "CARIBCOAST", "nombre": "CARIBBEAN COASTERING TOUR", "actividad": "TO", "zona": "PVJ" },
+    { "codigo": "RIOSLODGE", "nombre": "RIOS LODGE", "actividad": "HO", "zona": "TUR" }
+  ],
+  "supplier": { "codigo": "CARIBCOAST", "confidence": "alta" },
+  "taxes": { "included": false },
+  "currencies": ["USD"],
+  "cedulas": ["3-102-722541"],
+  "legalName": "Inversiones Global Hills SRL",
+  "validity": { "start": "2027-01-01", "end": "2027-12-31" },
+  "seasons": [
+    { "name": "Holiday Season", "ranges": ["12-21>01-05"] }
+  ],
+  "priceMentions": 87,
+  "bankAccounts": [
+    { "iban": "CR73015109020010146628", "currency": "CRC", "bank": "Banco Nacional" },
+    { "iban": "CR46015109020020058380", "currency": "USD", "bank": "Banco Nacional" },
+    { "iban": "CR97010200009516861612", "currency": "USD", "bank": "BAC" },
+    { "iban": "CR92010200009516861799", "currency": "CRC", "bank": "BAC" }
+  ],
+  "paymentTerms": [{ "daysBefore": 30, "percent": null, "season": "high" }],
+  "cancellationTerms": [
+    { "daysBefore": 3, "percent": 100, "season": null },
+    { "daysBefore": 14, "percent": 100, "season": "high" },
+    { "daysBefore": 2, "percent": 100, "season": null },
+    { "daysBefore": 7, "percent": 100, "season": "high" }
+  ],
+  "emails": ["reservas@caribbeancoasteringtour.com", "gerencia@caribbeancoasteringtour.com"],
+  "crossDocumentWarnings": 1
+}

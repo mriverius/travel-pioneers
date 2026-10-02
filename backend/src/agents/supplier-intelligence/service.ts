@@ -43,7 +43,7 @@ import type {
 } from "./types.js";
 
 /**
- * Opus 5 es el modelo de extracción. Es más caro y más lento que Sonnet,
+ * Opus 5.5 es el modelo de extracción. Es más caro y más lento que Sonnet,
  * pero la tarea requiere generar potencialmente decenas de filas con
  * razonamiento sobre múltiples temporadas/categorías — Opus paga el precio
  * en calidad de extracción.
@@ -53,21 +53,21 @@ import type {
  *     ($5 / $25 por millón, igual que 4.7/4.8).
  *   - Context window: 1M tokens (igual que 4.7). Max output: 128k (igual).
  */
-export const SUPPLIER_INTELLIGENCE_MODEL = "claude-opus-5";
+export const SUPPLIER_INTELLIGENCE_MODEL = "claude-opus-5-5";
 
 /**
  * Modelo de la pasada de BRIEF / Variables de Configuración (Fase 1).
- * Sonnet 5: rápido y barato para estructurar reglas globales; Opus se
+ * Sonnet 5.5: rápido y barato para estructurar reglas globales; Opus se
  * reserva para la extracción de filas (pasada principal). Context window de
  * 1M tokens por defecto (los contratos densos >200k tokens reventaban el
  * límite de 200k de Sonnet 4.5 con "prompt is too long") y MÁS BARATO que
  * Sonnet 4.5/4.6: $2 / $10 por millón vs $3 / $15.
  */
-export const SUPPLIER_INTELLIGENCE_BRIEF_MODEL = "claude-sonnet-5";
+export const SUPPLIER_INTELLIGENCE_BRIEF_MODEL = "claude-sonnet-5-5";
 
 /**
  * Pricing por modelo (USD por millón de tokens). El flujo usa DOS modelos
- * (Sonnet 5 para el brief, Opus 5 para la extracción), así que el costo se
+ * (Sonnet 5.5 para el brief, Opus 5.5 para la extracción), así que el costo se
  * calcula por-pasada con la tarifa del modelo correspondiente. Incluye los
  * buckets de cache por si Anthropic los reporta, aunque hoy no activamos
  * caching (ver `SUPPLIER_INTELLIGENCE_BRIEF_MODEL`). Se conservan las
@@ -86,6 +86,12 @@ interface ModelPrices {
 }
 
 const MODEL_PRICES: Record<string, ModelPrices> = {
+  // Vigentes (platform.claude.com/docs/en/about-claude/pricing, oct 2026):
+  // cache write 5 min = 1.25× input, cache read = 0.1× input.
+  "claude-opus-5-5": { input: 4, output: 20, cacheWrite: 5, cacheRead: 0.4 },
+  "claude-sonnet-5-5": { input: 2, output: 10, cacheWrite: 2.5, cacheRead: 0.2 },
+  "claude-haiku-4-5-20251001": { input: 1, output: 5, cacheWrite: 1.25, cacheRead: 0.1 },
+  // Históricos (para recomputar costos de runs viejos).
   "claude-opus-5": { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5 },
   "claude-sonnet-5": { input: 2, output: 10, cacheWrite: 2.5, cacheRead: 0.2 },
   "claude-opus-4-7": { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5 },
@@ -96,7 +102,7 @@ const MODEL_PRICES: Record<string, ModelPrices> = {
 
 // Fallback a Opus (el más caro) si llegara un modelo desconocido — preferimos
 // sobre-estimar el costo que sub-reportarlo.
-const FALLBACK_PRICES: ModelPrices = MODEL_PRICES["claude-opus-5"]!;
+const FALLBACK_PRICES: ModelPrices = MODEL_PRICES["claude-opus-5-5"]!;
 
 /**
  * Telemetría de tokens normalizada a partir de un `Message` de Anthropic.
@@ -289,6 +295,44 @@ const sleep = (ms: number): Promise<void> =>
  * nuevo — el endpoint de Anthropic es stateless, así que un retry simplemente
  * re-emite la generación desde cero. Backoff lineal corto entre intentos.
  */
+/**
+ * Los modelos 5.5 (Opus/Sonnet) NO aceptan `tool_choice: "tool" | "any"`
+ * (400 "not supported for this model"). Usamos `auto` + instrucción
+ * explícita en el prompt y, si el modelo contesta en texto en lugar de
+ * llamar a la herramienta, reintentamos UNA vez empujándolo.
+ */
+const AUTO_TOOL_CHOICE = { type: "auto" as const };
+
+function toolOnlyInstruction(toolName: string): string {
+  return (
+    `\n\nFORMATO DE RESPUESTA (obligatorio): respondé ÚNICAMENTE llamando a la ` +
+    `herramienta "${toolName}" con todos sus campos. No escribas texto, ` +
+    `explicaciones ni Markdown fuera de la herramienta.`
+  );
+}
+
+function toolNudgeMessages(
+  previous: Message,
+  toolName: string,
+): MessageParam[] {
+  const assistantContent = previous.content
+    .filter((b) => b.type === "text")
+    .map((b) => ({ type: "text" as const, text: (b as { text: string }).text || "(sin texto)" }));
+  return [
+    { role: "assistant", content: assistantContent.length > 0 ? assistantContent : [{ type: "text", text: "(sin respuesta)" }] },
+    {
+      role: "user",
+      content:
+        `No recibí la llamada a la herramienta. Llamá AHORA a "${toolName}" con el ` +
+        `resultado completo. No respondas con texto.`,
+    },
+  ];
+}
+
+function hasToolUse(response: Message, toolName: string): boolean {
+  return response.content.some((b) => b.type === "tool_use" && b.name === toolName);
+}
+
 async function runStreamWithRetry(
   run: () => Promise<Message>,
   opts: { requestId?: string; label: string },
@@ -333,6 +377,11 @@ export interface ExtractionContext {
    * contradice claramente. JSON ya validado/acotado por el controller.
    */
   preScanHints?: Record<string, unknown>;
+  /**
+   * Reglas permanentes de la agencia (admin-curated, tabla `agent_rules`).
+   * Prioridad alta, justo debajo de las instrucciones del contrato en curso.
+   */
+  agencyRules?: string[];
 }
 
 /**
@@ -377,6 +426,24 @@ function buildContextBlock(ctx: ExtractionContext | undefined): string | null {
     );
   }
 
+  if (ctx.agencyRules && ctx.agencyRules.length > 0) {
+    parts.push(
+      [
+        "═══════════════════════════════════════════════════════════════════",
+        "REGLAS PERMANENTES DE LA AGENCIA — PRIORIDAD ALTA",
+        "═══════════════════════════════════════════════════════════════════",
+        "",
+        "Las definió el equipo administrador y aplican a TODOS los contratos. " +
+          "Prioridad: por debajo de las instrucciones del usuario para este " +
+          "contrato (si existen y la contradicen), por encima del documento. " +
+          "Si aplicas una regla que contradice el documento, márcalo como " +
+          "\"agency-rule\" en paginas_origen_shared del campo afectado.",
+        "",
+        ...ctx.agencyRules.map((r, i) => `${i + 1}. ${r}`),
+      ].join("\n"),
+    );
+  }
+
   if (ctx.isExistingSupplier !== undefined) {
     parts.push(
       ctx.isExistingSupplier
@@ -407,6 +474,15 @@ function buildContextBlock(ctx: ExtractionContext | undefined): string | null {
       "  - `priceMentions` / `estimatedProducts`: cuántos precios hay en el " +
         "documento y cuántos productos los explican. Si tu inventario de " +
         "filas no reproduce esa cantidad, revisa qué falta.",
+      "  - `documents[].pageMap`: en qué páginas de cada documento están las " +
+        "tarifas (`prices` = cantidad de montos), temporadas, políticas, bancos. " +
+        "Ve DIRECTO a esas páginas para extraer cada tema; las páginas marcadas " +
+        "sólo `legal` no contienen tarifas.",
+      "  - `previousConfirmed` (si existe): valores que un revisor humano APROBÓ en el " +
+        "contrato anterior de este mismo proveedor (cédula, cuentas, correo, " +
+        "ocupaciones, códigos de servicio, nombres de producto). Úsalos para " +
+        "mantener la misma nomenclatura y para detectar lecturas raras; pero el " +
+        "documento ACTUAL manda en tarifas, temporadas y vigencia.",
       "",
       "-----BEGIN VERIFIED FACTS (JSON)-----",
       JSON.stringify(ctx.preScanHints, null, 1),
@@ -1295,27 +1371,29 @@ async function extractContractBrief(
   const mode = refine ? "refine" : "brief";
   let response: Message;
   try {
-    response = await runStreamWithRetry(
-      () =>
-        client.messages
-          .stream({
-            model: SUPPLIER_INTELLIGENCE_BRIEF_MODEL,
-            max_tokens: BRIEF_MAX_TOKENS,
-            system: BRIEF_ANALYSIS_SYSTEM_PROMPT,
-            // Solo el tool del brief: sin caching cross-modelo no hay razón
-            // para arrastrar el schema (grande) del tool de extracción acá.
-            tools: [REGISTRAR_BRIEF_CONTRATO_TOOL],
-            tool_choice: {
-              type: "tool",
-              name: REGISTRAR_BRIEF_CONTRATO_TOOL_NAME,
-            },
-            messages: [
-              buildUserMessage(docs, { context, mode, refine }),
-            ],
-          })
-          .finalMessage(),
-      { requestId, label: refine ? "refine-brief" : "brief" },
-    );
+    const baseMessages: MessageParam[] = [buildUserMessage(docs, { context, mode, refine })];
+    const call = (messages: MessageParam[]) =>
+      runStreamWithRetry(
+        () =>
+          client.messages
+            .stream({
+              model: SUPPLIER_INTELLIGENCE_BRIEF_MODEL,
+              max_tokens: BRIEF_MAX_TOKENS,
+              system: BRIEF_ANALYSIS_SYSTEM_PROMPT + toolOnlyInstruction(REGISTRAR_BRIEF_CONTRATO_TOOL_NAME),
+              // Solo el tool del brief: sin caching cross-modelo no hay razón
+              // para arrastrar el schema (grande) del tool de extracción acá.
+              tools: [REGISTRAR_BRIEF_CONTRATO_TOOL],
+              tool_choice: AUTO_TOOL_CHOICE,
+              messages,
+            })
+            .finalMessage(),
+        { requestId, label: refine ? "refine-brief" : "brief" },
+      );
+    response = await call(baseMessages);
+    if (!hasToolUse(response, REGISTRAR_BRIEF_CONTRATO_TOOL_NAME) && response.stop_reason !== "max_tokens") {
+      logger.warn("Contract brief answered in text — nudging to tool", { requestId, mode });
+      response = await call([...baseMessages, ...toolNudgeMessages(response, REGISTRAR_BRIEF_CONTRATO_TOOL_NAME)]);
+    }
   } catch (err) {
     // Diagnóstico EXPLÍCITO: si el brief falla, el step de Variables de
     // Configuración no puede mostrar datos inventados — propagamos el error.
@@ -1869,35 +1947,37 @@ async function runExtractionPass(args: {
 
   let response: Message;
   try {
-    response = await runStreamWithRetry(
+    const baseMessages: MessageParam[] = [
+      buildUserMessage(docs, {
+        context,
+        mode: "extract",
+        brief,
+        briefs: confirmedBriefs,
+        briefConfirmed: args.briefConfirmed,
+        shard,
+      }),
+    ];
+    const call = (messages: MessageParam[]) =>
+      runStreamWithRetry(
       () =>
         client.messages
           .stream({
             model: SUPPLIER_INTELLIGENCE_MODEL,
             max_tokens: MAX_TOKENS,
-            // No mandar `thinking`: la API rechaza con 400 cuando tool_choice
-            // fuerza un tool, y como además forzamos el tool el modelo no hace
-            // thinking del lado del servidor — todo el max_tokens va al output.
-            system: SUPPLIER_INTELLIGENCE_SYSTEM_PROMPT,
+            // Sin `thinking`: todo el max_tokens va al output (filas).
+            system: SUPPLIER_INTELLIGENCE_SYSTEM_PROMPT + toolOnlyInstruction(EXTRAER_DATOS_CONTRATO_TOOL_NAME),
             tools: [EXTRAER_DATOS_CONTRATO_TOOL],
-            tool_choice: {
-              type: "tool",
-              name: EXTRAER_DATOS_CONTRATO_TOOL_NAME,
-            },
-            messages: [
-              buildUserMessage(docs, {
-                context,
-                mode: "extract",
-                brief,
-                briefs: confirmedBriefs,
-                briefConfirmed: args.briefConfirmed,
-                shard,
-              }),
-            ],
+            tool_choice: AUTO_TOOL_CHOICE,
+            messages,
           })
           .finalMessage(),
       { requestId, label },
     );
+    response = await call(baseMessages);
+    if (!hasToolUse(response, EXTRAER_DATOS_CONTRATO_TOOL_NAME) && response.stop_reason !== "max_tokens") {
+      logger.warn("Extraction answered in text — nudging to tool", { requestId, label });
+      response = await call([...baseMessages, ...toolNudgeMessages(response, EXTRAER_DATOS_CONTRATO_TOOL_NAME)]);
+    }
   } catch (err) {
     // Map all Anthropic-side failures (timeouts, 429, 5xx, auth) to 502.
     // We never surface the upstream status code directly because the client
