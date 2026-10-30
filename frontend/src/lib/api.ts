@@ -1962,7 +1962,7 @@ export const api = {
     generateXlsx(input: GenerateXlsxInput) {
       return requestBlob(
         "/api/supplier-intelligence/generate-xlsx",
-        { method: "POST", body: input },
+        { method: "POST", body: input, auth: true },
         "contrato.xlsx",
       );
     },
@@ -1984,7 +1984,7 @@ export const api = {
     refineTable(input: RefineTableInput) {
       return request<RefineTableResponse>(
         "/api/supplier-intelligence/refine-table",
-        { method: "POST", body: input, timeoutMs: 3 * 60 * 1000 },
+        { method: "POST", body: input, auth: true, timeoutMs: 3 * 60 * 1000 },
       );
     },
     /**
