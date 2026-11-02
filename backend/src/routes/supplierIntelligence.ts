@@ -1,4 +1,4 @@
-import { Router, json } from "express";
+import { Router, json, type RequestHandler } from "express";
 import rateLimit from "express-rate-limit";
 import asyncHandler from "../utils/asyncHandler.js";
 import { requireAuth } from "../middleware/auth.js";
@@ -23,6 +23,7 @@ import {
 } from "../agents/supplier-intelligence/contractsController.js";
 import { supplierIntelligenceErrorHandler } from "../agents/supplier-intelligence/errorHandler.js";
 import { handleContractUpload } from "../agents/supplier-intelligence/uploadMiddleware.js";
+import { handleChatUpload } from "../agents/supplier-intelligence/chatAttachments.js";
 import { preScanHandler } from "../agents/supplier-intelligence/preScanController.js";
 import {
   createEvalCaseHandler,
@@ -127,6 +128,18 @@ const contractsJsonParser = json({ limit: "4mb" });
  * cap de 4 MB.
  */
 const refineTableJsonParser = json({ limit: "4mb" });
+
+/**
+ * El chat del Paso 3 manda JSON puro o, si el operador adjuntó archivos /
+ * pidió incluir el contrato, multipart (`payload` + `files` + `attachments`).
+ */
+const refineTableBodyParser: RequestHandler = (req, res, next) => {
+  if (req.is("multipart/form-data")) {
+    handleChatUpload(req, res, next);
+    return;
+  }
+  refineTableJsonParser(req, res, next);
+};
 
 /**
  * Rate limit del chat de la tabla. Cada mensaje es una llamada a Opus, así
@@ -258,7 +271,7 @@ router.post(
   "/refine-brief",
   requireAuth,
   extractLimiter,
-  handleContractUpload,
+  handleChatUpload,
   asyncHandler(refineBriefHandler),
 );
 
@@ -320,7 +333,7 @@ router.post(
   "/refine-table",
   requireAuth,
   refineTableLimiter,
-  refineTableJsonParser,
+  refineTableBodyParser,
   asyncHandler(refineTableHandler),
 );
 

@@ -8,6 +8,7 @@ import ApiError from "../../utils/ApiError.js";
 import logger from "../../config/logger.js";
 import type { Message } from "@anthropic-ai/sdk/resources/messages.js";
 import { getAnthropicClient } from "./anthropicClient.js";
+import { documentBlocks } from "./chatAttachments.js";
 import {
   BRIEF_ANALYSIS_SYSTEM_PROMPT,
   CONTRACT_BRIEF_INSTRUCTION,
@@ -614,6 +615,8 @@ export interface BriefRefineContext {
   previousBrief: ContractBrief;
   feedback: string;
   chatHistory?: BriefChatMessage[];
+  /** Archivos que el operador adjuntó a este mensaje del chat (capturas, PDFs…). */
+  attachments?: PreparedDocumentInput[];
 }
 
 function buildUserMessage(
@@ -729,6 +732,17 @@ function buildUserMessage(
         text:
           "Historial de correcciones previas:\n\n" + historyLines,
       });
+    }
+    if (refine.attachments && refine.attachments.length > 0) {
+      content.push({
+        type: "text",
+        text:
+          "═══════════════════════════════════════════════════════════════════\n" +
+          "ADJUNTOS DEL OPERADOR EN EL CHAT (contexto extra para esta corrección; " +
+          "no son parte del contrato original salvo que el operador lo diga)\n" +
+          "═══════════════════════════════════════════════════════════════════",
+      });
+      content.push(...documentBlocks(refine.attachments, "Adjunto"));
     }
     content.push({
       type: "text",
@@ -1703,6 +1717,7 @@ export async function refineContractBrief(
   requestId?: string,
   context?: ExtractionContext,
   chatHistory?: BriefChatMessage[],
+  attachments?: PreparedDocumentInput[],
 ): Promise<BriefAnalysisResult> {
   if (docs.length === 0) {
     throw ApiError.badRequest("Se requiere al menos un documento para refinar.");
@@ -1715,6 +1730,7 @@ export async function refineContractBrief(
     previousBrief,
     feedback: trimmed,
     chatHistory,
+    attachments,
   });
   const usage = result?.usage ?? {
     inputTokens: 0,

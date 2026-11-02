@@ -80,6 +80,7 @@ import {
   type QaSeverity,
 } from "@/lib/contractQa";
 import { ConfigVariablesStep } from "./configStep";
+import { AttachButton, AttachmentChips, useChatAttachments } from "./chatAttachments";
 import {
   findServiceForSupplierWithAI,
   listSuppliers,
@@ -1418,7 +1419,11 @@ export function SupplierWorkflow() {
    * Paso 2 — chat: re-analiza el brief del documento `tabIndex` con Opus según
    * el feedback del usuario. Cada documento tiene su propio historial.
    */
-  const refineConfig = async (tabIndex: number, message: string) => {
+  const refineConfig = async (
+    tabIndex: number,
+    message: string,
+    attachments: File[] = [],
+  ) => {
     const file = selectedFiles[tabIndex];
     const prevBrief = editedBriefs[tabIndex] ?? briefs[tabIndex];
     if (
@@ -1430,8 +1435,14 @@ export function SupplierWorkflow() {
     ) {
       return;
     }
-    const userMsg = message.trim();
-    if (!userMsg) return;
+    const typed = message.trim();
+    if (!typed) return;
+    // Los nombres de los adjuntos quedan en el historial: el operador los ve
+    // en el hilo y el modelo sabe en turnos siguientes que existieron.
+    const userMsg =
+      attachments.length > 0
+        ? `${typed}\n\n📎 Adjuntos: ${attachments.map((f) => f.name).join(", ")}`
+        : typed;
 
     setRefiningTab(tabIndex);
     setServerError(null);
@@ -1449,6 +1460,7 @@ export function SupplierWorkflow() {
         previousBrief: prevBrief,
         feedbackMessage: userMsg,
         chatHistory: chatHistories[tabIndex] ?? [],
+        attachments: await materializeUploadFiles(attachments),
       });
       setBriefs((prev) => {
         const next = [...prev];
@@ -1872,7 +1884,7 @@ export function SupplierWorkflow() {
                   chatHistory={chatHistories[i] ?? []}
                   serverError={null}
                   onConfirm={() => confirmConfig()}
-                  onRefine={(msg) => refineConfig(i, msg)}
+                  onRefine={(msg, attachments) => refineConfig(i, msg, attachments)}
                   onBack={backToUpload}
                   onDraftChange={(edited) => handleDraftChange(i, edited)}
                   onCatalogChange={setCatalogPrefill}
@@ -2008,6 +2020,7 @@ export function SupplierWorkflow() {
               catalogPrefill={catalogPrefill}
               briefMetas={metas}
               comments={comments}
+              contractFiles={selectedFiles}
               onApprove={approve}
               onBack={backToConfig}
               onGridReady={preparingGrid ? handleGridReady : undefined}
@@ -3673,6 +3686,10 @@ type ChatTurn = {
   role: "user" | "assistant";
   content: string;
   changes?: string[];
+  /** Nombres de los archivos que el operador adjuntó a ese mensaje. */
+  attachments?: string[];
+  /** True si ese mensaje se mandó con los documentos del contrato. */
+  withContract?: boolean;
 };
 
 /** Estado restaurable por el botón "Deshacer". */
@@ -3686,6 +3703,7 @@ const CHAT_EXAMPLES = [
   "Revisá los precios, no agregaste el IVA del 13%",
   "La comisión de temporada alta es 20%, no 25%",
   "Poné la misma política de cancelación en todas las filas",
+  "Agregá la ocupación triple (TPL) a las habitaciones que la tengan en el contrato",
 ];
 
 /**
@@ -3703,6 +3721,7 @@ function TableChat({
   error,
   canUndo,
   disabled,
+  contractFileCount,
   onSend,
   onUndo,
 }: {
@@ -3711,17 +3730,32 @@ function TableChat({
   error: string | null;
   canUndo: boolean;
   disabled: boolean;
-  onSend: (message: string) => void | Promise<void>;
+  /** Cuántos documentos del Paso 1 se pueden reenviar (0 = no disponibles). */
+  contractFileCount: number;
+  onSend: (
+    message: string,
+    attachments: File[],
+    includeContract: boolean,
+  ) => void | Promise<void>;
   onUndo: () => void;
 }) {
   const [input, setInput] = useState("");
+  const attach = useChatAttachments();
+  /**
+   * Reenviar el contrato cuesta tokens (el PDF entra en cada mensaje), así
+   * que es opt-in. Queda prendido entre mensajes una vez que el operador lo
+   * activa: si necesitó el contrato una vez, probablemente lo siga necesitando.
+   */
+  const [includeContract, setIncludeContract] = useState(false);
   const blocked = busy || disabled;
 
   const send = () => {
     const msg = input.trim();
     if (!msg || blocked) return;
+    const files = attach.files;
     setInput("");
-    void onSend(msg);
+    attach.clear();
+    void onSend(msg, files, includeContract && contractFileCount > 0);
   };
 
   return (
@@ -3736,8 +3770,9 @@ function TableChat({
               Corregir con IA antes de descargar
             </p>
             <p className="text-[11.5px] text-muted-foreground">
-              Pedile cambios sobre la tabla en lenguaje natural. Trabaja con los
-              datos de arriba, no vuelve a leer el contrato.
+              Pedile cambios sobre la tabla en lenguaje natural: editar, borrar o
+              agregar filas. Podés adjuntar capturas o documentos, o incluir el
+              contrato original para que lo consulte.
             </p>
           </div>
         </div>
@@ -3760,8 +3795,19 @@ function TableChat({
             {messages.map((m, i) =>
               m.role === "user" ? (
                 <div key={i} className="flex justify-end">
-                  <div className="max-w-[85%] rounded-lg border border-primary/20 bg-primary/15 px-3 py-2 text-[13px] leading-relaxed text-foreground whitespace-pre-wrap">
-                    {m.content}
+                  <div className="max-w-[85%] rounded-lg border border-primary/20 bg-primary/15 px-3 py-2 text-[13px] leading-relaxed text-foreground space-y-2">
+                    <p className="whitespace-pre-wrap">{m.content}</p>
+                    {(m.attachments?.length || m.withContract) && (
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {m.withContract && (
+                          <span className="inline-flex items-center gap-1 rounded-md border border-primary/30 bg-primary/10 px-2 py-1 text-[11px] text-primary">
+                            <FileText className="w-3 h-3" />
+                            Con contrato original
+                          </span>
+                        )}
+                        <AttachmentChips names={m.attachments} />
+                      </div>
+                    )}
                   </div>
                 </div>
               ) : (
@@ -3825,6 +3871,40 @@ function TableChat({
           </div>
         )}
 
+        <div className="flex flex-wrap items-center gap-2">
+          <AttachButton onAdd={attach.add} count={attach.files.length} disabled={blocked} />
+          <label
+            className={`inline-flex items-center gap-2 h-8 px-2.5 rounded-md border text-[12px] transition-colors select-none ${
+              contractFileCount === 0
+                ? "border-border/60 text-muted-foreground/50 cursor-not-allowed"
+                : includeContract
+                  ? "border-primary/40 bg-primary/10 text-primary cursor-pointer"
+                  : "border-border bg-secondary/30 text-muted-foreground hover:text-foreground cursor-pointer"
+            }`}
+            title={
+              contractFileCount === 0
+                ? "Los documentos del Paso 1 ya no están disponibles en esta sesión"
+                : "Manda los documentos del Paso 1 con cada mensaje para que el asistente los lea (más lento y costoso)"
+            }
+          >
+            <input
+              type="checkbox"
+              className="accent-current"
+              checked={includeContract && contractFileCount > 0}
+              disabled={blocked || contractFileCount === 0}
+              onChange={(e) => setIncludeContract(e.target.checked)}
+            />
+            Leer contrato original
+            {contractFileCount > 0 && (
+              <span className="text-muted-foreground">
+                ({contractFileCount} {contractFileCount === 1 ? "archivo" : "archivos"})
+              </span>
+            )}
+          </label>
+        </div>
+        <AttachmentChips files={attach.files} onRemove={attach.remove} disabled={blocked} />
+        {attach.error && <p className="text-[11.5px] text-red-300">{attach.error}</p>}
+
         <div className="flex flex-col sm:flex-row gap-2">
           <textarea
             value={input}
@@ -3835,9 +3915,10 @@ function TableChat({
                 send();
               }
             }}
+            onPaste={attach.onPaste}
             disabled={blocked}
             rows={2}
-            placeholder="Ej: Revisá los precios, no agregaste el IVA…"
+            placeholder="Ej: Revisá los precios, no agregaste el IVA… (podés pegar capturas)"
             className="flex-1 rounded-lg border border-border bg-secondary/30 px-3 py-2.5 text-[13px] text-foreground placeholder:text-muted-foreground/60 outline-none transition-colors focus:border-primary/60 focus:bg-secondary/50 resize-y min-h-[64px] disabled:opacity-50"
           />
           <button
@@ -3873,6 +3954,7 @@ function ReviewStep({
   catalogPrefill,
   briefMetas,
   comments,
+  contractFiles,
   onApprove,
   onBack,
   onGridReady,
@@ -3890,6 +3972,8 @@ function ReviewStep({
   briefMetas: AnalyzeBriefMeta[];
   /** Contexto libre que el operador escribió en el Paso 1. Alimenta el chat. */
   comments: string;
+  /** Documentos del Paso 1, para que el chat pueda volver a leerlos. */
+  contractFiles: File[];
   onApprove: (payload: ApprovedPayload) => void;
   onBack: () => void;
   onGridReady?: () => void;
@@ -4166,19 +4250,32 @@ function ReviewStep({
    * Manda la tabla actual + el pedido del operador al asistente y reemplaza el
    * estado con la versión corregida que devuelve el backend.
    *
-   * Se manda el JSON de la grilla, NO los documentos: el asistente corrige lo
-   * que está en pantalla (recalcular precios con IVA, uniformar una política,
-   * borrar filas sobrantes). Para algo que requiera volver a leer el contrato,
-   * el camino sigue siendo "Volver a configuración" y re-extraer.
+   * Siempre se manda el JSON de la grilla. Opcionalmente también los
+   * adjuntos del mensaje (capturas, PDFs…) y, si el operador lo activa, los
+   * documentos originales del Paso 1 — así puede pedir cosas que requieren
+   * el contrato ("agregá el triple con la tarifa del PDF").
    */
-  const handleChatSend = async (message: string) => {
+  const handleChatSend = async (
+    message: string,
+    attachments: File[] = [],
+    includeContract = false,
+  ) => {
     const msg = message.trim();
     if (!msg || chatBusy || downloading) return;
 
     const payload = buildPayload();
+    const attachmentNames = attachments.map((f) => f.name);
     setChatBusy(true);
     setChatError(null);
-    setChatMessages((prev) => [...prev, { role: "user", content: msg }]);
+    setChatMessages((prev) => [
+      ...prev,
+      {
+        role: "user",
+        content: msg,
+        attachments: attachmentNames.length > 0 ? attachmentNames : undefined,
+        withContract: includeContract || undefined,
+      },
+    ]);
 
     try {
       const res = await api.supplierIntelligence.refineTable({
@@ -4188,9 +4285,19 @@ function ReviewStep({
         manual_fields: payload.manualFields,
         message: msg,
         chat_history: chatMessages.map(
-          (m): TableChatMessage => ({ role: m.role, content: m.content }),
+          (m): TableChatMessage => ({
+            role: m.role,
+            content:
+              m.attachments && m.attachments.length > 0
+                ? `${m.content}\n[Adjuntos: ${m.attachments.join(", ")}]`
+                : m.content,
+          }),
         ),
         comments: comments.trim() || null,
+        attachments: await materializeUploadFiles(attachments),
+        contractFiles: includeContract
+          ? await materializeUploadFiles(contractFiles)
+          : [],
       });
 
       // Guardamos el estado previo ANTES de pisarlo, para que "Deshacer" sea
@@ -4388,6 +4495,7 @@ function ReviewStep({
         error={chatError}
         canUndo={undoSnapshot !== null}
         disabled={downloading}
+        contractFileCount={contractFiles.length}
         onSend={handleChatSend}
         onUndo={handleUndo}
       />

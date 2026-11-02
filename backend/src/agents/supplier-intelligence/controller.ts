@@ -3,6 +3,7 @@ import logger from "../../config/logger.js";
 import ApiError from "../../utils/ApiError.js";
 import { loadEnabledRuleTexts } from "../../controllers/agentRuleController.js";
 import { detectDocKind, prepareDocument } from "./extractors/index.js";
+import { getChatAttachmentFiles, prepareFiles } from "./chatAttachments.js";
 import {
   analyzeContractBrief,
   coerceBrief,
@@ -351,10 +352,13 @@ export async function refineBriefHandler(
   }
   const feedback = parseFeedbackField(req.body?.feedback_message);
   const chatHistory = parseChatHistoryField(req.body?.chat_history);
+  const attachmentFiles = getChatAttachmentFiles(res);
+  const attachments = await prepareFiles(attachmentFiles);
 
   logger.info("Supplier Intelligence brief refine started", {
     requestId: req.id,
     fileCount: files.length,
+    attachments: attachmentFiles.map((f) => f.originalname),
     feedbackLength: feedback.length,
     chatHistoryLength: chatHistory?.length ?? 0,
   });
@@ -366,6 +370,7 @@ export async function refineBriefHandler(
     req.id,
     context,
     chatHistory,
+    attachments,
   );
 
   const combinedFilename = combineFilenames(files);

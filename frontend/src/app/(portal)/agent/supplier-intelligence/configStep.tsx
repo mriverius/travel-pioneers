@@ -37,6 +37,7 @@ import type {
   ContractConfigVariables,
 } from "@/lib/api";
 import type { CatalogPrefill } from "./workflow";
+import { AttachButton, AttachmentChips, useChatAttachments } from "./chatAttachments";
 
 /**
  * STEP 2 — Variables de Configuración (paso intermedio del flujo gated).
@@ -480,7 +481,7 @@ export function ConfigVariablesStep({
     edited: ContractConfigVariables,
     catalog: CatalogPrefill | null,
   ) => void;
-  onRefine: (message: string) => Promise<void>;
+  onRefine: (message: string, attachments: File[]) => Promise<void>;
   onBack: () => void;
   /**
    * Reporta el brief editado hacia el padre en cada cambio. Lo usa el flujo
@@ -497,6 +498,7 @@ export function ConfigVariablesStep({
   showActions?: boolean;
 }) {
   const [feedbackInput, setFeedbackInput] = useState("");
+  const attach = useChatAttachments();
 
   // Estado local editable — se re-sincroniza cuando el brief se actualiza tras refine.
   const [draft, setDraft] = useState<ContractConfigVariables>(() =>
@@ -655,8 +657,10 @@ export function ConfigVariablesStep({
   const handleRefine = async () => {
     const msg = feedbackInput.trim();
     if (!msg || isRefining || extracting) return;
+    const files = attach.files;
     setFeedbackInput("");
-    await onRefine(msg);
+    attach.clear();
+    await onRefine(msg, files);
   };
 
   const logicSummary =
@@ -768,10 +772,25 @@ export function ConfigVariablesStep({
                   void handleRefine();
                 }
               }}
+              onPaste={attach.onPaste}
               disabled={isRefining || extracting}
               rows={3}
-              placeholder="Ej: La comisión es 20%, no 25%. La temporada alta termina el 15 de abril, no el 30..."
+              placeholder="Ej: La comisión es 20%, no 25%. La temporada alta termina el 15 de abril, no el 30... (podés pegar o adjuntar capturas y documentos)"
               className="w-full rounded-lg border border-border bg-secondary/30 px-3 py-2.5 text-[13px] text-foreground placeholder:text-muted-foreground/60 outline-none transition-colors focus:border-primary/60 focus:bg-secondary/50 resize-y min-h-[80px] disabled:opacity-50"
+            />
+            <AttachmentChips
+              files={attach.files}
+              onRemove={attach.remove}
+              disabled={isRefining || extracting}
+            />
+            {attach.error && (
+              <p className="text-[11.5px] text-red-300">{attach.error}</p>
+            )}
+            <div className="flex items-center gap-2">
+            <AttachButton
+              onAdd={attach.add}
+              count={attach.files.length}
+              disabled={isRefining || extracting}
             />
             <button
               type="button"
@@ -793,6 +812,7 @@ export function ConfigVariablesStep({
                 </>
               )}
             </button>
+            </div>
           </div>
         </div>
       </div>

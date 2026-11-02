@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import logger from "../../config/logger.js";
 import ApiError from "../../utils/ApiError.js";
+import { getChatAttachmentFiles, prepareFiles } from "./chatAttachments.js";
 import {
   coerceCatalogPrefill,
   coerceManualFields,
@@ -36,6 +37,11 @@ import {
  *   "comments": "…"            // opcional, contexto del Paso 1
  * }
  * ```
+ *
+ * También acepta `multipart/form-data` cuando el operador adjunta archivos:
+ *   - `payload`     → el JSON de arriba, serializado como texto
+ *   - `files`       → (opcional) documentos originales del contrato
+ *   - `attachments` → (opcional) adjuntos del mensaje (capturas, PDFs, …)
  *
  * Response 200:
  * ```
@@ -128,7 +134,26 @@ export async function refineTableHandler(
   if (!req.body || typeof req.body !== "object") {
     throw ApiError.badRequest("El body debe ser un objeto JSON.");
   }
-  const body = req.body as Record<string, unknown>;
+  let body = req.body as Record<string, unknown>;
+  // Multipart: la tabla viaja como texto en `payload`.
+  if (typeof body.payload === "string") {
+    try {
+      const parsed: unknown = JSON.parse(body.payload);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("not an object");
+      }
+      body = parsed as Record<string, unknown>;
+    } catch {
+      throw ApiError.badRequest("El campo 'payload' debe ser un objeto JSON válido.");
+    }
+  }
+
+  const contractFiles: Express.Multer.File[] = Array.isArray(req.files) ? req.files : [];
+  const attachmentFiles = getChatAttachmentFiles(res);
+  const [documents, attachments] = await Promise.all([
+    prepareFiles(contractFiles),
+    prepareFiles(attachmentFiles),
+  ]);
 
   const table = parseTable(body);
   const message = parseMessage(body.message);
@@ -140,6 +165,8 @@ export async function refineTableHandler(
     rowCount: table.rows.length,
     messageLength: message.length,
     historyLength: history.length,
+    documents: documents.length,
+    attachments: attachmentFiles.map((f) => f.originalname),
   });
 
   const result = await refineContractTable({
@@ -147,6 +174,8 @@ export async function refineTableHandler(
     message,
     history,
     comments,
+    documents,
+    attachments,
     requestId: req.id,
   });
 

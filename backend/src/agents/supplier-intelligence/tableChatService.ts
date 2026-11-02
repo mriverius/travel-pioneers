@@ -1,5 +1,6 @@
 import { APIError } from "@anthropic-ai/sdk";
 import type {
+  ContentBlockParam,
   MessageParam,
   Tool,
   ToolUseBlock,
@@ -7,6 +8,8 @@ import type {
 import ApiError from "../../utils/ApiError.js";
 import logger from "../../config/logger.js";
 import { getAnthropicClient } from "./anthropicClient.js";
+import { documentBlocks } from "./chatAttachments.js";
+import type { PreparedDocumentInput } from "./service.js";
 import {
   CATALOG_PREFILL_COL,
   MANUAL_COL,
@@ -64,7 +67,7 @@ const TABLE_CHAT_PRICES = { input: 2, output: 10 };
  * Cap de tokens de salida. Las operaciones son compactas, pero un
  * `set_cells` que toca 300 celdas necesita aire. 16k es holgado.
  */
-const MAX_TOKENS = 16_000;
+const MAX_TOKENS = 32_000;
 
 /** Caps defensivos — protegen costo y evitan payloads basura. */
 const MAX_ROWS = 500;
@@ -331,28 +334,112 @@ const CORREGIR_TABLA_TOOL: Tool = {
                 "scale_rows",
                 "delete_rows",
                 "add_rows",
+                "duplicate_rows",
+                "derive_rows",
               ],
               description:
                 "set_shared: cambia un campo compartido (se replica en todas las filas). " +
                 "set_rows: escribe el MISMO valor en una columna de varias filas. " +
                 "set_cells: escribe valores DISTINTOS celda por celda. " +
                 "scale_rows: multiplica una columna numérica por un factor (el servidor hace la aritmética). " +
+                "derive_rows: calcula una columna numérica a partir de otra (destino = origen × factor). " +
                 "delete_rows: elimina filas. " +
-                "add_rows: agrega filas nuevas al final.",
+                "duplicate_rows: clona filas existentes (copiando TODAS sus columnas) y " +
+                "las inserta justo debajo de cada original, con los cambios de `set`, " +
+                "`per_source`, `scale` y `derive`. Es la forma correcta de agregar una " +
+                "ocupación, temporada o variante nueva que se parece a filas existentes. " +
+                "add_rows: agrega filas nuevas desde cero al final (solo si no hay filas " +
+                "parecidas que clonar).",
             },
             key: {
               type: "string",
               description:
                 "Clave del campo. Para set_shared debe ser una de las claves compartidas; " +
-                "para set_rows y scale_rows, una de las claves de fila.",
+                "para set_rows, scale_rows y derive_rows (destino), una de las claves de fila.",
             },
             value: VALUE_SCHEMA,
             rows: {
               type: ["array", "null"],
               items: { type: "integer" },
               description:
-                "Números de fila 1-based sobre los que actuar (los de la columna `#`). " +
-                "null o ausente = TODAS las filas. Requerido en delete_rows.",
+                "Números de fila 1-based del snapshot (columna `#`). Siempre se refieren " +
+                "a la numeración ORIGINAL del snapshot, aunque una operación anterior haya " +
+                "borrado o insertado filas. Las filas creadas en este mismo turno no tienen " +
+                "número: apuntalas con `where`. null o ausente (y sin `where`) = TODAS las filas.",
+            },
+            where: {
+              type: "object",
+              description:
+                "Filtro de filas por valor EXACTO (sin distinguir mayúsculas ni espacios " +
+                "extra). Clave de fila → lista de valores aceptados; AND entre claves, OR " +
+                "dentro de la lista. Ej: {\"product_name\": [\"Terraza King\", \"Brisa King\"], " +
+                "\"ocupacion\": [\"DBL\"]}. Se combina (intersección) con `rows` si vienen ambos. " +
+                "Evaluado sobre el estado de la tabla en ESE momento, así que incluye filas " +
+                "creadas por operaciones anteriores del mismo turno.",
+              additionalProperties: { type: "array", items: { type: "string" } },
+            },
+            where_contains: {
+              type: "object",
+              description:
+                "Como `where`, pero el valor de la celda debe CONTENER el texto (sin " +
+                "distinguir mayúsculas). Ej: {\"product_name\": [\"Terraza\"]}.",
+              additionalProperties: { type: "array", items: { type: "string" } },
+            },
+            source_key: {
+              type: "string",
+              description:
+                "Solo para derive_rows: clave numérica de origen (ej. precios_neto_iva).",
+            },
+            set: {
+              type: "object",
+              description:
+                "Solo para duplicate_rows: valores que se escriben en TODAS las copias " +
+                "(ej. {\"ocupacion\": \"TPL\"}).",
+              additionalProperties: { type: ["string", "null"] },
+            },
+            per_source: {
+              type: "array",
+              description:
+                "Solo para duplicate_rows: valores específicos para la copia de una fila " +
+                "de origen concreta (ej. el precio neto del triple de esa temporada). " +
+                "Se aplican después de `set`.",
+              items: {
+                type: "object",
+                properties: {
+                  row: {
+                    type: "integer",
+                    description: "Número de fila 1-based (snapshot original) de la fila de origen.",
+                  },
+                  set: {
+                    type: "object",
+                    additionalProperties: { type: ["string", "null"] },
+                  },
+                },
+                required: ["row", "set"],
+              },
+            },
+            scale: {
+              type: "object",
+              description:
+                "Solo para duplicate_rows: clave numérica → factor a multiplicar en las " +
+                "copias (después de set/per_source). Ej: {\"precios_neto_iva\": 1.2769}.",
+              additionalProperties: { type: "number" },
+            },
+            derive: {
+              type: "array",
+              description:
+                "Solo para duplicate_rows: columnas calculadas en las copias, en orden, " +
+                "después de `scale`. Ej: [{\"key\": \"precio_rack_iva\", \"source_key\": " +
+                "\"precios_neto_iva\", \"factor\": 1.25}] para rack = neto / 0.80.",
+              items: {
+                type: "object",
+                properties: {
+                  key: { type: "string" },
+                  source_key: { type: "string" },
+                  factor: { type: "number" },
+                },
+                required: ["key", "source_key", "factor"],
+              },
             },
             cells: {
               type: "array",
@@ -373,7 +460,7 @@ const CORREGIR_TABLA_TOOL: Tool = {
             factor: {
               type: "number",
               description:
-                "Solo para scale_rows: multiplicador. Para agregar un IVA del 13% usá " +
+                "Para scale_rows y derive_rows: multiplicador. Para agregar un IVA del 13% usá " +
                 "1.13; para quitarlo, 0.884956 (1/1.13). El servidor redondea a 2 " +
                 "decimales y omite las celdas vacías o no numéricas.",
             },
@@ -418,8 +505,10 @@ function buildSystemPrompt(): string {
     "\n\nREGLAS DURAS:\n" +
     "1. Usá EXACTAMENTE las claves listadas arriba. Una clave inventada se descarta " +
     "   en silencio y la corrección del operador se pierde.\n" +
-    "2. Los números de fila son 1-based y se refieren a la columna `#` del snapshot. " +
-    "   Nunca inventes filas que no existen.\n" +
+    "2. Los números de fila son 1-based y se refieren a la columna `#` del snapshot " +
+    "   ORIGINAL (no cambian aunque borres o insertes filas en el mismo turno). " +
+    "   Nunca inventes números de fila que no existen. Para apuntar a muchas filas " +
+    "   por producto/ocupación/temporada preferí `where` en lugar de listar números.\n" +
     "3. Para operaciones aritméticas sobre una columna entera (agregar/quitar IVA, " +
     "   aplicar un descuento, subir un 10%) usá SIEMPRE `scale_rows`. NO calcules los " +
     "   valores a mano con `set_cells`: el servidor hace la multiplicación exacta y " +
@@ -435,9 +524,23 @@ function buildSystemPrompt(): string {
     "   devolvé `operations: []` y usá `reply` para preguntar lo puntual que necesitás. " +
     "   Es MUCHO mejor preguntar que adivinar una tasa: los datos que aprobás acá se " +
     "   escriben tal cual en el maestro.\n" +
-    "8. No tenés el contrato original a la vista, solo esta tabla. Si el operador te " +
-    "   pide un dato que no está y no se puede derivar de lo que ves, decílo en `reply` " +
-    "   en lugar de inventarlo.\n\n" +
+    "8. Fuentes: siempre tenés la tabla. Si el mensaje incluye DOCUMENTOS DEL CONTRATO " +
+    "   o ADJUNTOS DEL OPERADOR (PDF, imágenes, Word, Excel), leelos y usalos como fuente " +
+    "   de verdad para los datos que falten (ej. la tarifa del triple). Si no hay " +
+    "   documentos y el dato no se puede derivar de la tabla, decílo en `reply` y pedí " +
+    "   que adjunte el contrato o una captura, en lugar de inventarlo.\n" +
+    "9. AGREGAR FILAS: cuando el operador pide una ocupación, temporada o variante nueva " +
+    "   (ej. \"falta el triple de Terraza King\"), usá `duplicate_rows` sobre las filas " +
+    "   existentes más parecidas (normalmente la DBL del mismo producto en cada temporada), " +
+    "   con `set` para la ocupación nueva y `per_source`/`scale`/`derive` para los precios. " +
+    "   Así heredan fechas, políticas, comida y códigos sin que tengas que reescribirlos. " +
+    "   NUNCA respondas que no podés agregar filas: sí podés.\n" +
+    "10. Precios de filas nuevas: tomalos del contrato/adjuntos si están. Si la tabla " +
+    "   revela una fórmula (ej. el operador o los cambios previos dicen \"Neta × 1.2769\" y " +
+    "   \"Rack = Neta / 0.80\"), poné en `per_source` la tarifa BASE del documento y aplicá " +
+    "   la fórmula con `scale` y `derive` — no hagas la aritmética a mano. Si no tenés la " +
+    "   tarifa base del triple por ningún lado, creá igual las filas (con los precios " +
+    "   vacíos) SOLO si el operador lo pidió así; si no, preguntá.\n\n" +
     "CONTEXTO DE NEGOCIO ÚTIL:\n" +
     "- El IVA de turismo en Costa Rica es 13%. Aun así, NO lo asumas si el operador no " +
     "  lo menciona y la tabla no lo respalda — preguntá.\n" +
@@ -574,37 +677,148 @@ interface RawOperation {
   key?: unknown;
   value?: unknown;
   rows?: unknown;
+  where?: unknown;
+  where_contains?: unknown;
   cells?: unknown;
   factor?: unknown;
+  source_key?: unknown;
   new_rows?: unknown;
+  set?: unknown;
+  per_source?: unknown;
+  scale?: unknown;
+  derive?: unknown;
+}
+
+/** Normaliza texto para comparar valores de celda: minúsculas + espacios colapsados. */
+function norm(v: unknown): string {
+  if (v === null || v === undefined) return "";
+  return String(v).toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/** Parsea un filtro `{ clave_de_fila: [valores] }`; ignora claves desconocidas. */
+function parseFilter(raw: unknown): Map<string, string[]> | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const out = new Map<string, string[]>();
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!ROW_KEYS[k]) continue;
+    const list = (Array.isArray(v) ? v : [v])
+      .filter((x) => typeof x === "string" || typeof x === "number")
+      .map(norm)
+      .filter((x) => x !== "");
+    if (list.length > 0) out.set(k, list);
+  }
+  return out.size > 0 ? out : null;
 }
 
 /**
- * Resuelve la lista de filas de una operación. `null`/ausente = todas. Los
- * índices que el modelo invente fuera de rango se descartan (y se cuentan
- * para reportarlos).
+ * Traduce números de fila 1-based del snapshot ORIGINAL a índices actuales
+ * de `working.rows`. Así "fila 12" sigue siendo la misma fila aunque una
+ * operación anterior del mismo turno haya borrado o insertado filas. Las
+ * filas ya borradas o fuera de rango se cuentan en `skipped`.
  */
-function resolveRowTargets(
-  raw: unknown,
-  rowCount: number,
-): { indices: number[]; all: boolean; skipped: number } {
-  if (raw === null || raw === undefined) {
-    return { indices: Array.from({ length: rowCount }, (_, i) => i), all: true, skipped: 0 };
-  }
-  if (!Array.isArray(raw)) {
-    return { indices: [], all: false, skipped: 0 };
-  }
+function originalToCurrent(
+  working: WorkingTable,
+  raw: unknown[],
+): { indices: number[]; skipped: number } {
+  const byOrigin = new Map<number, number>();
+  working.origin.forEach((o, i) => {
+    if (o !== null) byOrigin.set(o, i);
+  });
   const seen = new Set<number>();
   let skipped = 0;
   for (const n of raw) {
     const num = typeof n === "number" ? n : Number(n);
-    if (!Number.isInteger(num) || num < 1 || num > rowCount) {
+    const cur = Number.isInteger(num) ? byOrigin.get(num - 1) : undefined;
+    if (cur === undefined) {
       skipped++;
       continue;
     }
-    seen.add(num - 1);
+    seen.add(cur);
   }
-  return { indices: [...seen].sort((a, b) => a - b), all: false, skipped };
+  return { indices: [...seen].sort((a, b) => a - b), skipped };
+}
+
+/**
+ * Resuelve las filas de una operación combinando `rows` (números del
+ * snapshot original) con los filtros `where` / `where_contains` (evaluados
+ * sobre el estado actual). Sin `rows` ni filtros = todas las filas.
+ */
+function resolveRowTargets(
+  raw: RawOperation,
+  working: WorkingTable,
+): { indices: number[]; all: boolean; skipped: number } {
+  const exact = parseFilter(raw.where);
+  const contains = parseFilter(raw.where_contains);
+  const hasRows = Array.isArray(raw.rows);
+  if (!hasRows && !exact && !contains) {
+    if (raw.rows !== null && raw.rows !== undefined) {
+      return { indices: [], all: false, skipped: 0 };
+    }
+    return {
+      indices: working.rows.map((_, i) => i),
+      all: true,
+      skipped: 0,
+    };
+  }
+  let indices: number[];
+  let skipped = 0;
+  if (hasRows) {
+    const r = originalToCurrent(working, raw.rows as unknown[]);
+    indices = r.indices;
+    skipped = r.skipped;
+  } else {
+    indices = working.rows.map((_, i) => i);
+  }
+  const matches = (i: number): boolean => {
+    const row = working.rows[i];
+    if (!row) return false;
+    if (exact) {
+      for (const [k, vals] of exact) {
+        if (!vals.includes(norm(row[k as keyof ContractRow]))) return false;
+      }
+    }
+    if (contains) {
+      for (const [k, vals] of contains) {
+        const cell = norm(row[k as keyof ContractRow]);
+        if (!vals.some((v) => cell.includes(v))) return false;
+      }
+    }
+    return true;
+  };
+  return { indices: indices.filter(matches), all: false, skipped };
+}
+
+/** Describe el alcance de una operación para el resumen de cambios. */
+function scopeLabel(t: { indices: number[]; all: boolean }): string {
+  return t.all ? "todas las filas" : `${t.indices.length} fila(s)`;
+}
+
+/** Lee un objeto `{ clave_de_fila: valor }` validando claves y dominio. */
+function readRowValues(raw: unknown): { values: [string, string | null][]; rejected: number } {
+  const values: [string, string | null][] = [];
+  let rejected = 0;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { values, rejected };
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!ROW_KEYS[k]) {
+      rejected++;
+      continue;
+    }
+    const validated = validateForKey(k, coerceValue(v));
+    if (validated === undefined) {
+      rejected++;
+      continue;
+    }
+    values.push([k, validated]);
+  }
+  return { values, rejected };
+}
+
+/** destino = origen × factor sobre una fila. Devuelve false si no hay número. */
+function deriveCell(row: ContractRow, key: string, sourceKey: string, factor: number): boolean {
+  const n = parseAmount(row[sourceKey as RowFieldKey]);
+  if (n === null) return false;
+  writeRowCell(row, key, formatAmount(n * factor));
+  return true;
 }
 
 /**
@@ -665,15 +879,13 @@ export function applyOperations(
         changes.push(`⚠️ Ignorado: valor inválido para ${ROW_KEYS[key]!.label}.`);
         continue;
       }
-      const { indices, all } = resolveRowTargets(raw.rows, working.rows.length);
-      for (const i of indices) {
+      const target = resolveRowTargets(raw, working);
+      for (const i of target.indices) {
         const row = working.rows[i];
         if (row) writeRowCell(row, key, validated);
       }
       changes.push(
-        `${ROW_KEYS[key]!.label} (col ${ROW_KEYS[key]!.col}) → ${validated ?? "(vacío)"} en ${
-          all ? "todas las filas" : `${indices.length} fila(s)`
-        }`,
+        `${ROW_KEYS[key]!.label} (col ${ROW_KEYS[key]!.col}) → ${validated ?? "(vacío)"} en ${scopeLabel(target)}`,
       );
       continue;
     }
@@ -692,6 +904,10 @@ export function applyOperations(
       let applied = 0;
       let rejected = 0;
       const touchedKeys = new Set<string>();
+      const byOrigin = new Map<number, number>();
+      working.origin.forEach((o, i) => {
+        if (o !== null) byOrigin.set(o, i);
+      });
       for (const c of raw.cells) {
         if (!c || typeof c !== "object") {
           rejected++;
@@ -700,12 +916,8 @@ export function applyOperations(
         const cell = c as { row?: unknown; key?: unknown; value?: unknown };
         const key = typeof cell.key === "string" ? cell.key : "";
         const rowNum = typeof cell.row === "number" ? cell.row : Number(cell.row);
-        if (
-          !ROW_KEYS[key] ||
-          !Number.isInteger(rowNum) ||
-          rowNum < 1 ||
-          rowNum > working.rows.length
-        ) {
+        const current = Number.isInteger(rowNum) ? byOrigin.get(rowNum - 1) : undefined;
+        if (!ROW_KEYS[key] || current === undefined) {
           rejected++;
           continue;
         }
@@ -714,7 +926,7 @@ export function applyOperations(
           rejected++;
           continue;
         }
-        const target = working.rows[rowNum - 1];
+        const target = working.rows[current];
         if (!target) {
           rejected++;
           continue;
@@ -754,7 +966,8 @@ export function applyOperations(
         changes.push(`⚠️ Ignorado: factor inválido para ${meta.label}.`);
         continue;
       }
-      const { indices, all } = resolveRowTargets(raw.rows, working.rows.length);
+      const target = resolveRowTargets(raw, working);
+      const { indices, all } = target;
       let applied = 0;
       let skippedEmpty = 0;
       for (const i of indices) {
@@ -777,7 +990,11 @@ export function applyOperations(
     }
 
     if (op === "delete_rows") {
-      const { indices } = resolveRowTargets(raw.rows, working.rows.length);
+      if (!Array.isArray(raw.rows) && !raw.where && !raw.where_contains) {
+        changes.push("⚠️ Ignorado: delete_rows necesita `rows` o un filtro `where`.");
+        continue;
+      }
+      const { indices } = resolveRowTargets(raw, working);
       if (indices.length === 0) {
         changes.push("⚠️ Ignorado: delete_rows sin filas válidas.");
         continue;
@@ -792,6 +1009,160 @@ export function applyOperations(
       working.rows = working.rows.filter((_, i) => !drop.has(i));
       working.origin = working.origin.filter((_, i) => !drop.has(i));
       changes.push(`${indices.length} fila(s) eliminada(s).`);
+      continue;
+    }
+
+    if (op === "derive_rows") {
+      const key = typeof raw.key === "string" ? raw.key : "";
+      const sourceKey = typeof raw.source_key === "string" ? raw.source_key : "";
+      const meta = ROW_KEYS[key];
+      const srcMeta = ROW_KEYS[sourceKey];
+      if (!meta?.numeric || !srcMeta?.numeric) {
+        changes.push(
+          `⚠️ Ignorado: derive_rows necesita columnas numéricas válidas ("${key}" ← "${sourceKey}").`,
+        );
+        continue;
+      }
+      const factor = typeof raw.factor === "number" ? raw.factor : Number(raw.factor);
+      if (!Number.isFinite(factor) || factor <= 0) {
+        changes.push(`⚠️ Ignorado: factor inválido para ${meta.label}.`);
+        continue;
+      }
+      const target = resolveRowTargets(raw, working);
+      let applied = 0;
+      let skippedEmpty = 0;
+      for (const i of target.indices) {
+        const row = working.rows[i];
+        if (!row) continue;
+        if (deriveCell(row, key, sourceKey, factor)) applied++;
+        else skippedEmpty++;
+      }
+      changes.push(
+        `${meta.label} (col ${meta.col}) = ${srcMeta.label} × ${factor} en ${applied} fila(s)${
+          skippedEmpty > 0 ? ` — ${skippedEmpty} sin valor de origen, sin tocar` : ""
+        }`,
+      );
+      continue;
+    }
+
+    if (op === "duplicate_rows") {
+      if (!Array.isArray(raw.rows) && !raw.where && !raw.where_contains) {
+        changes.push("⚠️ Ignorado: duplicate_rows necesita `rows` o un filtro `where`.");
+        continue;
+      }
+      const target = resolveRowTargets(raw, working);
+      if (target.indices.length === 0) {
+        changes.push("⚠️ Ignorado: duplicate_rows no encontró filas de origen con ese filtro.");
+        continue;
+      }
+      if (working.rows.length + target.indices.length > MAX_ROWS) {
+        changes.push(`⚠️ Ignorado: duplicate_rows superaría el máximo de ${MAX_ROWS} filas.`);
+        continue;
+      }
+
+      const common = readRowValues(raw.set);
+      let rejected = common.rejected;
+
+      // Overrides por fila de origen (número del snapshot original → valores).
+      const perSource = new Map<number, [string, string | null][]>();
+      if (Array.isArray(raw.per_source)) {
+        for (const ps of raw.per_source) {
+          if (!ps || typeof ps !== "object") continue;
+          const entry = ps as { row?: unknown; set?: unknown };
+          const num = typeof entry.row === "number" ? entry.row : Number(entry.row);
+          if (!Number.isInteger(num)) {
+            rejected++;
+            continue;
+          }
+          const vals = readRowValues(entry.set);
+          rejected += vals.rejected;
+          perSource.set(num - 1, [...(perSource.get(num - 1) ?? []), ...vals.values]);
+        }
+      }
+
+      const scale: [string, number][] = [];
+      if (raw.scale && typeof raw.scale === "object" && !Array.isArray(raw.scale)) {
+        for (const [k, f] of Object.entries(raw.scale as Record<string, unknown>)) {
+          const factor = typeof f === "number" ? f : Number(f);
+          if (ROW_KEYS[k]?.numeric && Number.isFinite(factor) && factor > 0) {
+            scale.push([k, factor]);
+          } else {
+            rejected++;
+          }
+        }
+      }
+
+      const derive: { key: string; source: string; factor: number }[] = [];
+      if (Array.isArray(raw.derive)) {
+        for (const d of raw.derive) {
+          const e = (d ?? {}) as { key?: unknown; source_key?: unknown; factor?: unknown };
+          const key = typeof e.key === "string" ? e.key : "";
+          const source = typeof e.source_key === "string" ? e.source_key : "";
+          const factor = typeof e.factor === "number" ? e.factor : Number(e.factor);
+          if (
+            ROW_KEYS[key]?.numeric &&
+            ROW_KEYS[source]?.numeric &&
+            Number.isFinite(factor) &&
+            factor > 0
+          ) {
+            derive.push({ key, source, factor });
+          } else {
+            rejected++;
+          }
+        }
+      }
+
+      // Insertamos de abajo hacia arriba para que los índices de las filas
+      // de origen que faltan procesar no se corran.
+      const sources = [...target.indices].sort((a, b) => b - a);
+      let created = 0;
+      let missingNumbers = 0;
+      for (const i of sources) {
+        const src = working.rows[i];
+        if (!src) continue;
+        const copy: ContractRow = { ...src };
+        for (const [k, v] of common.values) writeRowCell(copy, k, v);
+        const originIdx = working.origin[i];
+        if (originIdx !== null && originIdx !== undefined) {
+          for (const [k, v] of perSource.get(originIdx) ?? []) writeRowCell(copy, k, v);
+        }
+        for (const [k, factor] of scale) {
+          const n = parseAmount(copy[k as RowFieldKey]);
+          if (n === null) {
+            missingNumbers++;
+            continue;
+          }
+          writeRowCell(copy, k, formatAmount(n * factor));
+        }
+        for (const d of derive) {
+          if (!deriveCell(copy, d.key, d.source, d.factor)) missingNumbers++;
+        }
+        working.rows.splice(i + 1, 0, copy);
+        working.origin.splice(i + 1, 0, null);
+        created++;
+      }
+
+      const setDesc = common.values
+        .map(([k, v]) => `${ROW_KEYS[k]!.label} = ${v ?? "(vacío)"}`)
+        .join(", ");
+      changes.push(
+        `${created} fila(s) nueva(s) creada(s) a partir de filas existentes` +
+          (setDesc ? ` (${setDesc})` : "") +
+          (perSource.size > 0 ? `, ${perSource.size} con valores propios` : "") +
+          (scale.length > 0
+            ? `, ${scale.map(([k, f]) => `${ROW_KEYS[k]!.label} × ${f}`).join(", ")}`
+            : "") +
+          (derive.length > 0
+            ? `, ${derive.map((d) => `${ROW_KEYS[d.key]!.label} = ${ROW_KEYS[d.source]!.label} × ${d.factor}`).join(", ")}`
+            : "") +
+          ". Insertadas debajo de cada fila original.",
+      );
+      if (missingNumbers > 0) {
+        changes.push(`⚠️ ${missingNumbers} cálculo(s) omitido(s) por celdas sin valor numérico.`);
+      }
+      if (rejected > 0) {
+        changes.push(`⚠️ ${rejected} valor(es) descartado(s) por clave o valor inválido.`);
+      }
       continue;
     }
 
@@ -889,6 +1260,14 @@ export interface RefineTableInput {
   history?: TableChatMessage[];
   /** Contexto libre del contrato (comentarios del Paso 1), si existe. */
   comments?: string | null;
+  /**
+   * Documentos originales del contrato (los del Paso 1). Opcionales: el
+   * operador los incluye cuando la corrección necesita datos que no están en
+   * la tabla (ej. la tarifa del triple).
+   */
+  documents?: PreparedDocumentInput[];
+  /** Adjuntos que el operador soltó en este mensaje del chat. */
+  attachments?: PreparedDocumentInput[];
   requestId?: string;
 }
 
@@ -933,13 +1312,43 @@ export async function refineContractTable(
         truncate(input.comments.trim(), 2000)
       : "";
 
-  const userMessage =
+  const documents = input.documents ?? [];
+  const attachments = input.attachments ?? [];
+
+  const userText =
     buildTableSnapshot(table) +
     commentsBlock +
     historyBlock +
     "\n\n═══ PEDIDO DEL OPERADOR ═══\n" +
     message +
+    (attachments.length > 0
+      ? `\n\n(El operador adjuntó ${attachments.length} archivo(s) a este mensaje — ` +
+        "están arriba como ADJUNTOS DEL OPERADOR.)"
+      : "") +
     `\n\nRespondé con la herramienta "${TOOL_NAME}".`;
+
+  // Documentos primero (prefijo estable → cacheable entre mensajes del chat),
+  // después los adjuntos de este turno y al final la tabla + el pedido.
+  const userContent: ContentBlockParam[] = [];
+  if (documents.length > 0) {
+    userContent.push({
+      type: "text",
+      text: "═══ DOCUMENTOS DEL CONTRATO (los originales del Paso 1) ═══",
+    });
+    userContent.push(...documentBlocks(documents, "Documento del contrato"));
+    const last = userContent[userContent.length - 1] as ContentBlockParam & {
+      cache_control?: { type: "ephemeral" };
+    };
+    last.cache_control = { type: "ephemeral" };
+  }
+  if (attachments.length > 0) {
+    userContent.push({
+      type: "text",
+      text: "═══ ADJUNTOS DEL OPERADOR (contexto extra para este pedido) ═══",
+    });
+    userContent.push(...documentBlocks(attachments, "Adjunto"));
+  }
+  userContent.push({ type: "text", text: userText });
 
   const client = getAnthropicClient();
   let response;
@@ -949,7 +1358,7 @@ export async function refineContractTable(
     const system =
       buildSystemPrompt() +
       `\n\nFORMATO DE RESPUESTA (obligatorio): respondé ÚNICAMENTE llamando a la herramienta "${TOOL_NAME}". Sin texto fuera de la herramienta.`;
-    const baseMessages: MessageParam[] = [{ role: "user", content: userMessage }];
+    const baseMessages: MessageParam[] = [{ role: "user", content: userContent }];
     const call = (messages: MessageParam[]) =>
       client.messages.create({
         model: SUPPLIER_TABLE_CHAT_MODEL,
@@ -995,6 +1404,17 @@ export async function refineContractTable(
     (block): block is ToolUseBlock =>
       block.type === "tool_use" && block.name === TOOL_NAME,
   );
+  if (response.stop_reason === "max_tokens") {
+    // Con la respuesta cortada, el input del tool llega truncado o vacío:
+    // aplicar "lo que haya" daría una corrección a medias sin aviso.
+    logger.warn("Table refine hit max_tokens", { requestId });
+    throw new ApiError(
+      422,
+      "El pedido generó demasiados cambios para una sola respuesta. Dividilo en partes " +
+        "más chicas (por ejemplo, un producto o una temporada por mensaje).",
+    );
+  }
+
   if (!toolUse) {
     logger.error("Table refine response missing tool_use block", {
       requestId,
@@ -1047,6 +1467,8 @@ export async function refineContractTable(
     changes: changes.length,
     rowsBefore: table.rows.length,
     rowsAfter: nextTable.rows.length,
+    documents: documents.length,
+    attachments: attachments.length,
     inputTokens,
     outputTokens,
     costUsd,

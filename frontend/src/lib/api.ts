@@ -1334,6 +1334,8 @@ export interface RefineBriefInput {
   previousBrief: ContractConfigVariables;
   feedbackMessage: string;
   chatHistory?: BriefChatMessage[];
+  /** Archivos que el operador adjunta a este mensaje del chat (capturas, PDFs…). */
+  attachments?: File[];
 }
 
 export interface RefineBriefResponse {
@@ -1408,6 +1410,13 @@ export interface RefineTableInput {
   chat_history?: TableChatMessage[];
   /** Comentarios que el operador dio al subir el contrato (Paso 1). */
   comments?: string | null;
+  /**
+   * Documentos originales del contrato (Paso 1). Solo se mandan cuando el
+   * operador pide que el asistente vuelva a leer el contrato.
+   */
+  contractFiles?: File[];
+  /** Archivos adjuntos a este mensaje del chat (capturas, PDFs, Excel…). */
+  attachments?: File[];
 }
 
 export interface RefineTableResponse {
@@ -1912,6 +1921,9 @@ export const api = {
       if (input.chatHistory && input.chatHistory.length > 0) {
         form.append("chat_history", JSON.stringify(input.chatHistory));
       }
+      for (const a of input.attachments ?? []) {
+        form.append("attachments", a);
+      }
       return requestForm<RefineBriefResponse>(
         "/api/supplier-intelligence/refine-brief",
         form,
@@ -1982,9 +1994,22 @@ export const api = {
      * acercarse al minuto.
      */
     refineTable(input: RefineTableInput) {
-      return request<RefineTableResponse>(
+      const { contractFiles = [], attachments = [], ...body } = input;
+      if (contractFiles.length === 0 && attachments.length === 0) {
+        return request<RefineTableResponse>(
+          "/api/supplier-intelligence/refine-table",
+          { method: "POST", body, auth: true, timeoutMs: 3 * 60 * 1000 },
+        );
+      }
+      // Con archivos: multipart. La tabla viaja como texto en `payload`.
+      const form = new FormData();
+      form.append("payload", JSON.stringify(body));
+      for (const f of contractFiles) form.append("files", f);
+      for (const a of attachments) form.append("attachments", a);
+      return requestForm<RefineTableResponse>(
         "/api/supplier-intelligence/refine-table",
-        { method: "POST", body: input, auth: true, timeoutMs: 3 * 60 * 1000 },
+        form,
+        { auth: true, timeoutMs: 5 * 60 * 1000 },
       );
     },
     /**
