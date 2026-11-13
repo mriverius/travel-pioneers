@@ -35,20 +35,77 @@ const TIER_OCCUPANCY_CODES: Record<
   villa_quint: ["SGL", "DBL", "TPL", "QDP", "QTN", "CHL"],
 };
 
-function normalizeOccupancyCode(code: string): string {
-  return code.trim().toUpperCase();
+/**
+ * Ocupaciones de 6+ personas: no hay código propio en el catálogo, se
+ * expresan como quíntuple + N personas ("QTN+1" = 6, "QTN+2" = 7, …) sin
+ * límite superior — hasta donde indique el contrato.
+ */
+const QTN_PLUS_RE = /^QTN\s*\+\s*(\d+)$/;
+
+/** Personas por ocupación adulta (TPL=3 … QTN=5, QTN+N=5+N). */
+const OCCUPANCY_PERSONS: Record<string, number> = {
+  SGL: 1,
+  DBL: 2,
+  TPL: 3,
+  QDP: 4,
+  QTN: 5,
+};
+
+export function normalizeOccupancyCode(code: string): string {
+  const c = code.trim().toUpperCase();
+  const m = c.match(QTN_PLUS_RE);
+  if (m) {
+    const extra = Number(m[1]);
+    return extra > 0 ? `QTN+${extra}` : "QTN";
+  }
+  return c;
+}
+
+/** Cantidad de personas que representa el código, o null si no es adulto. */
+export function occupancyPersons(code: string | null | undefined): number | null {
+  const c = normalizeOccupancyCode(code ?? "");
+  const m = c.match(QTN_PLUS_RE);
+  if (m) return 5 + Number(m[1]);
+  return OCCUPANCY_PERSONS[c] ?? null;
+}
+
+/** Código de ocupación para N personas (1→SGL … 5→QTN, 6→QTN+1, …). */
+export function occupancyCodeForPersons(persons: number): string | null {
+  if (!Number.isInteger(persons) || persons < 1) return null;
+  if (persons > 5) return `QTN+${persons - 5}`;
+  return (
+    Object.entries(OCCUPANCY_PERSONS).find(([, n]) => n === persons)?.[0] ??
+    null
+  );
+}
+
+/** Quíntuple o más (QTN, QTN+1, QTN+2…). */
+export function isQuintupleOrMore(code: string | null | undefined): boolean {
+  const n = occupancyPersons(code);
+  return n !== null && n >= 5;
+}
+
+export function isCatalogOccupancyCode(code: string): boolean {
+  const c = normalizeOccupancyCode(code);
+  return (
+    (CATALOG_OCCUPANCY_CODES as readonly string[]).includes(c) ||
+    QTN_PLUS_RE.test(c)
+  );
 }
 
 function filterCatalogCodes(codes: string[]): string[] {
   return [
     ...new Set(
-      codes
-        .map(normalizeOccupancyCode)
-        .filter((c) =>
-          (CATALOG_OCCUPANCY_CODES as readonly string[]).includes(c),
-        ),
+      codes.map(normalizeOccupancyCode).filter(isCatalogOccupancyCode),
     ),
   ];
+}
+
+/** Códigos QTN+1…QTN+(N-5) para una capacidad de N personas (N ≥ 6). */
+function quintPlusCodesUpTo(persons: number): string[] {
+  const out: string[] = [];
+  for (let n = 6; n <= persons; n += 1) out.push(`QTN+${n - 5}`);
+  return out;
 }
 
 /** Base del nombre de producto sin sufijo de paquete/sección. */
@@ -160,7 +217,9 @@ export function resolveExpectedOccupancyCodes(brief: ContractBrief): string[] {
 
   if (mentionsTriple) codes.push("TPL");
   if (mentionsQuad) codes.push("QDP");
-  if (mentionsQuint) codes.push("QTN");
+  const maxPersons = brief.max_adults_per_room ?? 0;
+  if (mentionsQuint || maxPersons >= 5) codes.push("QTN");
+  if (maxPersons >= 6) codes.push(...quintPlusCodesUpTo(maxPersons));
   if (mentionsChild) codes.push("CHL");
 
   return filterCatalogCodes(codes);
@@ -257,6 +316,24 @@ export function collectProductOccupancySpecs(
   return specs;
 }
 
+/**
+ * Mayor ocupación adulta (en personas) que el brief declara para el producto
+ * (ej. spec con "QTN+2" → 7). null si el brief no la publica.
+ */
+export function maxDeclaredOccupancyPersons(
+  productName: string,
+  specs: ProductOccupancySpec[],
+): number | null {
+  const matched = findBestProductOccupancySpec(productName, specs);
+  if (!matched) return null;
+  let max: number | null = null;
+  for (const c of matched.occupancy_codes) {
+    const n = occupancyPersons(c);
+    if (n !== null && (max === null || n > max)) max = n;
+  }
+  return max;
+}
+
 /** Ocupaciones esperadas para validar un producto × temporada. */
 export function resolveExpectedOccupancyCodesForProduct(
   productName: string,
@@ -293,7 +370,7 @@ export function resolveExpectedOccupancyCodesForProduct(
   }
   if (!productAllowsAdditionalPerson(productName)) {
     filtered = filtered.filter(
-      (c) => c !== "TPL" && c !== "QDP" && c !== "QTN",
+      (c) => c !== "TPL" && c !== "QDP" && !isQuintupleOrMore(c),
     );
   }
   if (!productAllowsQuadruple(productName)) {
@@ -519,7 +596,7 @@ export function filterOccupancyCodesByPolicy(
 ): string[] {
   return codes.filter((c) => {
     if (c === "QDP" && !policy.quadrupleAllowed) return false;
-    if (c === "QTN" && !policy.quintupleAllowed) return false;
+    if (isQuintupleOrMore(c) && !policy.quintupleAllowed) return false;
     return true;
   });
 }
@@ -556,7 +633,7 @@ export function removeForbiddenOccupancyRows(
       removed += 1;
       return;
     }
-    if (occ === "QTN" && !policy.quintupleAllowed) {
+    if (isQuintupleOrMore(occ) && !policy.quintupleAllowed) {
       removed += 1;
       return;
     }
@@ -566,7 +643,7 @@ export function removeForbiddenOccupancyRows(
 
   if (removed > 0) {
     warnings.push(
-      `Se eliminaron ${removed} fila(s) QDP/QTN — el contrato no las admite ` +
+      `Se eliminaron ${removed} fila(s) QDP/QTN/QTN+N — el contrato no las admite ` +
         "en esas categorías.",
     );
   }
@@ -1000,7 +1077,7 @@ export function expandChildOccupancyRows(
   };
 }
 
-/** Elimina TPL/QDP/QTN en productos que no admiten persona adicional. */
+/** Elimina TPL/QDP/QTN/QTN+N en productos que no admiten persona adicional. */
 export function stripDisallowedAdultOccupancies(
   extraction: ExtractedContract,
   warnings: string[],
@@ -1013,7 +1090,7 @@ export function stripDisallowedAdultOccupancies(
     const occ = normalizeOccupancyCode(row.ocupacion ?? "");
     if (
       !productAllowsAdditionalPerson(row.product_name) &&
-      (occ === "TPL" || occ === "QDP" || occ === "QTN")
+      (occ === "TPL" || occ === "QDP" || isQuintupleOrMore(occ))
     ) {
       removed += 1;
       return;
@@ -1024,7 +1101,7 @@ export function stripDisallowedAdultOccupancies(
 
   if (removed > 0) {
     warnings.push(
-      `Se eliminaron ${removed} fila(s) TPL/QDP/QTN en categorías que no ` +
+      `Se eliminaron ${removed} fila(s) TPL/QDP/QTN/QTN+N en categorías que no ` +
         "admiten persona adicional (Belmar, Forest, Peninsula Superior, Sunrise).",
     );
   }
@@ -1068,7 +1145,14 @@ export const OCCUPANCY_SORT_ORDER = [
 export function occupancySortIndex(code: string | null | undefined): number {
   const c = normalizeOccupancyCode(code ?? "");
   const idx = (OCCUPANCY_SORT_ORDER as readonly string[]).indexOf(c);
-  return idx >= 0 ? idx : 999;
+  if (idx >= 0) return idx;
+  // QTN+N va justo después de QTN y antes de CHL, ordenado por N.
+  const m = c.match(QTN_PLUS_RE);
+  if (m) {
+    const qtn = (OCCUPANCY_SORT_ORDER as readonly string[]).indexOf("QTN");
+    return qtn + 1 - 1 / (Number(m[1]) + 1);
+  }
+  return 999;
 }
 
 /** Ordena filas: producto → temporada → ocupación (SGL, DBL, TPL…). */

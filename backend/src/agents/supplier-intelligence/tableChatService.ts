@@ -163,7 +163,7 @@ const ROW_KEYS: Record<string, RowKeyMeta> = {
   tipo_unidad: { col: ROW_CLASSIFICATION_COL.tipo_unidad, label: "Tipo Unidad (N=por noche, S=por servicio)" },
   tipo_servicio: { col: ROW_CLASSIFICATION_COL.tipo_servicio, label: "Tipo Servicio (código de catálogo, ej. HO, TO)" },
   categoria: { col: ROW_COL.categoria ?? "R", label: "Categoría (código de catálogo)" },
-  ocupacion: { col: ROW_COL.ocupacion ?? "S", label: "Ocupación (SGL, DBL, TPL, QDP…)" },
+  ocupacion: { col: ROW_COL.ocupacion ?? "S", label: "Ocupación (SGL, DBL, TPL, QDP, QTN, QTN+1…)" },
   season_name: { col: ROW_COL.season_name ?? "T", label: "Season Name" },
   season_starts: { col: ROW_COL.season_starts ?? "U", label: "Season Starts (YYYY-MM-DD)" },
   season_ends: { col: ROW_COL.season_ends ?? "V", label: "Season Ends (YYYY-MM-DD)" },

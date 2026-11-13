@@ -315,6 +315,7 @@ export const REGISTRAR_BRIEF_CONTRATO_TOOL: Tool = {
         description:
           "Unión de TODOS los códigos de ocupación que aparecen en el contrato " +
           "(referencia global). Ej: [\"SGL\",\"DBL\",\"TPL\",\"QDP\",\"QTN\",\"CHL\"]. " +
+          "Para 6+ personas usá QTN+1 (6), QTN+2 (7), QTN+3 (8)… sin límite. " +
           "NO uses esta lista plana para todos los productos — completá " +
           "`occupancies_by_product` con las columnas reales de cada habitación.",
       },
@@ -333,7 +334,9 @@ export const REGISTRAR_BRIEF_CONTRATO_TOOL: Tool = {
               items: { type: "string" },
               description:
                 "Códigos Utopía que ESA habitación publica en el PDF. " +
-                "Suites: SGL+DBL+TPL+CHL. Villas medianas: +QDP. Jaguar/large: +QTN.",
+                "Suites: SGL+DBL+TPL+CHL. Villas medianas: +QDP. Jaguar/large: +QTN. " +
+                "Si la habitación admite 6 o más personas, listá TODAS las ocupaciones " +
+                "hasta su máximo: QTN+1 (6), QTN+2 (7)… (ej. villa de 8 → …QTN, QTN+1, QTN+2, QTN+3).",
             },
           },
           required: ["product", "occupancy_codes"],
@@ -348,13 +351,72 @@ export const REGISTRAR_BRIEF_CONTRATO_TOOL: Tool = {
         type: ["number", "null"],
         description:
           "Máximo de adultos por habitación si el contrato lo limita (ej. 2). " +
-          "Si es 2 o 3, NO generes cuádruple (QDP) en ninguna categoría.",
+          "Si es 2 o 3, NO generes cuádruple (QDP) en ninguna categoría. " +
+          "Si es 6 o más, las ocupaciones siguen QTN+1, QTN+2… hasta ese máximo.",
       },
       quadruple_allowed: {
         type: ["boolean", "null"],
         description:
           "false si el contrato prohíbe cuádruple en TODAS las habitaciones " +
           '(ej. "No se admiten 4 adultos en ninguna categoría"). true/null si aplica.',
+      },
+      open_questions: {
+        type: "array",
+        description:
+          "Dudas REALES que tenés sobre el contrato y que cambiarían el " +
+          "resultado (precios, filas, impuestos, comisión, ocupaciones, " +
+          "temporadas). Cada una se le muestra al operador, de a una, ANTES " +
+          "de extraer, para que responda Sí / No o escriba otra respuesta. " +
+          "Formulalas como preguntas cerradas de Sí/No cuando se pueda. " +
+          "NO preguntes lo que el documento ya dice claro. Máximo 6; " +
+          "array vacío si no tenés dudas.",
+        items: {
+          type: "object",
+          properties: {
+            question: {
+              type: "string",
+              description:
+                "La pregunta, corta y concreta, en español (ej. \"¿La tarifa " +
+                "de la Villa Jaguar es por habitación y no por persona?\").",
+            },
+            context: {
+              type: "string",
+              description:
+                "Por qué dudás: qué dice (o no dice) el documento, con la " +
+                "cita o página si aplica. Una o dos oraciones.",
+            },
+            assumption: {
+              type: "string",
+              description:
+                "Qué vas a asumir si el operador no responde.",
+            },
+            suggested_answer: {
+              type: ["string", "null"],
+              enum: ["yes", "no", null],
+              description:
+                "Tu respuesta más probable si la pregunta es de Sí/No; null " +
+                "si es abierta.",
+            },
+            topic: {
+              type: "string",
+              enum: [
+                "tax",
+                "commission",
+                "currency",
+                "validity",
+                "seasons",
+                "prices",
+                "services",
+                "rows",
+                "bank",
+                "identity",
+                "other",
+              ],
+            },
+          },
+          required: ["question", "context", "assumption", "topic"],
+          additionalProperties: false,
+        },
       },
       logic_summary: {
         type: ["string", "null"],

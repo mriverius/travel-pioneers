@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import logger from "../../config/logger.js";
 import ApiError from "../../utils/ApiError.js";
 import { getChatAttachmentFiles, prepareFiles } from "./chatAttachments.js";
+import { assertDocsFitRequest } from "./extractors/index.js";
 import {
   coerceCatalogPrefill,
   coerceManualFields,
@@ -154,6 +155,7 @@ export async function refineTableHandler(
     prepareFiles(contractFiles),
     prepareFiles(attachmentFiles),
   ]);
+  assertDocsFitRequest([...documents, ...attachments]);
 
   const table = parseTable(body);
   const message = parseMessage(body.message);

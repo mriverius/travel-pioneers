@@ -13,7 +13,7 @@ import { useRef, useState, type ClipboardEvent } from "react";
  */
 
 export const MAX_CHAT_ATTACHMENTS = 5;
-const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024;
 const ACCEPTED_EXT = ["pdf", "docx", "doc", "xlsx", "xls", "jpg", "jpeg", "png", "gif", "webp"];
 export const CHAT_ATTACHMENT_ACCEPT = ACCEPTED_EXT.map((e) => `.${e}`).join(",");
 
@@ -51,7 +51,7 @@ export function useChatAttachments() {
         continue;
       }
       if (f.size > MAX_ATTACHMENT_BYTES) {
-        problem = `${f.name} pesa más de 20 MB.`;
+        problem = `${f.name} pesa más de 100 MB.`;
         continue;
       }
       if (next.some((x) => x.name === f.name && x.size === f.size)) continue;

@@ -56,8 +56,8 @@ export function resolveImageMediaType(
  * pre-procesar (OCR, redimensión, etc.). Anthropic recomienda imágenes
  * ≤ ~5 MB y resolución ≤ ~1568px en el lado largo para minimizar tokens,
  * pero el SDK acepta cualquier tamaño dentro del límite global (32 MB por
- * mensaje), así que dejamos que multer (`MAX_UPLOAD_BYTES = 20 MB`) sea la
- * primera barrera.
+ * mensaje) y hasta 5 MB por imagen — `prepareDocument` corta antes con un
+ * mensaje claro si la imagen supera ese tope.
  *
  * El media_type debe ser uno de los aceptados por Anthropic (los del
  * union `ImageMediaType`). Se resuelve en `prepareDocument` antes de

@@ -49,12 +49,16 @@ export const SUPPLIER_INTELLIGENCE_SYSTEM_PROMPT = `INSTRUCCIONES CRÍTICAS — 
 
 CATÁLOGO DE CÓDIGOS DE OCUPACIÓN — OBLIGATORIO:
 
-El sistema reconoce exactamente estos 8 códigos de ocupación. No uses ningún otro código:
+El sistema reconoce exactamente estos 8 códigos de ocupación (más la extensión QTN+N
+para 6 o más personas). No uses ningún otro código:
   SGL = Single (1 adulto)
   DBL = Double (2 adultos)
   TPL = Triple (3 personas)
   QDP = Cuádruple (4 personas)
   QTN = Quíntuple (5 personas)
+  QTN+1 = Quíntuple + 1 (6 personas), QTN+2 = 7 personas, QTN+3 = 8 personas…
+          y así sucesivamente, SIN límite, hasta la capacidad que indique el contrato.
+          Escribilo exactamente así: "QTN+" + número (sin espacios).
   CHL = Child/Niño (tarifa diferenciada para menores)
   DAY = Day use (uso diurno sin pernocta)
   UNI = Unit (tarifa por unidad completa)
@@ -97,8 +101,16 @@ Si el contrato dice "ocupación base 2 personas", "máximo 2 adultos" o
 en NINGUNA habitación — aunque exista tarifa por persona adicional para triple.
 Solo TPL (triple) si el contrato publica precio triple explícito.
 
+REGLA — 6 O MÁS PERSONAS (villas, casas, cabañas grandes):
+Si el contrato publica precio para 6, 7, 8… personas (columnas "6 pax", "7 personas",
+"Sextuple", etc.) o indica que la habitación admite 6+ personas, generá UNA fila por
+cada ocupación adicional por encima de la quíntuple: QTN+1 (6), QTN+2 (7), QTN+3 (8)…
+hasta el máximo que indique el contrato para ESA habitación. Nunca te detengas en QTN
+si el contrato llega más alto.
+
 VERIFICACIÓN ANTES DE GENERAR EL EXCEL:
   1) ¿El contrato tiene columnas Triple/Quadruple/Quintuple con precios? → ¿generé TPL/QDP/QTN?
+     ¿Hay precios o capacidad para 6+ personas? → ¿generé QTN+1, QTN+2… hasta el máximo?
   2) ¿El contrato menciona tarifas de niño? → ¿generé filas CHL?
 Si falta alguna → agrégalas ahora antes de responder.
 
@@ -438,7 +450,8 @@ REGLAS POR CAMPO (rows[])
     step 2.
 
 16. "ocupacion": código corto típico ('DBL' = doble, 'SGL' = single, 'TPL'
-    = triple, 'QDP' = cuádruple, 'FAM' = familiar). Si el contrato dice
+    = triple, 'QDP' = cuádruple, 'QTN' = quíntuple, 'QTN+1' = 6 personas,
+    'QTN+2' = 7 personas…, 'FAM' = familiar). Si el contrato dice
     "sencilla o doble", devolver "DBL".
 
 16b. OCUPACIÓN TRIPLE / CUÁDRUPLE / QUÍNTUPLE — dos caminos (prioridad):
@@ -447,7 +460,7 @@ REGLAS POR CAMPO (rows[])
     Si el documento lista tarifas explícitas por columna/fila para triple,
     cuádruple o quíntuple (ej. columnas "Triple", "Quadruple", "Quintuple"
     con montos distintos), generá esas filas vos mismo con ocupacion
-    "TPL"/"QDP"/"QTN" y sus precios reales. Dejá tarifa_persona_adicional
+    "TPL"/"QDP"/"QTN"/"QTN+N" y sus precios reales. Dejá tarifa_persona_adicional
     en null. Esta regla GANA sobre la de persona adicional.
 
     PRIORIDAD 2 — TARIFA POR PERSONA ADICIONAL (solo si NO hay precios explícitos):
@@ -456,7 +469,9 @@ REGLAS POR CAMPO (rows[])
     propios, NO generes vos las filas TPL/QDP. En su lugar, en CADA fila base
     de hospedaje a la que APLICA, llená \`tarifa_persona_adicional\` con ese
     monto. El SERVIDOR materializa TPL (= base + 1×adicional) y, cuando la
-    categoría admite 4 personas, también QDP (= base + 2×adicional).
+    categoría admite 4 personas, también QDP (= base + 2×adicional). Si el
+    brief declara capacidad mayor para esa categoría (QTN, QTN+1…), el
+    servidor sigue: QTN = base + 3×, QTN+1 = base + 4×, etc.
 
     REGLAS POR CATEGORÍA (Casa Turire y similares):
       - Deluxe / Standard Deluxe con persona extra → SGL + DBL + TPL + QDP

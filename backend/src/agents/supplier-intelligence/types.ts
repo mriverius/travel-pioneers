@@ -373,6 +373,19 @@ export interface ContractBrief {
   max_adults_per_room: number | null;
   /** false cuando el contrato prohíbe cuádruple en todas las categorías. */
   quadruple_allowed: boolean | null;
+  /**
+   * Dudas de la IA sobre el contrato. El operador las responde de a una en el
+   * Paso 2 y la respuesta viaja a la extracción como instrucción suya.
+   */
+  open_questions: ContractBriefQuestion[];
+}
+
+export interface ContractBriefQuestion {
+  question: string;
+  context: string;
+  assumption: string;
+  suggested_answer: "yes" | "no" | null;
+  topic: string;
 }
 
 /** Mensaje del chat de refinamiento del brief (Paso 2). */

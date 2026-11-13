@@ -1,0 +1,4 @@
+# Ghostscript comprime los PDF pesados antes de mandarlos a Claude
+# (src/agents/supplier-intelligence/extractors/pdfCompress.ts).
+[phases.setup]
+aptPkgs = ["...", "ghostscript"]

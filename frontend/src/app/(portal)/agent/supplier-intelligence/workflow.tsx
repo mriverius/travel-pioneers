@@ -70,6 +70,8 @@ import {
 import { useAuth } from "@/lib/useAuth";
 import { SaveEvalCaseCard } from "./saveEvalCase";
 import {
+  aiAnswerInstruction,
+  aiBriefQuestions,
   qaBrief,
   qaRows,
   worstSeverity,
@@ -113,7 +115,7 @@ function newExtractionId(): string {
  * Three-step supplier-contract workflow wired to the backend agent at
  * `POST /api/supplier-intelligence/extract`.
  *
- *   1. Upload   — drag & drop a .pdf / .docx / .doc / .xlsx / .xls (≤20 MB).
+ *   1. Upload   — drag & drop a .pdf / .docx / .doc / .xlsx / .xls (≤100 MB; los PDF pesados se comprimen en el servidor).
  *   2. Review   — Tabla plana de 52 columnas (A..AZ). Cada combinación
  *                 product × season es una fila. Las columnas compartidas
  *                 (razón social, cédula, bancos…) muestran el mismo valor
@@ -454,62 +456,92 @@ function QaFindingsPanel({
 
 /**
  * Paso 2 — preguntas que el revisor humano debe decidir antes de extraer.
- * Cada opción (a) corrige el brief y (b) se envía a la extracción como
- * instrucción del usuario (prioridad máxima). "Omitir" deja el brief como
- * está y sólo desbloquea el botón.
+ * Primero las dudas de la IA, después las del revisor determinístico. Se
+ * muestran DE A UNA: Sí / No (u opciones pre-llenadas), un renglón para
+ * responder otra cosa, u "Omitir". Cada respuesta (a) corrige el brief si la
+ * opción trae patch y (b) se envía a la extracción como instrucción del
+ * usuario (prioridad máxima).
  */
 function BriefQaPanel({
   qa,
   answers,
   resolutions,
   onAnswer,
+  onAnswerText,
   onSkip,
   onUndo,
 }: {
   qa: BriefQaResult;
   answers: Record<string, string>;
-  resolutions: Record<string, { title: string; instruction: string }>;
+  resolutions: Record<string, { title: string; instruction: string; answer?: string }>;
   onAnswer: (q: QaQuestion, o: QaOption) => void;
+  onAnswerText: (q: QaQuestion, text: string) => void;
   onSkip: (q: QaQuestion) => void;
   onUndo: (id: string) => void;
 }) {
+  const [draft, setDraft] = useState("");
   const open = qa.questions.filter((q) => answers[q.id] === undefined);
   const skipped = qa.questions.filter((q) => answers[q.id] === "skip");
   const resolved = Object.entries(resolutions);
+  const current = open[0] ?? null;
+  const position = qa.questions.length - open.length + 1;
+
+  const submitText = () => {
+    const text = draft.trim();
+    if (!current || !text) return;
+    onAnswerText(current, text);
+    setDraft("");
+  };
+
   return (
     <div className="space-y-3">
       <QaFindingsPanel findings={qa.findings} title="Revisión automática del brief (sin IA)" />
       {(open.length > 0 || skipped.length > 0 || resolved.length > 0) && (
         <div className="rounded-xl border border-primary/30 bg-primary/5 px-4 py-3 space-y-3">
-          <div>
-            <p className="flex items-center gap-1.5 text-[12.5px] font-semibold text-foreground">
-              <HelpCircle className="h-4 w-4 text-primary" />
-              Preguntas antes de extraer
-            </p>
-            <p className="mt-0.5 text-[11.5px] text-muted-foreground">
-              Tu respuesta corrige el brief y viaja a la extracción como instrucción tuya
-              (prioridad máxima, por encima del documento).
-            </p>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="flex items-center gap-1.5 text-[12.5px] font-semibold text-foreground">
+                <HelpCircle className="h-4 w-4 text-primary" />
+                Preguntas antes de extraer
+              </p>
+              <p className="mt-0.5 text-[11.5px] text-muted-foreground">
+                Tu respuesta corrige el brief y viaja a la extracción como instrucción tuya
+                (prioridad máxima, por encima del documento).
+              </p>
+            </div>
+            {current && (
+              <span className="shrink-0 rounded-md bg-secondary/60 px-2 py-0.5 text-[11px] tabular-nums text-muted-foreground">
+                {position} de {qa.questions.length}
+              </span>
+            )}
           </div>
-          {open.map((q) => (
-            <div key={q.id} className="rounded-lg border border-border bg-card/60 px-3 py-2.5 space-y-2">
+          {current && (
+            <div key={current.id} className="rounded-lg border border-border bg-card/60 px-3 py-2.5 space-y-2">
               <div>
                 <p className="text-[12.5px] font-medium text-foreground">
-                  {q.title}
-                  {q.required && (
+                  {current.source === "ai" && (
+                    <Sparkles className="mr-1 inline h-3.5 w-3.5 -translate-y-px text-primary" />
+                  )}
+                  {current.title}
+                  {current.required && (
                     <span className="ml-1.5 rounded bg-amber-500/15 px-1 py-px text-[10px] font-semibold uppercase tracking-wide text-amber-300">
                       obligatoria
                     </span>
                   )}
                 </p>
-                <p className="text-[11.5px] text-muted-foreground">{q.detail}</p>
+                {current.detail && (
+                  <p className="text-[11.5px] text-muted-foreground">{current.detail}</p>
+                )}
               </div>
               <div className="flex flex-wrap gap-1.5">
-                {q.options.map((o) => (
+                {current.options.map((o) => (
                   <button
                     key={o.id}
                     type="button"
-                    onClick={() => onAnswer(q, o)}
+                    onClick={() => {
+                      setDraft("");
+                      onAnswer(current, o);
+                    }}
                     className="rounded-md border border-primary/40 bg-primary/10 px-2.5 py-1 text-[12px] text-foreground transition-colors hover:bg-primary/20"
                   >
                     {o.label}
@@ -517,14 +549,40 @@ function BriefQaPanel({
                 ))}
                 <button
                   type="button"
-                  onClick={() => onSkip(q)}
+                  onClick={() => {
+                    setDraft("");
+                    onSkip(current);
+                  }}
                   className="rounded-md border border-border px-2.5 py-1 text-[12px] text-muted-foreground transition-colors hover:bg-secondary/60"
                 >
                   Omitir (dejar como está)
                 </button>
               </div>
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  submitText();
+                }}
+                className="flex items-center gap-1.5"
+              >
+                <input
+                  type="text"
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  placeholder="Otra respuesta…"
+                  className="min-w-0 flex-1 rounded-md border border-border bg-background/60 px-2.5 py-1 text-[12px] text-foreground placeholder:text-muted-foreground/70 focus:border-primary/50 focus:outline-none"
+                />
+                <button
+                  type="submit"
+                  disabled={!draft.trim()}
+                  className="inline-flex items-center gap-1 rounded-md border border-primary/40 bg-primary/10 px-2.5 py-1 text-[12px] text-foreground transition-colors hover:bg-primary/20 disabled:opacity-40"
+                >
+                  <Send className="h-3 w-3" />
+                  Responder
+                </button>
+              </form>
             </div>
-          ))}
+          )}
           {(resolved.length > 0 || skipped.length > 0) && (
             <div className="space-y-1 border-t border-border/60 pt-2">
               {resolved.map(([id, r]) => (
@@ -532,7 +590,7 @@ function BriefQaPanel({
                   <span className="flex items-start gap-2">
                     <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-400" />
                     <span>
-                      <span className="font-medium">{r.title}</span> — {r.instruction}
+                      <span className="font-medium">{r.title}</span> — {r.answer ?? r.instruction}
                     </span>
                   </span>
                   <button
@@ -706,7 +764,7 @@ export type CatalogMatchInfo =
   | { status: "not_found"; query: string; aiAttempted: boolean }
   | { status: "skipped"; reason: "new_supplier" | "no_query" };
 
-const MAX_FILE_BYTES = 20 * 1024 * 1024;
+const MAX_FILE_BYTES = 100 * 1024 * 1024;
 
 /**
  * Mirrors `MAX_UPLOAD_FILES` in the backend `uploadMiddleware`. Kept in sync
@@ -758,7 +816,7 @@ const STEPS: { id: Step; label: string; hint: string }[] = [
   {
     id: 1,
     label: "Cargar documento",
-    hint: "PDF, Word, Excel o imagen · máx 20 MB",
+    hint: "PDF, Word, Excel o imagen · máx 100 MB",
   },
   {
     id: 2,
@@ -942,7 +1000,7 @@ export function SupplierWorkflow() {
   const [feedbackBase, setFeedbackBase] = useState<FeedbackBase | null>(null);
   /** Instrucciones derivadas de las respuestas; viajan a la extracción. */
   const [qaResolutions, setQaResolutions] = useState<
-    Record<string, { title: string; instruction: string }>
+    Record<string, { title: string; instruction: string; answer?: string }>
   >({});
 
   /**
@@ -952,12 +1010,15 @@ export function SupplierWorkflow() {
   const briefQa = useMemo<BriefQaResult>(() => {
     const b = editedBriefs[0] ?? briefs[0];
     if (!b) return { findings: [], questions: [] };
-    return qaBrief({
+    const rules = qaBrief({
       brief: b,
       scan: preScan.status === "done" ? preScan.result : null,
       supplier: confirmedSupplier,
       comments,
     });
+    // Las dudas de la IA van primero: es el agente preguntando antes de tirar nada.
+    const ai = aiBriefQuestions(briefs.map((orig, i) => editedBriefs[i] ?? orig));
+    return { ...rules, questions: [...ai, ...rules.questions] };
   }, [editedBriefs, briefs, preScan, confirmedSupplier, comments]);
   const pendingRequired = briefQa.questions.filter(
     (q) => q.required && qaAnswers[q.id] === undefined,
@@ -972,7 +1033,18 @@ export function SupplierWorkflow() {
     }
     setQaAnswers((prev) => ({ ...prev, [q.id]: o.id }));
     setQaMeta((prev) => ({ ...prev, [q.id]: { topic: q.topic, required: q.required } }));
-    setQaResolutions((prev) => ({ ...prev, [q.id]: { title: q.title, instruction: o.instruction } }));
+    setQaResolutions((prev) => ({
+      ...prev,
+      [q.id]: { title: q.title, instruction: o.instruction, answer: q.source === "ai" ? o.label : undefined },
+    }));
+  };
+  /** Respuesta libre (renglón "Otra respuesta…"): sin patch, sólo instrucción. */
+  const answerQuestionText = (q: QaQuestion, text: string) => {
+    const instruction =
+      q.source === "ai" ? aiAnswerInstruction(q.title, text) : `${q.title} → ${text}`;
+    setQaAnswers((prev) => ({ ...prev, [q.id]: "text" }));
+    setQaMeta((prev) => ({ ...prev, [q.id]: { topic: q.topic, required: q.required } }));
+    setQaResolutions((prev) => ({ ...prev, [q.id]: { title: q.title, instruction, answer: text } }));
   };
   const skipQuestion = (q: QaQuestion) => {
     setQaAnswers((prev) => ({ ...prev, [q.id]: "skip" }));
@@ -1100,7 +1172,7 @@ export function SupplierWorkflow() {
       }
       if (file.size > MAX_FILE_BYTES) {
         errors.push(
-          `${file.name}: excede el límite de 20 MB (${humanSize(file.size)}).`,
+          `${file.name}: excede el límite de 100 MB (${humanSize(file.size)}).`,
         );
         continue;
       }
@@ -1854,6 +1926,7 @@ export function SupplierWorkflow() {
                 answers={qaAnswers}
                 resolutions={qaResolutions}
                 onAnswer={answerQuestion}
+                onAnswerText={answerQuestionText}
                 onSkip={skipQuestion}
                 onUndo={undoAnswer}
               />
@@ -2328,7 +2401,7 @@ function DocumentUploadSection({
               <Badge label="XLSX" />
               <Badge label="JPG" />
               <Badge label="PNG" />
-              <span className="opacity-60">· hasta 20 MB c/u</span>
+              <span className="opacity-60">· hasta 100 MB c/u</span>
             </div>
           </>
         )}

@@ -25,6 +25,8 @@ export const LOGIC_SUMMARY_FORMAT =
   "Si la tabla tiene columnas distintas por habitación (ej. suites SGL+DBL+TPL+Niño; " +
   "villas +Cuádruple; Jaguar +Quíntuple), llená `occupancies_by_product` — NO asumas " +
   "que QDP/QTN aplican a todas. `occupancy_codes` es solo la unión global de referencia.\n" +
+  "Para habitaciones de 6 o más personas, después de QTN (quíntuple) seguí con QTN+1 (6), " +
+  "QTN+2 (7), QTN+3 (8)… hasta la capacidad que indique el contrato, sin límite.\n" +
   "Si el contrato limita a 2 adultos por habitación o prohíbe cuádruple, llená " +
   "`max_adults_per_room: 2` y `quadruple_allowed: false`.\n\n" +
   "**Tipo de tarifa (tipo_unidad)**\n" +
@@ -112,7 +114,15 @@ export const CONTRACT_BRIEF_INSTRUCTION =
   "  8. logic_summary: resumen narrativo en ESPAÑOL siguiendo el FORMATO " +
   "OBLIGATORIO de 10 secciones (ver abajo).\n" +
   "  9. row_plan: categorías, ocupaciones por categoría, cantidad de " +
-  "temporadas y expected_rows (categorías × ocupaciones × temporadas).\n\n" +
+  "temporadas y expected_rows (categorías × ocupaciones × temporadas).\n" +
+  "  10. open_questions: ANTES de dar algo por sentado, preguntá. Si el " +
+  "documento es ambiguo en algo que cambia precios o filas (¿tarifa por " +
+  "persona o por habitación?, ¿incluye impuesto?, ¿a qué habitaciones aplica " +
+  "la persona adicional?, ¿hasta cuántas personas admite una villa?, ¿una " +
+  "tabla sin fechas es otra temporada?), registrá una pregunta cerrada de " +
+  "Sí/No con el contexto y lo que vas a asumir. El operador las responde de a " +
+  "una antes de extraer. No inventes dudas: si el documento es claro, dejá " +
+  "el array vacío.\n\n" +
   "Sé EXHAUSTIVO sobre todo en bancos y persona adicional — son los datos que " +
   "más se pierden cuando se extrae todo de una vez.\n\n" +
   LOGIC_SUMMARY_FORMAT;
@@ -133,7 +143,9 @@ export const CONTRACT_BRIEF_REFINE_INSTRUCTION =
   "secciones (ver abajo) — no devuelvas un bloque de texto pegado sin estructura.\n" +
   "  • Recalculá row_plan y expected_row_estimate si cambian categorías, " +
   "temporadas u ocupaciones.\n" +
-  "  • Mantén intacto lo que el usuario NO cuestionó.\n\n" +
+  "  • Mantén intacto lo que el usuario NO cuestionó.\n" +
+  "  • open_questions: quitá las dudas que el feedback ya resolvió; conservá " +
+  "con el MISMO texto las que siguen abiertas.\n\n" +
   LOGIC_SUMMARY_FORMAT;
 
 /**
@@ -436,7 +448,8 @@ export function renderContractBriefBlock(brief: {
       lines.push(
         `• OCUPACIONES ESPERADAS: ~${occPerCat} por categoría — si el PDF tiene ` +
           `columnas Triple/Quadruple/Quintuple con precios propios, generá filas ` +
-          `TPL/QDP/QTN (no solo SGL/DBL). CHL es aparte si hay tarifa niño.`,
+          `TPL/QDP/QTN (no solo SGL/DBL), y QTN+1, QTN+2… para 6+ personas. ` +
+          `CHL es aparte si hay tarifa niño.`,
       );
     }
     lines.push(

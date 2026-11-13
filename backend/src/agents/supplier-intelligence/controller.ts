@@ -2,7 +2,11 @@ import type { Request, Response } from "express";
 import logger from "../../config/logger.js";
 import ApiError from "../../utils/ApiError.js";
 import { loadEnabledRuleTexts } from "../../controllers/agentRuleController.js";
-import { detectDocKind, prepareDocument } from "./extractors/index.js";
+import {
+  assertDocsFitRequest,
+  detectDocKind,
+  prepareDocument,
+} from "./extractors/index.js";
 import { getChatAttachmentFiles, prepareFiles } from "./chatAttachments.js";
 import {
   analyzeContractBrief,
@@ -254,6 +258,7 @@ async function prepareUploadedDocs(req: Request): Promise<{
     prepared.push({ ...doc, originalName: file.originalname });
     totalBytes += file.size;
   }
+  assertDocsFitRequest(prepared);
 
   return {
     prepared,
@@ -354,6 +359,7 @@ export async function refineBriefHandler(
   const chatHistory = parseChatHistoryField(req.body?.chat_history);
   const attachmentFiles = getChatAttachmentFiles(res);
   const attachments = await prepareFiles(attachmentFiles);
+  assertDocsFitRequest([...prepared, ...attachments]);
 
   logger.info("Supplier Intelligence brief refine started", {
     requestId: req.id,

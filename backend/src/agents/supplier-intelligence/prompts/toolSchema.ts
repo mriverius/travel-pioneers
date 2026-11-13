@@ -299,9 +299,11 @@ const rowSchema = {
       description:
         "Código corto de ocupación. Convención del maestro: 'DBL' = " +
         "doble, 'SGL' = single, 'TPL' = triple, 'QDP' = cuádruple, 'QTN' = " +
-        "quíntuple, 'CHL' = niño, 'FAM' = familiar. Si la tabla del contrato " +
-        "tiene columnas Triple/Quadruple/Quintuple con precios, generá esas " +
-        "filas con TPL/QDP/QTN. Solo usá tarifa_persona_adicional (regla 16b) " +
+        "quíntuple, 'QTN+1' = 6 personas, 'QTN+2' = 7 personas (y así sin " +
+        "límite, hasta lo que indique el contrato), 'CHL' = niño, 'FAM' = " +
+        "familiar. Si la tabla del contrato tiene columnas Triple/Quadruple/" +
+        "Quintuple/6+ personas con precios, generá esas filas con TPL/QDP/QTN/" +
+        "QTN+N. Solo usá tarifa_persona_adicional (regla 16b) " +
         "cuando NO haya precios explícitos por ocupación.",
     },
     tarifa_persona_adicional: {
@@ -315,7 +317,8 @@ const rowSchema = {
         "documento ya lo da con impuesto incluido, usá ese número tal cual. " +
         "Solo número (sin símbolo de moneda ni '%'). Poné el MISMO valor en " +
         "cada fila base de hospedaje a la que aplica. El servidor genera " +
-        "automáticamente las filas TPL (base + 1×) y QDP (base + 2×). Dejá " +
+        "automáticamente las filas TPL (base + 1×) y QDP (base + 2×), y " +
+        "QTN/QTN+N si el brief declara esa capacidad. Dejá " +
         "null si el contrato NO menciona persona adicional, o si el contrato " +
         "YA lista tarifas explícitas para triple/cuádruple (en ese caso " +
         "generá esas filas vos mismo con su ocupacion correcta).",

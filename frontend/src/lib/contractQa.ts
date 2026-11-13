@@ -46,6 +46,8 @@ export interface QaOption {
 
 export interface QaQuestion {
   id: string;
+  /** "ai" = duda que planteó la IA en el brief; si no, revisor determinístico. */
+  source?: "ai";
   topic: QaFinding["topic"];
   /** Si es true, no se puede extraer sin responder u omitir explícitamente. */
   required: boolean;
@@ -468,4 +470,55 @@ export function worstSeverity(findings: QaFinding[]): QaSeverity | null {
   if (findings.some((f) => f.severity === "warning")) return "warning";
   if (findings.length > 0) return "info";
   return null;
+}
+
+/* -------------------------------------------------------------------------- */
+/*                         Dudas planteadas por la IA                         */
+/* -------------------------------------------------------------------------- */
+
+const QA_TOPICS: ReadonlySet<string> = new Set<QaFinding["topic"]>([
+  "tax", "commission", "currency", "validity", "seasons", "prices", "services", "rows", "bank", "identity", "documents", "other",
+]);
+
+/** Id estable por texto: sobrevive a un refine que conserva la pregunta. */
+function aiQuestionId(question: string): string {
+  let h = 0;
+  for (const ch of question.trim().toLowerCase()) h = (h * 31 + ch.charCodeAt(0)) | 0;
+  return `ai-${(h >>> 0).toString(36)}`;
+}
+
+/** Instrucción que viaja a la extracción con la respuesta del revisor. */
+export function aiAnswerInstruction(question: string, answer: string): string {
+  return `Pregunta de la IA: «${question}» → respuesta del revisor: ${answer}`;
+}
+
+/**
+ * Convierte las `open_questions` de los briefs en preguntas Sí / No (más
+ * respuesta libre en el panel). Se deduplican entre documentos por texto.
+ */
+export function aiBriefQuestions(briefs: ContractConfigVariables[]): QaQuestion[] {
+  const out = new Map<string, QaQuestion>();
+  for (const b of briefs) {
+    for (const q of b.open_questions ?? []) {
+      const text = q.question.trim();
+      if (!text) continue;
+      const id = aiQuestionId(text);
+      if (out.has(id)) continue;
+      const detail = [q.context, q.assumption && `Si no respondes, la IA asume: ${q.assumption}`]
+        .filter(Boolean)
+        .join(" ");
+      const yes: QaOption = { id: "yes", label: "Sí", instruction: aiAnswerInstruction(text, "Sí.") };
+      const no: QaOption = { id: "no", label: "No", instruction: aiAnswerInstruction(text, "No.") };
+      out.set(id, {
+        id,
+        source: "ai",
+        topic: QA_TOPICS.has(q.topic) ? (q.topic as QaFinding["topic"]) : "other",
+        required: true,
+        title: text,
+        detail,
+        options: q.suggested_answer === "no" ? [no, yes] : [yes, no],
+      });
+    }
+  }
+  return [...out.values()];
 }

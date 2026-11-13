@@ -26,6 +26,12 @@ import {
   normalizeDriverRoomOccupancies,
   syncSeasonDatesFromBrief,
   validateExpectedOccupancies,
+  collectProductOccupancySpecs,
+  isQuintupleOrMore,
+  maxDeclaredOccupancyPersons,
+  normalizeOccupancyCode,
+  occupancyCodeForPersons,
+  occupancyPersons,
 } from "./catalogRules.js";
 
 /**
@@ -517,20 +523,16 @@ function fmtAmount(n: number): string {
   return (Math.round((n + Number.EPSILON) * 100) / 100).toFixed(2);
 }
 
-const OCCUPANCY_MULTIPLIER: Record<"TPL" | "QDP", number> = {
-  TPL: 1, // tercera persona
-  QDP: 2, // tercera + cuarta persona
-};
-
 /**
- * Ocupaciones "base" desde las que SÍ tiene sentido expandir a TPL/QDP.
+ * Ocupaciones "base" desde las que SÍ tiene sentido expandir a TPL/QDP/QTN….
  * Si una fila ya es TPL/QDP (o algo ajeno a hospedaje), no la tocamos.
  */
 const BASE_OCCUPANCIES = new Set(["", "SGL", "DBL", "FAM", "DOBLE", "SENCILLA"]);
 
 /**
- * Construye una fila derivada de ocupación (TPL o QDP) a partir de una fila
- * base, sumando la tarifa por persona adicional a los precios.
+ * Construye una fila derivada de ocupación (TPL, QDP, QTN, QTN+N…) a partir
+ * de una fila base doble, sumando (personas − 2) × tarifa por persona
+ * adicional a los precios.
  *
  * - El adicional viene como precio RACK con IVA incluido (`addlRack`).
  * - Para el precio NETO derivamos el adicional escalando por la razón
@@ -541,10 +543,11 @@ const BASE_OCCUPANCIES = new Set(["", "SGL", "DBL", "FAM", "DOBLE", "SENCILLA"])
  */
 function buildOccupancyRow(
   base: ContractRow,
-  occ: "TPL" | "QDP",
+  occ: string,
   addlRack: number,
 ): ContractRow {
-  const mult = OCCUPANCY_MULTIPLIER[occ];
+  // Personas por encima de la doble base (TPL=1, QDP=2, QTN=3, QTN+1=4…).
+  const mult = (occupancyPersons(occ) ?? 3) - 2;
 
   const computePair = (
     neto: string | null,
@@ -602,9 +605,15 @@ const DOUBLE_OCCUPANCIES = new Set(["DBL", "DOBLE"]);
 function expandOccupancy(
   extraction: ExtractedContract,
   warnings: string[],
-  options?: { allowQuadruple?: boolean },
+  options?: {
+    allowQuadruple?: boolean;
+    allowQuintuple?: boolean;
+    /** Mayor ocupación (personas) que el brief declara para el producto. */
+    maxPersonsFor?: (productName: string) => number | null;
+  },
 ): ExtractedContract {
   const allowQuadruple = options?.allowQuadruple !== false;
+  const allowQuintuple = options?.allowQuintuple !== false;
   // PASO 1 — elegir UNA sola fila ancla por grupo product × season desde la
   // que se expande a TPL/QDP. Antes expandíamos por CADA fila base (SGL y
   // DBL), lo que duplicaba TPL/QDP. La ancla correcta es la DOBLE (triple =
@@ -669,10 +678,23 @@ function expandOccupancy(
           productBaseName(row.product_name ?? ""),
         ));
 
+    // Más allá de QDP sólo si el brief declara esa capacidad para el producto
+    // (ej. villa de 8 personas → QTN, QTN+1, QTN+2, QTN+3).
+    const declaredMax = options?.maxPersonsFor?.(row.product_name ?? "") ?? null;
+    const maxPersons =
+      wantsQdp && allowQuintuple && declaredMax !== null && declaredMax > 4
+        ? declaredMax
+        : wantsQdp
+          ? 4
+          : 3;
+    const targets: string[] = [];
+    for (let n = 3; n <= maxPersons; n += 1) {
+      const code = occupancyCodeForPersons(n);
+      if (code) targets.push(code);
+    }
+
     const existing = occsByGroup.get(groupKey) ?? new Set();
-    for (const target of wantsQdp
-      ? (["TPL", "QDP"] as const)
-      : (["TPL"] as const)) {
+    for (const target of targets) {
       if (existing.has(target)) continue;
       newRows.push(buildOccupancyRow(row, target, addl));
       newPages.push({ ...pages, ocupacion: "calculado" });
@@ -686,11 +708,17 @@ function expandOccupancy(
   const anyQdp = newRows.some(
     (r) => (r.ocupacion ?? "").toUpperCase() === "QDP",
   );
-  const occLabel = anyQdp ? "triple (TPL) y cuádruple (QDP)" : "triple (TPL)";
+  const anyQtn = newRows.some((r) => isQuintupleOrMore(r.ocupacion));
+  const occLabel = anyQtn
+    ? "triple (TPL), cuádruple (QDP) y quíntuple o más (QTN, QTN+N)"
+    : anyQdp
+      ? "triple (TPL) y cuádruple (QDP)"
+      : "triple (TPL)";
   warnings.push(
     `Se generaron ${expanded} fila(s) de ocupación ${occLabel} calculadas ` +
       `a partir de la tarifa por persona adicional (base doble + 1× para TPL` +
       (anyQdp ? ", + 2× para QDP" : "") +
+      (anyQtn ? ", + 3× para QTN, + (3+N)× para QTN+N" : "") +
       `), una sola vez por producto × temporada. Revisá los montos en Step 2.`,
   );
 
@@ -895,11 +923,29 @@ export function validateExtraction(
     }
   }
 
-  // Expansión de ocupación: materializa filas TPL (y QDP si aplica) desde la
-  // tarifa por persona adicional ANTES del resto de las validaciones.
+  // Canonicaliza "QTN + 1" / "qtn+1" → "QTN+1" (6+ personas).
+  if (extraction.rows.some((r) => r.ocupacion && /qtn/i.test(r.ocupacion))) {
+    extraction = {
+      ...extraction,
+      rows: extraction.rows.map((r) =>
+        r.ocupacion && /qtn/i.test(r.ocupacion)
+          ? { ...r, ocupacion: normalizeOccupancyCode(r.ocupacion) }
+          : r,
+      ),
+    };
+  }
+
+  // Expansión de ocupación: materializa filas TPL (y QDP/QTN/QTN+N si aplica)
+  // desde la tarifa por persona adicional ANTES del resto de las validaciones.
   const occupancyPolicy = detectOccupancyPolicy(brief ?? null, extraction);
+  const occupancySpecs = brief
+    ? collectProductOccupancySpecs(brief, extraction)
+    : [];
   extraction = expandOccupancy(extraction, warnings, {
     allowQuadruple: occupancyPolicy.quadrupleAllowed,
+    allowQuintuple: occupancyPolicy.quintupleAllowed,
+    maxPersonsFor: (product) =>
+      maxDeclaredOccupancyPersons(product, occupancySpecs),
   });
   extraction = removeForbiddenOccupancyRows(
     extraction,

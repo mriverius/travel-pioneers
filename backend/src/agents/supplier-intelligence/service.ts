@@ -22,7 +22,10 @@ import {
   SUPPLIER_INTELLIGENCE_SYSTEM_PROMPT,
 } from "./prompts/index.js";
 import { validateExtraction, normalizeCurrency } from "./validators.js";
-import { enrichBriefOccupancies } from "./catalogRules.js";
+import {
+  enrichBriefOccupancies,
+  normalizeOccupancyCode,
+} from "./catalogRules.js";
 import type {
   BriefChatMessage,
   Confianza,
@@ -1182,12 +1185,34 @@ function coerceOccupanciesByProduct(v: unknown): ProductOccupancySpec[] {
     if (!item || typeof item !== "object") continue;
     const r = item as Record<string, unknown>;
     const product = stringOrNull(r.product);
-    const occupancy_codes = stringArray(r.occupancy_codes).map((c) =>
-      c.toUpperCase(),
+    const occupancy_codes = stringArray(r.occupancy_codes).map(
+      normalizeOccupancyCode,
     );
     if (product && occupancy_codes.length > 0) {
       out.push({ product, occupancy_codes });
     }
+  }
+  return out;
+}
+
+function coerceOpenQuestions(v: unknown): ContractBrief["open_questions"] {
+  if (!Array.isArray(v)) return [];
+  const out: ContractBrief["open_questions"] = [];
+  for (const item of v) {
+    if (!item || typeof item !== "object") continue;
+    const r = item as Record<string, unknown>;
+    const question = stringOrNull(r.question);
+    if (!question) continue;
+    out.push({
+      question,
+      context: stringOrNull(r.context) ?? "",
+      assumption: stringOrNull(r.assumption) ?? "",
+      suggested_answer:
+        r.suggested_answer === "yes" || r.suggested_answer === "no"
+          ? r.suggested_answer
+          : null,
+      topic: stringOrNull(r.topic) ?? "other",
+    });
   }
   return out;
 }
@@ -1327,7 +1352,7 @@ export function coerceBrief(input: unknown): ContractBrief {
     notes: stringOrNull(r.notes),
     tipo_unidad:
       r.tipo_unidad === "N" || r.tipo_unidad === "S" ? r.tipo_unidad : null,
-    occupancy_codes: stringArray(r.occupancy_codes).map((c) => c.toUpperCase()),
+    occupancy_codes: stringArray(r.occupancy_codes).map(normalizeOccupancyCode),
     occupancies_by_product: coerceOccupanciesByProduct(r.occupancies_by_product),
     max_adults_per_room: numberOrNull(r.max_adults_per_room),
     quadruple_allowed:
@@ -1336,6 +1361,7 @@ export function coerceBrief(input: unknown): ContractBrief {
         : r.quadruple_allowed === true
           ? true
           : null,
+    open_questions: coerceOpenQuestions(r.open_questions),
   };
   const logicSummary =
     stringOrNull(r.logic_summary) ?? buildLogicSummaryFallback(base);
@@ -1836,6 +1862,14 @@ function mergeBriefsForValidation(
         ? primary.additional_person
         : (secondary.find((b) => b.additional_person.length > 0)
             ?.additional_person ?? primary.additional_person),
+    // Dudas de todos los documentos, sin repetir la misma pregunta.
+    open_questions: [
+      ...new Map(
+        all
+          .flatMap((b) => b.open_questions ?? [])
+          .map((q) => [q.question.trim().toLowerCase(), q] as const),
+      ).values(),
+    ],
     // Si algún brief tiene QDP explícito, no dejar que "false" del rate sheet lo anule.
     quadruple_allowed: quadrupleForbiddenEverywhere
       ? false

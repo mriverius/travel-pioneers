@@ -1311,6 +1311,16 @@ export interface ContractConfigVariables {
   }>;
   max_adults_per_room?: number | null;
   quadruple_allowed?: boolean | null;
+  /** Dudas de la IA: se preguntan de a una en el Paso 2 antes de extraer. */
+  open_questions?: ConfigOpenQuestion[];
+}
+
+export interface ConfigOpenQuestion {
+  question: string;
+  context: string;
+  assumption: string;
+  suggested_answer: "yes" | "no" | null;
+  topic: string;
 }
 
 export interface AnalyzeBriefMeta {
@@ -1786,7 +1796,7 @@ export const api = {
   supplierIntelligence: {
     /**
      * Upload one or more contract documents (PDF / Word / Excel) and get a
-     * single merged extraction back. Each file ≤ 20 MB; backend caps the
+     * single merged extraction back. Each file ≤ 100 MB; backend caps the
      * number of files per request (currently 10) so the combined Claude
      * payload stays within token + size limits.
      *

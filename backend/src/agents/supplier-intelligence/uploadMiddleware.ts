@@ -3,7 +3,12 @@ import multer, { MulterError } from "multer";
 import ApiError from "../../utils/ApiError.js";
 import { detectDocKind } from "./extractors/index.js";
 
-export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // 20 MB per spec
+/**
+ * Tope de subida por archivo. Los PDFs por encima de `PDF_TARGET_BYTES` se
+ * recomprimen con Ghostscript antes de mandarlos a Claude (ver
+ * extractors/pdfCompress.ts); el resto de los formatos se convierte a texto.
+ */
+export const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 
 /**
  * Maximum number of documents allowed in a single extract request. Picked to
@@ -16,7 +21,7 @@ export const MAX_UPLOAD_FILES = 10;
 /**
  * We use `memoryStorage` intentionally:
  *   - never hits disk (no cleanup, no tmp-file leaks),
- *   - contracts are small (<20 MB) so RAM is not a concern,
+ *   - files are capped at MAX_UPLOAD_BYTES, so RAM stays bounded,
  *   - lets us hand the raw buffer directly to Claude / mammoth / sheetjs.
  */
 const storage = multer.memoryStorage();
@@ -79,7 +84,7 @@ export const handleContractUpload: RequestHandler = (
         next(
           new ApiError(
             413,
-            `Cada archivo debe pesar 20 MB o menos.`,
+            `Cada archivo debe pesar ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB o menos.`,
           ),
         );
         return;

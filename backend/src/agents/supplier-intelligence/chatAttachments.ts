@@ -77,7 +77,7 @@ export const handleChatUpload: RequestHandler = (
     if (err) {
       if (err instanceof MulterError) {
         if (err.code === "LIMIT_FILE_SIZE") {
-          next(new ApiError(413, "Cada archivo debe pesar 20 MB o menos."));
+          next(new ApiError(413, `Cada archivo debe pesar ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB o menos.`));
           return;
         }
         if (err.code === "LIMIT_FILE_COUNT" || err.code === "LIMIT_UNEXPECTED_FILE") {

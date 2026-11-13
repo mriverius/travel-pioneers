@@ -3,6 +3,7 @@ import type { PreparedDocument, SupportedDocKind } from "../types.js";
 import { prepareFromDocx } from "./docx.js";
 import { prepareFromImage, resolveImageMediaType } from "./image.js";
 import { prepareFromPdf } from "./pdf.js";
+import { shrinkPdfIfNeeded } from "./pdfCompress.js";
 import { prepareFromXlsx } from "./xlsx.js";
 
 /**
@@ -62,6 +63,35 @@ export function detectDocKind(
 }
 
 /**
+ * Límite práctico del payload de documentos por request a Anthropic (~32 MB
+ * en total, con margen para system prompt, brief e instrucciones).
+ */
+const REQUEST_DOCS_BUDGET_BYTES = 30 * 1024 * 1024;
+
+/** La API rechaza imágenes de más de 5 MB. */
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Corta antes de llamar a la API si la suma de documentos no entra en un
+ * request: mejor un 413 claro que un error opaco de Anthropic a mitad del run.
+ */
+export function assertDocsFitRequest(docs: PreparedDocument[]): void {
+  const total = docs.reduce(
+    (n, d) => n + (d.kind === "text" ? Buffer.byteLength(d.text) : d.base64.length),
+    0,
+  );
+  if (total > REQUEST_DOCS_BUDGET_BYTES) {
+    throw new ApiError(
+      413,
+      `Los documentos suman ${(total / (1024 * 1024)).toFixed(1)} MB una vez ` +
+        "preparados y superan lo que acepta la IA en un solo análisis " +
+        `(${REQUEST_DOCS_BUDGET_BYTES / (1024 * 1024)} MB). Subí menos ` +
+        "documentos a la vez o quitá los que no tengan tarifas ni políticas.",
+    );
+  }
+}
+
+/**
  * Dispatch to the right extractor for this document kind. PDFs e imágenes
  * van como base64 (Claude las lee nativamente — `document` block para PDF,
  * `image` block para JPEG/PNG/etc.); Word / Excel se convierten a texto
@@ -76,12 +106,21 @@ export async function prepareDocument(
   try {
     switch (kind) {
       case "pdf":
-        return prepareFromPdf(buffer);
+        // PDFs pesados (manuales con fotos) se recomprimen para entrar en el
+        // límite por request de la API.
+        return prepareFromPdf(await shrinkPdfIfNeeded(buffer, originalName));
       case "docx":
         return await prepareFromDocx(buffer);
       case "xlsx":
         return prepareFromXlsx(buffer);
       case "image":
+        if (buffer.length > MAX_IMAGE_BYTES) {
+          throw new ApiError(
+            413,
+            `«${originalName ?? "imagen"}» pesa ${(buffer.length / (1024 * 1024)).toFixed(1)} MB; ` +
+              "las imágenes deben pesar 5 MB o menos. Reducila o exportala como PDF.",
+          );
+        }
         // El media_type específico (image/jpeg vs image/png …) tiene que
         // viajar al bloque `image` de Anthropic, así que se resuelve acá
         // a partir del MIME + extensión que vienen del upload.
