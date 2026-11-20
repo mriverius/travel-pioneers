@@ -113,6 +113,15 @@ interface RequestOptions extends Omit<RequestInit, "body"> {
 const CLIENT_TIMEOUT_MESSAGE =
   "La solicitud tardó demasiado. Intenta de nuevo o usa un archivo más pequeño.";
 
+/**
+ * Timeout para requests que suben los documentos y los procesan en la misma
+ * conexión (brief, refine, arranque de extract). Con PDFs de hasta 100 MB el
+ * upload + la recompresión con Ghostscript (hasta 3 pasadas) + el pase de
+ * Claude superan con holgura los 3 min. Queda por debajo del `maxDuration`
+ * del proxy (15 min) y del `requestTimeout` del backend.
+ */
+const HEAVY_UPLOAD_TIMEOUT_MS = 14 * 60 * 1000;
+
 const NETWORK_FAILURE_MESSAGE =
   "La conexión con el servidor se interrumpió durante la extracción. " +
   "Los contratos extensos pueden tardar varios minutos — mantené esta pestaña abierta e intentá de nuevo.";
@@ -465,11 +474,12 @@ function sleep(ms: number): Promise<void> {
 async function startAndPollExtraction(
   form: FormData,
 ): Promise<ExtractContractResponse> {
-  // 1) Arranca el job. Es solo el upload + arranque → 3 min holgan de sobra.
+  // 1) Arranca el job. Incluye el upload y la preparación de los documentos
+  // (recompresión de PDFs pesados) antes de devolver el job id.
   const start = await requestForm<ExtractJobStartResponse>(
     "/api/supplier-intelligence/extract",
     form,
-    { auth: true, timeoutMs: 3 * 60 * 1000 },
+    { auth: true, timeoutMs: HEAVY_UPLOAD_TIMEOUT_MS },
   );
   const jobId = start.job_id;
   if (!jobId) {
@@ -1852,8 +1862,8 @@ export const api = {
      * Fase 1 del flujo gated: sube los documentos y devuelve las Variables de
      * Configuración (reglas globales: IVA, comisión, temporadas, bancos) para
      * que el usuario las confirme/corrija antes de la extracción completa.
-     * Mucho más rápido que `extract` (un solo pase de Sonnet, sin filas), así
-     * que un timeout de 3 minutos es holgado.
+     * Mucho más rápido que `extract` (un solo pase de Sonnet, sin filas), pero
+     * con PDFs pesados el upload + la recompresión pueden tardar varios minutos.
      */
     /**
      * Pre-scan determinístico de TODOS los adjuntos (sin IA): proveedor
@@ -1867,7 +1877,7 @@ export const api = {
       return requestForm<{ success: true; scan: PreScanResult }>(
         "/api/supplier-intelligence/pre-scan",
         form,
-        { auth: true, timeoutMs: 60 * 1000, signal: opts.signal },
+        { auth: true, timeoutMs: 3 * 60 * 1000, signal: opts.signal },
       );
     },
     analyzeBrief(files: File[], input: ExtractContractInput) {
@@ -1895,7 +1905,7 @@ export const api = {
       return requestForm<AnalyzeBriefResponse>(
         "/api/supplier-intelligence/analyze-brief",
         form,
-        { auth: true, timeoutMs: 3 * 60 * 1000 },
+        { auth: true, timeoutMs: HEAVY_UPLOAD_TIMEOUT_MS },
       );
     },
     /**
@@ -1937,7 +1947,7 @@ export const api = {
       return requestForm<RefineBriefResponse>(
         "/api/supplier-intelligence/refine-brief",
         form,
-        { auth: true, timeoutMs: 3 * 60 * 1000 },
+        { auth: true, timeoutMs: HEAVY_UPLOAD_TIMEOUT_MS },
       );
     },
     /**
